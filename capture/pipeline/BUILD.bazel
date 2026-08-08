@@ -1,0 +1,14 @@
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+cc_test(
+    name = "capture_pipeline_integration_test",
+    size = "small",
+    srcs = ["capture_pipeline_integration_test.cc"],
+    deps = [
+        "//capture/clip:clip_window_planner",
+        "//capture/core:device_clock_mapper",
+        "//capture/core:pooled_raw_frame_ring",
+        "//capture/session:capture_session_coordinator",
+        "//capture/trigger:impact_detector",
+    ],
+)

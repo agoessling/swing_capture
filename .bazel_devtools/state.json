@@ -1,0 +1,101 @@
+{
+  "entries": {
+    ".bazel_devtools/basedpyright.json": {
+      "base": "{\n  \"typeCheckingMode\": \"all\",\n  \"reportUnusedCallResult\": \"none\",\n  \"exclude\": [\n    \"**/__pycache__\",\n    \"**/.cache\",\n    \"**/.git\",\n    \"**/.ruff_cache\",\n    \"**/bazel-*\",\n    \"**/external\"\n  ]\n}\n",
+      "block_id": null,
+      "digest": "d0dee023080fc87547b1c5b24515d94aa0c558d036c7e29c36aa318ea1e8cbbc",
+      "ownership": "managed_file",
+      "template_version": "0.1.0"
+    },
+    ".bazel_devtools/ruff.toml": {
+      "base": "line-length = 100\n\n[lint]\nselect = [\"ALL\"]\nignore = [\n    # These rules conflict with Ruff's formatter.\n    \"COM812\",\n    \"ISC001\",\n    # A repository-level license is sufficient; per-file notices add churn.\n    \"CPY001\",\n    # Bazel package boundaries do not imply Python package boundaries.\n    \"INP001\",\n    # Assertions and unittest assertion helpers are valid project policy.\n    \"PT009\",\n    \"PT027\",\n    \"S101\",\n    # These security audits are low-signal for Bazel-owned tool invocations\n    # and Bazel-generated XML.\n    \"S314\",\n    \"S603\",\n    \"S607\",\n    # CLI tools intentionally use print as their user interface.\n    \"T201\",\n]\n\n[lint.pydocstyle]\nconvention = \"google\"\n\n[format]\ndocstring-code-format = true\nline-ending = \"lf\"\n",
+      "block_id": null,
+      "digest": "8af87c889cd2f77dd1731c68de009b97cf3bca4100c421b3a936b376b1481ed9",
+      "ownership": "managed_file",
+      "template_version": "0.1.0"
+    },
+    ".bazelrc": {
+      "base": "try-import %workspace%/.bazelrc.bazel_devtools\n",
+      "block_id": "bazelrc-import",
+      "digest": "5d9c75762a61ea79b870ff32a162077df36f3f13c614ce5e3ddd618c9e2c580c",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    ".bazelrc.bazel_devtools": {
+      "base": "# Do not synthesize empty __init__.py files in Python runfiles trees.\ncommon --incompatible_default_to_explicit_init_py\n\n# Compile and check manual tests selected by wildcard target patterns, but do\n# not execute them. Manual non-test targets retain Bazel's normal exclusion.\nbuild --build_manual_tests\n\n# Apply checks to every target requested by `bazel test`.\ntest --aspects=//tools/bazel_devtools:aspects.bzl%ruff\ntest --aspects=//tools/bazel_devtools:aspects.bzl%basedpyright\ntest --aspects=//tools/bazel_devtools:aspects.bzl%ruff_format\ntest --aspects=//tools/bazel_devtools:aspects.bzl%clang_tidy\ntest --aspects=//tools/bazel_devtools:aspects.bzl%clang_format\ntest --@@aspect_rules_lint+//lint:fail_on_violation\n",
+      "block_id": "checks",
+      "digest": "b93f7d1f86b51c07d20e914ae7a72fa23933b1fed5705e58c924ff8f2ac19f67",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    ".clang-format": {
+      "base": "BasedOnStyle: Google\nColumnLimit: 100\nDerivePointerAlignment: false\nPointerAlignment: Right\n",
+      "block_id": "clang-format-policy",
+      "digest": "7cb6b1ffa8797e4e2f5ad82d3ca7e94e9761affaf135a8bfef32ea55f084b9e1",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    ".clang-tidy": {
+      "base": "# Begin with no checks, enable the reviewed general-purpose families, then\n# remove their documented platform, API-design, and high-noise diagnostics.\n# clang-diagnostic-* surfaces only diagnostics enabled by the compile flags.\n# Bazel's host C++ toolchain intentionally redefines __DATE__, __TIME__, and\n# __TIMESTAMP__ to deterministic values, so that one non-source diagnostic is\n# excluded without suppressing any other compiler warning.\n# Analyzer exclusions remove unsupported platform/domain checks and ABI-padding\n# policy. C++/Google/misc exclusions remove subjective architecture, field,\n# function-size, TODO, recursion, and magic-number policy. Unchecked-container\n# access is excluded because LLVM 22 flags ordinary indexed access even when\n# size invariants are established, while C++20 span has no at() alternative.\n# Modernize/readability exclusions avoid API or expression-style rewrites. In particular,\n# readability-math-missing-parentheses requires redundant parentheses around\n# conventional mathematical precedence, making expressions noisier without\n# identifying a defect. Performance/portability exclusions avoid enum-layout\n# and system-header deployment policy.\n# Paired aliases are excluded under every selected family that registers them.\nChecks: >-\n  -*,\n  clang-diagnostic-*,\n  clang-analyzer-*,\n  bugprone-*,\n  cert-*,\n  concurrency-*,\n  cppcoreguidelines-*,\n  google-*,\n  misc-*,\n  modernize-*,\n  performance-*,\n  portability-*,\n  readability-*,\n\n  -clang-diagnostic-builtin-macro-redefined,\n\n  -clang-analyzer-fuchsia.*,\n  -clang-analyzer-optin.mpi.*,\n  -clang-analyzer-optin.osx.*,\n  -clang-analyzer-optin.performance.GCDAntipattern,\n  -clang-analyzer-optin.performance.Padding,\n  -clang-analyzer-osx.*,\n  -clang-analyzer-webkit.*,\n\n  -cppcoreguidelines-avoid-do-while,\n  -cppcoreguidelines-avoid-magic-numbers,\n  -cppcoreguidelines-macro-to-enum,\n  -cppcoreguidelines-non-private-member-variables-in-classes,\n  -cppcoreguidelines-owning-memory,\n  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,\n  -cppcoreguidelines-pro-bounds-constant-array-index,\n\n  -google-objc-*,\n  -google-readability-function-size,\n  -google-readability-todo,\n\n  -misc-no-recursion,\n  -misc-non-private-member-variables-in-classes,\n\n  -modernize-macro-to-enum,\n  -modernize-min-max-use-initializer-list,\n  -modernize-pass-by-value,\n  -modernize-raw-string-literal,\n  -modernize-return-braced-init-list,\n  -modernize-use-constraints,\n  -modernize-use-trailing-return-type,\n\n  -performance-enum-size,\n  -portability-restrict-system-includes,\n\n  -readability-convert-member-functions-to-static,\n  -readability-function-size,\n  -readability-identifier-length,\n  -readability-magic-numbers,\n  -readability-math-missing-parentheses\nWarningsAsErrors: '*'\nHeaderFilterRegex: '.*'\nCheckOptions:\n  # LLVM classifies static const/constexpr members as ClassConstant, so\n  # these access-specific categories enforce state suffixes without changing\n  # valid Google constants such as `static constexpr int kFrameRate`.\n  readability-identifier-naming.PrivateMemberCase: lower_case\n  readability-identifier-naming.PrivateMemberSuffix: '_'\n  readability-identifier-naming.ProtectedMemberCase: lower_case\n  readability-identifier-naming.ProtectedMemberSuffix: '_'\n  readability-identifier-naming.PublicMemberCase: lower_case\n",
+      "block_id": "clang-tidy-policy",
+      "digest": "9adc3825c874c384bc9dc7ad23f58e12bdc1311596dd002c63abf477ed9a11d0",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    ".github/workflows/bazel-devtools.yml": {
+      "base": "name: Bazel presubmit\n\non:\n  pull_request:\n  push:\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: bazel-presubmit-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: true\n\njobs:\n  test:\n    name: Bazel test\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n        with:\n          persist-credentials: false\n      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0\n        with:\n          bazelisk-cache: true\n          disk-cache: bazel-presubmit\n          repository-cache: true\n          cache-save: ${{ github.event_name != 'pull_request' }}\n      - name: Test and check Bazel targets\n        run: bazel test //... --test_output=errors\n",
+      "block_id": null,
+      "digest": "8350396d7aefd0830abcd7cf870c13a1860d0f9e0e91b811baccb2adf41e754a",
+      "ownership": "managed_file",
+      "template_version": "0.1.0"
+    },
+    ".gitignore": {
+      "base": "/compile_commands.json\n/pyrightconfig.json\n/rust-project.json\n/.cache/\n/.ruff_cache/\n/external\n/.bazel_devtools/updates/\n",
+      "block_id": "generated-ide-files",
+      "digest": "3fa710d1fc96670367946cedcf2bda00cd0545db71ee92b32136ee1253decbbf",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    ".pre-commit-config.yaml": {
+      "base": "minimum_pre_commit_version: \"4.6.0\"\nrepos:\n  - repo: local\n    hooks:\n      - id: bazel-devtools-check\n        name: bazel_devtools checks\n        language: system\n        entry: bazel\n        args:\n          - test\n          - //...\n          - --test_output=errors\n        pass_filenames: false\n        always_run: true\n        require_serial: true\n        stages: [pre-commit]\n",
+      "block_id": null,
+      "digest": "f31d46c86dff842637328472feb3bd54ff274d253295c67dd382c73fff1d5351",
+      "ownership": "managed_file",
+      "template_version": "0.1.0"
+    },
+    "BUILD.bazel": {
+      "base": "exports_files([\n    \".bazel_devtools/basedpyright.json\",\n    \".bazel_devtools/ruff.toml\",\n    \".clang-format\",\n    \".clang-tidy\",\n    \".github/workflows/bazel-devtools.yml\",\n    \".pre-commit-config.yaml\",\n    \".ruff.toml\",\n    \"basedpyright.json\",\n])\n\nalias(\n    name = \"format\",\n    actual = \"@bazel_devtools//tools:format\",\n)\n\nalias(\n    name = \"ide-sync\",\n    actual = \"@bazel_devtools//tools:ide_sync\",\n)\n\nalias(\n    name = \"install-hooks\",\n    actual = \"@bazel_devtools//tools:install-hooks\",\n)\n\nalias(\n    name = \"pre-commit\",\n    actual = \"@bazel_devtools//tools:pre-commit\",\n)\n",
+      "block_id": "root-aliases",
+      "digest": "c9ec20a43b5a3945b4053914c752b887a7a1d0bc399b0d05c9633da7c8718924",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    "MODULE.bazel": {
+      "base": "bazel_dep(name = \"toolchains_llvm\", version = \"1.8.0\", dev_dependency = True)\nbazel_dep(name = \"hedron_compile_commands\", dev_dependency = True)\ngit_override(\n    module_name = \"hedron_compile_commands\",\n    commit = \"abb61a688167623088f8768cc9264798df6a9d10\",\n    remote = \"https://github.com/hedronvision/bazel-compile-commands-extractor.git\",\n)\n\nbazel_devtools_llvm = use_extension(\n    \"@toolchains_llvm//toolchain/extensions:llvm.bzl\",\n    \"llvm\",\n    dev_dependency = True,\n)\nbazel_devtools_llvm.toolchain(\n    name = \"bazel_devtools_llvm_toolchain\",\n    llvm_version = \"22.1.6\",\n)\nuse_repo(\n    bazel_devtools_llvm,\n    \"bazel_devtools_llvm_toolchain\",\n    \"bazel_devtools_llvm_toolchain_llvm\",\n)\n",
+      "block_id": "ide-dependencies",
+      "digest": "9726be42bb94681cb48ae9ebaca97ce730aca95b029d63e66e51c5f9508ca7b4",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    "tools/bazel_devtools/BUILD.bazel": {
+      "base": "load(\"@bazel_devtools//tools:defs.bzl\", \"bazel_devtools_formatters\", \"tool_binary\")\n\npackage(default_visibility = [\"//visibility:public\"])\n\ntool_binary(\n    name = \"clang_format\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-format\",\n)\n\ntool_binary(\n    name = \"clang_tidy\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-tidy\",\n)\n\nbazel_devtools_formatters(\n    name = \"formatters\",\n    languages = [\n        \"python\",\n        \"cpp\",\n    ],\n    clang_format = \":clang_format\",\n)\n",
+      "block_id": "tools",
+      "digest": "2ba9a97ff9a2652a35fa6d322c04a57bd2dec1135f92f9b5da44d0fb27de7ee6",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    "tools/bazel_devtools/aspects.bzl": {
+      "base": "load(\n    \"@bazel_devtools//checks:python.bzl\",\n    \"basedpyright_aspect\",\n    \"ruff_format_aspect\",\n    \"ruff_lint_aspect\",\n)\n\nload(\n    \"@bazel_devtools//checks:cpp.bzl\",\n    \"clang_format_aspect\",\n    \"lint_clang_tidy_aspect\",\n)\n\nruff = ruff_lint_aspect(\n    binary = Label(\"@bazel_devtools//tools:ruff\"),\n    configs = [\n        Label(\"//:.ruff.toml\"),\n        Label(\"//:.bazel_devtools/ruff.toml\"),\n    ],\n)\n\nbasedpyright = basedpyright_aspect(\n    binary = Label(\"@bazel_devtools//tools:basedpyright\"),\n    config = Label(\"//:basedpyright.json\"),\n    configs = [Label(\"//:.bazel_devtools/basedpyright.json\")],\n)\n\nruff_format = ruff_format_aspect(\n    binary = Label(\"@bazel_devtools//tools:ruff\"),\n    configs = [\n        Label(\"//:.ruff.toml\"),\n        Label(\"//:.bazel_devtools/ruff.toml\"),\n    ],\n)\n\nclang_tidy = lint_clang_tidy_aspect(\n    binary = Label(\"//tools/bazel_devtools:clang_tidy\"),\n    global_config = [Label(\"//:.clang-tidy\")],\n    lint_target_headers = True,\n)\n\nclang_format = clang_format_aspect(\n    binary = Label(\"//tools/bazel_devtools:clang_format\"),\n    config = Label(\"//:.clang-format\"),\n)\n",
+      "block_id": "aspects",
+      "digest": "0a30a0b0a385ae737e57f571eddb29229d69c15d8016cab13ad3eb89f77d81e8",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    }
+  },
+  "installed_version": "0.1.0",
+  "languages": [
+    "python",
+    "cpp"
+  ],
+  "schema_version": 2
+}

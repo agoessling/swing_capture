@@ -1,0 +1,59 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+cc_library(
+    name = "camera_source",
+    hdrs = ["camera_source.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_library(
+    name = "device_clock_mapper",
+    srcs = ["device_clock_mapper.cc"],
+    hdrs = ["device_clock_mapper.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_library(
+    name = "pooled_raw_frame_ring",
+    srcs = ["pooled_raw_frame_ring.cc"],
+    hdrs = ["pooled_raw_frame_ring.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [":camera_source"],
+)
+
+cc_library(
+    name = "raw_frame_ring",
+    srcs = ["raw_frame_ring.cc"],
+    hdrs = ["raw_frame_ring.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [":camera_source"],
+)
+
+cc_test(
+    name = "camera_source_test",
+    size = "small",
+    srcs = ["camera_source_test.cc"],
+    deps = [":camera_source"],
+)
+
+cc_test(
+    name = "raw_frame_ring_test",
+    size = "small",
+    srcs = ["raw_frame_ring_test.cc"],
+    deps = [":raw_frame_ring"],
+)
+
+cc_test(
+    name = "pooled_raw_frame_ring_test",
+    size = "small",
+    srcs = ["pooled_raw_frame_ring_test.cc"],
+    deps = [":pooled_raw_frame_ring"],
+)
+
+cc_test(
+    name = "device_clock_mapper_test",
+    size = "small",
+    srcs = ["device_clock_mapper_test.cc"],
+    deps = [":device_clock_mapper"],
+)

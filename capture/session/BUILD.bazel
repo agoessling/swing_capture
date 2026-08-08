@@ -1,0 +1,17 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+cc_library(
+    name = "capture_session_coordinator",
+    srcs = ["capture_session_coordinator.cc"],
+    hdrs = ["capture_session_coordinator.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = ["//capture/trigger:impact_detector"],
+)
+
+cc_test(
+    name = "capture_session_coordinator_test",
+    size = "small",
+    srcs = ["capture_session_coordinator_test.cc"],
+    deps = [":capture_session_coordinator"],
+)

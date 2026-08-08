@@ -1,0 +1,86 @@
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:clang-tidy-policy##
+# Begin with no checks, enable the reviewed general-purpose families, then
+# remove their documented platform, API-design, and high-noise diagnostics.
+# clang-diagnostic-* surfaces only diagnostics enabled by the compile flags.
+# Bazel's host C++ toolchain intentionally redefines __DATE__, __TIME__, and
+# __TIMESTAMP__ to deterministic values, so that one non-source diagnostic is
+# excluded without suppressing any other compiler warning.
+# Analyzer exclusions remove unsupported platform/domain checks and ABI-padding
+# policy. C++/Google/misc exclusions remove subjective architecture, field,
+# function-size, TODO, recursion, and magic-number policy. Unchecked-container
+# access is excluded because LLVM 22 flags ordinary indexed access even when
+# size invariants are established, while C++20 span has no at() alternative.
+# Modernize/readability exclusions avoid API or expression-style rewrites. In particular,
+# readability-math-missing-parentheses requires redundant parentheses around
+# conventional mathematical precedence, making expressions noisier without
+# identifying a defect. Performance/portability exclusions avoid enum-layout
+# and system-header deployment policy.
+# Paired aliases are excluded under every selected family that registers them.
+Checks: >-
+  -*,
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  cert-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  google-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+
+  -clang-diagnostic-builtin-macro-redefined,
+
+  -clang-analyzer-fuchsia.*,
+  -clang-analyzer-optin.mpi.*,
+  -clang-analyzer-optin.osx.*,
+  -clang-analyzer-optin.performance.GCDAntipattern,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-osx.*,
+  -clang-analyzer-webkit.*,
+
+  -cppcoreguidelines-avoid-do-while,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-macro-to-enum,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+
+  -google-objc-*,
+  -google-readability-function-size,
+  -google-readability-todo,
+
+  -misc-no-recursion,
+  -misc-non-private-member-variables-in-classes,
+
+  -modernize-macro-to-enum,
+  -modernize-min-max-use-initializer-list,
+  -modernize-pass-by-value,
+  -modernize-raw-string-literal,
+  -modernize-return-braced-init-list,
+  -modernize-use-constraints,
+  -modernize-use-trailing-return-type,
+
+  -performance-enum-size,
+  -portability-restrict-system-includes,
+
+  -readability-convert-member-functions-to-static,
+  -readability-function-size,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-math-missing-parentheses
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*'
+CheckOptions:
+  # LLVM classifies static const/constexpr members as ClassConstant, so
+  # these access-specific categories enforce state suffixes without changing
+  # valid Google constants such as `static constexpr int kFrameRate`.
+  readability-identifier-naming.PrivateMemberCase: lower_case
+  readability-identifier-naming.PrivateMemberSuffix: '_'
+  readability-identifier-naming.ProtectedMemberCase: lower_case
+  readability-identifier-naming.ProtectedMemberSuffix: '_'
+  readability-identifier-naming.PublicMemberCase: lower_case
+# ##BAZEL_DEVTOOLS_MANAGED_END:clang-tidy-policy##

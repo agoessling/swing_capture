@@ -1,0 +1,20 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+cc_library(
+    name = "clip_window_planner",
+    srcs = ["clip_window_planner.cc"],
+    hdrs = ["clip_window_planner.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [
+        "//capture/core:device_clock_mapper",
+        "//capture/trigger:impact_detector",
+    ],
+)
+
+cc_test(
+    name = "clip_window_planner_test",
+    size = "small",
+    srcs = ["clip_window_planner_test.cc"],
+    deps = [":clip_window_planner"],
+)

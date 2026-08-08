@@ -1,0 +1,66 @@
+module(
+    name = "swing_capture",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "bazel_devtools", version = "0.1.0")
+git_override(
+    module_name = "bazel_devtools",
+    commit = "ea82866ff84f63aa684cffb1514f34bf9fe2f44b",
+    remote = "https://github.com/agoessling/bazel_devtools.git",
+)
+
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "pico-sdk", version = "2.3.0")
+bazel_dep(name = "picotool", version = "2.3.0")
+bazel_dep(name = "rules_cc", version = "0.2.22")
+bazel_dep(name = "rules_python", version = "2.2.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.defaults(python_version = "3.11.14")
+python.toolchain(python_version = "3.11.14")
+
+register_toolchains(
+    "@pico-sdk//bazel/toolchain:linux-x86_64-rp2040",
+)
+
+single_version_override(
+    module_name = "pico-sdk",
+    patch_strip = 1,
+    patches = ["//third_party/pico_sdk:pico_usb_reset_dependency.patch"],
+    version = "2.3.0",
+)
+
+daheng_galaxy_sdk_repository = use_repo_rule(
+    "//third_party/daheng:repository.bzl",
+    "daheng_galaxy_sdk_repository",
+)
+
+daheng_galaxy_sdk_repository(
+    name = "daheng_galaxy_sdk",
+)
+
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:ide-dependencies##
+bazel_dep(name = "toolchains_llvm", version = "1.8.0", dev_dependency = True)
+bazel_dep(name = "hedron_compile_commands", dev_dependency = True)
+git_override(
+    module_name = "hedron_compile_commands",
+    commit = "abb61a688167623088f8768cc9264798df6a9d10",
+    remote = "https://github.com/hedronvision/bazel-compile-commands-extractor.git",
+)
+
+bazel_devtools_llvm = use_extension(
+    "@toolchains_llvm//toolchain/extensions:llvm.bzl",
+    "llvm",
+    dev_dependency = True,
+)
+bazel_devtools_llvm.toolchain(
+    name = "bazel_devtools_llvm_toolchain",
+    llvm_version = "22.1.6",
+)
+use_repo(
+    bazel_devtools_llvm,
+    "bazel_devtools_llvm_toolchain",
+    "bazel_devtools_llvm_toolchain_llvm",
+)
+# ##BAZEL_DEVTOOLS_MANAGED_END:ide-dependencies##

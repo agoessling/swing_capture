@@ -1,0 +1,17 @@
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+exports_files(["galaxy_sdk.BUILD.bazel"])
+
+py_library(
+    name = "sdk_extractor",
+    srcs = ["extract_sdk.py"],
+    visibility = ["//visibility:private"],
+)
+
+py_test(
+    name = "extract_sdk_test",
+    size = "small",
+    srcs = ["extract_sdk_test.py"],
+    deps = [":sdk_extractor"],
+)

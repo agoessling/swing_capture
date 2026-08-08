@@ -1,0 +1,72 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load(":hil_test.bzl", "daheng_dual_camera_hil_test")
+
+cc_library(
+    name = "daheng_sdk_runtime",
+    srcs = ["daheng_sdk_runtime.cc"],
+    hdrs = ["daheng_sdk_runtime.h"],
+    data = ["@daheng_galaxy_sdk//:gentl_producers"],
+    tags = ["requires-daheng-sdk"],
+    deps = ["@bazel_tools//tools/cpp/runfiles"],
+)
+
+cc_test(
+    name = "daheng_sdk_runtime_test",
+    size = "small",
+    srcs = ["daheng_sdk_runtime_test.cc"],
+    tags = ["requires-daheng-sdk"],
+    deps = [":daheng_sdk_runtime"],
+)
+
+cc_library(
+    name = "daheng_camera",
+    srcs = ["daheng_camera.cc"],
+    hdrs = ["daheng_camera.h"],
+    visibility = ["//capture:__subpackages__"],
+    tags = ["requires-daheng-sdk"],
+    deps = [
+        "//capture/core:camera_source",
+        ":daheng_sdk_runtime",
+        "@daheng_galaxy_sdk//:gxiapi",
+    ],
+)
+
+cc_binary(
+    name = "camera_probe",
+    srcs = ["camera_probe.cc"],
+    tags = ["requires-daheng-sdk"],
+    deps = [
+        "//capture/core:device_clock_mapper",
+        "//capture/core:pooled_raw_frame_ring",
+        "//capture/hil:hil_metrics",
+        "//capture/image:bayer_rg8",
+        "//capture/image:image_quality",
+        ":daheng_camera",
+    ],
+)
+
+daheng_dual_camera_hil_test(
+    name = "dual_camera_smoke_hil_test",
+    duration_seconds = 15,
+    minimum_fps_ratio = 0.98,
+    size = "medium",
+    timeout = "moderate",
+)
+
+daheng_dual_camera_hil_test(
+    name = "dual_camera_qualify_hil_test",
+    duration_seconds = 300,
+    minimum_fps_ratio = 0.99,
+    size = "large",
+    timeout = "long",
+)
+
+daheng_dual_camera_hil_test(
+    name = "dual_camera_soak_hil_test",
+    duration_seconds = 1800,
+    minimum_fps_ratio = 0.99,
+    size = "enormous",
+    timeout = "eternal",
+)

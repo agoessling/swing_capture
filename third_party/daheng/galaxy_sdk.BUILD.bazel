@@ -1,0 +1,40 @@
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:private"])
+
+_LINUX_X86_64 = [
+    "@platforms//cpu:x86_64",
+    "@platforms//os:linux",
+]
+
+cc_import(
+    name = "gxlogutil_shared",
+    shared_library = "Galaxy_camera/lib/x86_64/libgxlogutil.so",
+    target_compatible_with = _LINUX_X86_64,
+)
+
+cc_import(
+    name = "gxiapi_shared",
+    shared_library = "Galaxy_camera/lib/x86_64/libgxiapi.so",
+    target_compatible_with = _LINUX_X86_64,
+)
+
+cc_library(
+    name = "gxiapi",
+    hdrs = glob(["Galaxy_camera/inc/**/*.h"]),
+    strip_include_prefix = "Galaxy_camera/inc",
+    target_compatible_with = _LINUX_X86_64,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":gxiapi_shared",
+        ":gxlogutil_shared",
+    ],
+)
+
+filegroup(
+    name = "gentl_producers",
+    srcs = ["Galaxy_camera/lib/x86_64/GxU3VTL.cti"],
+    target_compatible_with = _LINUX_X86_64,
+    visibility = ["//visibility:public"],
+)

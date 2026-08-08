@@ -1,0 +1,12 @@
+{
+  "typeCheckingMode": "all",
+  "reportUnusedCallResult": "none",
+  "exclude": [
+    "**/__pycache__",
+    "**/.cache",
+    "**/.git",
+    "**/.ruff_cache",
+    "**/bazel-*",
+    "**/external"
+  ]
+}

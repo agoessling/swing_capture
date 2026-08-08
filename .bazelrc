@@ -1,0 +1,28 @@
+common --enable_bzlmod
+common --announce_rc
+try-import %workspace%/.bazelrc.local
+
+build --incompatible_strict_action_env
+build --show_timestamps
+build --cxxopt=-std=c++20
+
+test --test_output=errors
+# Several small dependency-free test binaries use assert-style checks.
+# Keep those checks active even when tests are run with --compilation_mode=opt.
+test --copt=-UNDEBUG
+
+build:asan --strip=never
+build:asan --build_tag_filters=-no-host-sanitizer
+build:asan --copt=-fsanitize=address
+build:asan --copt=-fno-omit-frame-pointer
+build:asan --linkopt=-fsanitize=address
+
+build:ubsan --strip=never
+build:ubsan --build_tag_filters=-no-host-sanitizer
+build:ubsan --copt=-fsanitize=undefined
+build:ubsan --copt=-fno-omit-frame-pointer
+build:ubsan --linkopt=-fsanitize=undefined
+
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:bazelrc-import##
+try-import %workspace%/.bazelrc.bazel_devtools
+# ##BAZEL_DEVTOOLS_MANAGED_END:bazelrc-import##

@@ -1,0 +1,16 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+py_binary(
+    name = "run_unattended_hil",
+    srcs = ["run_unattended_hil.py"],
+    legacy_create_init = False,
+)
+
+py_test(
+    name = "unattended_hil_test",
+    size = "small",
+    srcs = ["unattended_hil_test.py"],
+    legacy_create_init = False,
+    deps = [":run_unattended_hil"],
+)

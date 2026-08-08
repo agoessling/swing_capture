@@ -1,0 +1,34 @@
+# Workspace root package marker.
+
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:root-aliases##
+exports_files([
+    ".bazel_devtools/basedpyright.json",
+    ".bazel_devtools/ruff.toml",
+    ".clang-format",
+    ".clang-tidy",
+    ".github/workflows/bazel-devtools.yml",
+    ".pre-commit-config.yaml",
+    ".ruff.toml",
+    "basedpyright.json",
+])
+
+alias(
+    name = "format",
+    actual = "@bazel_devtools//tools:format",
+)
+
+alias(
+    name = "ide-sync",
+    actual = "@bazel_devtools//tools:ide_sync",
+)
+
+alias(
+    name = "install-hooks",
+    actual = "@bazel_devtools//tools:install-hooks",
+)
+
+alias(
+    name = "pre-commit",
+    actual = "@bazel_devtools//tools:pre-commit",
+)
+# ##BAZEL_DEVTOOLS_MANAGED_END:root-aliases##

@@ -1,0 +1,16 @@
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:checks##
+# Do not synthesize empty __init__.py files in Python runfiles trees.
+common --incompatible_default_to_explicit_init_py
+
+# Compile and check manual tests selected by wildcard target patterns, but do
+# not execute them. Manual non-test targets retain Bazel's normal exclusion.
+build --build_manual_tests
+
+# Apply checks to every target requested by `bazel test`.
+test --aspects=//tools/bazel_devtools:aspects.bzl%ruff
+test --aspects=//tools/bazel_devtools:aspects.bzl%basedpyright
+test --aspects=//tools/bazel_devtools:aspects.bzl%ruff_format
+test --aspects=//tools/bazel_devtools:aspects.bzl%clang_tidy
+test --aspects=//tools/bazel_devtools:aspects.bzl%clang_format
+test --@@aspect_rules_lint+//lint:fail_on_violation
+# ##BAZEL_DEVTOOLS_MANAGED_END:checks##

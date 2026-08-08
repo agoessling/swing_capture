@@ -1,0 +1,30 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+cc_library(
+    name = "bayer_rg8",
+    srcs = ["bayer_rg8.cc"],
+    hdrs = ["bayer_rg8.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_library(
+    name = "image_quality",
+    srcs = ["image_quality.cc"],
+    hdrs = ["image_quality.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_test(
+    name = "bayer_rg8_test",
+    size = "small",
+    srcs = ["bayer_rg8_test.cc"],
+    deps = [":bayer_rg8"],
+)
+
+cc_test(
+    name = "image_quality_test",
+    size = "small",
+    srcs = ["image_quality_test.cc"],
+    deps = [":image_quality"],
+)

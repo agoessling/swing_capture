@@ -1,0 +1,20 @@
+/bazel-*
+/.bazelrc.local
+/.cache/
+/artifacts/
+/.idea/
+/.vscode/
+*.swp
+*~
+__pycache__/
+*.py[cod]
+
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:generated-ide-files##
+/compile_commands.json
+/pyrightconfig.json
+/rust-project.json
+/.cache/
+/.ruff_cache/
+/external
+/.bazel_devtools/updates/
+# ##BAZEL_DEVTOOLS_MANAGED_END:generated-ide-files##

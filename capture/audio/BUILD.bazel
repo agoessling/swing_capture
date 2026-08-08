@@ -1,0 +1,59 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+cc_library(
+    name = "arecord_pcm_source",
+    srcs = ["arecord_pcm_source.cc"],
+    hdrs = ["arecord_pcm_source.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_library(
+    name = "audio_hil_metrics",
+    srcs = ["audio_hil_metrics.cc"],
+    hdrs = ["audio_hil_metrics.h"],
+)
+
+cc_binary(
+    name = "fake_pcm_producer",
+    srcs = ["fake_pcm_producer.cc"],
+)
+
+cc_test(
+    name = "audio_hil_metrics_test",
+    size = "small",
+    srcs = ["audio_hil_metrics_test.cc"],
+    deps = [":audio_hil_metrics"],
+)
+
+cc_test(
+    name = "arecord_pcm_source_test",
+    size = "small",
+    srcs = ["arecord_pcm_source_test.cc"],
+    args = ["$(rootpath :fake_pcm_producer)"],
+    data = [":fake_pcm_producer"],
+    deps = [
+        ":arecord_pcm_source",
+        "//capture/trigger:impact_detector",
+    ],
+)
+
+cc_test(
+    name = "audio_hil_test",
+    size = "medium",
+    srcs = ["audio_hil_test.cc"],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-audio",
+    ],
+    deps = [
+        ":arecord_pcm_source",
+        ":audio_hil_metrics",
+        "//capture/trigger:impact_detector",
+    ],
+)

@@ -1,0 +1,2 @@
+# Repository-specific Ruff overrides belong in this file.
+extend = ".bazel_devtools/ruff.toml"

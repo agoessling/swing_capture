@@ -1,0 +1,11 @@
+[Unit]
+Description=Configure usbfs memory for Swing Capture cameras
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -ec 'echo 2000 > /sys/module/usbcore/parameters/usbfs_memory_mb; test "$(/bin/cat /sys/module/usbcore/parameters/usbfs_memory_mb)" = 2000'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

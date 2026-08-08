@@ -1,0 +1,31 @@
+line-length = 100
+
+[lint]
+select = ["ALL"]
+ignore = [
+    # These rules conflict with Ruff's formatter.
+    "COM812",
+    "ISC001",
+    # A repository-level license is sufficient; per-file notices add churn.
+    "CPY001",
+    # Bazel package boundaries do not imply Python package boundaries.
+    "INP001",
+    # Assertions and unittest assertion helpers are valid project policy.
+    "PT009",
+    "PT027",
+    "S101",
+    # These security audits are low-signal for Bazel-owned tool invocations
+    # and Bazel-generated XML.
+    "S314",
+    "S603",
+    "S607",
+    # CLI tools intentionally use print as their user interface.
+    "T201",
+]
+
+[lint.pydocstyle]
+convention = "google"
+
+[format]
+docstring-code-format = true
+line-ending = "lf"

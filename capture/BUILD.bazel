@@ -1,0 +1,2 @@
+# Defines the package used by //capture:__subpackages__ visibility labels.
+package(default_visibility = ["//visibility:private"])

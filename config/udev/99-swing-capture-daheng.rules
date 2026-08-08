@@ -1,0 +1,2 @@
+# Allow members of plugdev and the active desktop user to access Daheng cameras.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2ba2", MODE:="0660", GROUP:="plugdev", TAG+="uaccess"

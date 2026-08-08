@@ -1,0 +1,31 @@
+load("@pico-sdk//bazel:defs.bzl", "pico_board_config")
+load("//embedded/rp2040:defs.bzl", "rp2040_firmware", "rp2040_flash")
+
+pico_board_config(
+    name = "board_config",
+    hdrs = ["board.h"],
+    defines = ['PICO_BOARD=\\"adafruit_feather_rp2040_prop_maker\\"'],
+    platform_includes = [
+        "cmsis/rename_exceptions.h",
+        "embedded/prop_maker/board.h",
+    ],
+    strip_include_prefix = "/",
+    deps = ["@pico-sdk//src/rp2_common/cmsis:rename_exceptions"],
+)
+
+rp2040_firmware(
+    name = "diagnostic_firmware",
+    srcs = ["diagnostic_firmware.c"],
+    board_config = "//embedded/prop_maker:board_config",
+    deps = ["@pico-sdk//src/rp2_common/pico_stdlib"],
+)
+
+rp2040_flash(
+    name = "flash_diagnostic",
+    firmware = ":diagnostic_firmware",
+    tags = [
+        "manual",
+        "no-host-sanitizer",
+        "requires-rp2040",
+    ],
+)

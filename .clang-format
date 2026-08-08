@@ -1,0 +1,6 @@
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:clang-format-policy##
+BasedOnStyle: Google
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Right
+# ##BAZEL_DEVTOOLS_MANAGED_END:clang-format-policy##

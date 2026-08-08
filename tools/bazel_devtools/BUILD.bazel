@@ -1,0 +1,24 @@
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:tools##
+load("@bazel_devtools//tools:defs.bzl", "bazel_devtools_formatters", "tool_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+tool_binary(
+    name = "clang_format",
+    src = "@bazel_devtools_llvm_toolchain_llvm//:bin/clang-format",
+)
+
+tool_binary(
+    name = "clang_tidy",
+    src = "@bazel_devtools_llvm_toolchain_llvm//:bin/clang-tidy",
+)
+
+bazel_devtools_formatters(
+    name = "formatters",
+    languages = [
+        "python",
+        "cpp",
+    ],
+    clang_format = ":clang_format",
+)
+# ##BAZEL_DEVTOOLS_MANAGED_END:tools##
