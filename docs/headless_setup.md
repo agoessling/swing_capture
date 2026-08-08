@@ -18,6 +18,9 @@ sudo apt install alsa-utils build-essential git python3 usbutils
 Install Bazelisk as `bazel` using its upstream release or package for the host.
 The checked-in `.bazelversion` selects the repository's Bazel version; Bazel
 downloads the pinned Python, Arm, Pico SDK, Daheng SDK, and lint toolchains.
+Keep at least 20 GB free for the first build: the pinned LLVM distribution and
+embedded toolchains expand substantially before Bazel can reuse them from its
+local cache.
 
 Clone the repository and first validate it without touching hardware:
 
