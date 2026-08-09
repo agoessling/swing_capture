@@ -192,12 +192,22 @@ already be running the separately flashed `SC-HIL/1` image; building or testing
 the host target never flashes it.
 
 The run starts both full-rate camera streams and microphone capture before
-issuing either stimulus. It requests a 44,053 us onboard LED pulse (ten nominal
-periods at 227 fps), verifies a bounded pulse in both independently clocked
-camera streams, and checks that the same high-quality AprilTag identity is
-visible in both views. A free-running exposure can straddle either pulse edge,
-so nine through eleven visible frames are accepted; equality between the two
-cameras is not treated as synchronization evidence.
+issuing any stimulus. It first requests a 300 ms onboard LED locator pulse.
+Eight guaranteed-OFF frames and at least 24 frames from the guarded stable
+interior of that pulse identify one response ROI independently in each camera.
+The run then leaves a 200 ms OFF interval and requests a 44,053 us qualification
+pulse (ten nominal periods at 227 fps), with analysis locked to the locator ROI.
+Its response is evaluated over a command-relative nine-through-eleven-frame
+matched window. At least nine consecutive frames must meet the support gates of
+mean red excess 2.0 and changed-red fraction 0.10. At least three supported
+frames must also meet all high-confidence gates, including mean red excess 4.0,
+and the complete window must retain aggregate mean red excess 3.0 and
+changed-red fraction 0.20. This prevents three isolated bright frames from
+carrying a result. A free-running exposure can straddle either edge, so partial
+edge frames may fall below support. The span and device-local duration remain
+acceptance gates. Equality between the two cameras is not treated as
+synchronization evidence. The same high-quality AprilTag identity must also be
+visible in both views.
 
 Each frame is corrected with a fitted global affine illumination model, and a
 candidate region must exceed its surrounding background ring. This rejects
@@ -210,10 +220,12 @@ The detected LED edges are compared with the Feather acknowledgement schedule
 using robust camera-device-to-host-receipt mapping. That comparison records one
 nominal frame of fixed delivery latency as an operational assumption and is
 diagnostic, not an acceptance gate: fixed sensor/readout/USB/SDK latency is not
-observable from receipt timestamps alone. The accepted claim is a bounded
-localized pulse in the command-relative 48-frame window, together with the
-separately verified Feather command and device duration. It does not prove
-absolute camera-to-Feather timing or synchronization between the two cameras.
+observable from receipt timestamps alone. The accepted claim is that the long
+locator and short qualification produce a consistent localized optical
+response in the command-relative windows, together with separately verified
+Feather command and device durations. The ROI may be a reflection of the
+emitter rather than the LED package itself. This does not prove absolute
+camera-to-Feather timing or synchronization between the two cameras.
 
 It then requests a conservative 20 ms, 2 kHz speaker tone and verifies energy,
 signal-to-noise ratio, 2 kHz spectral concentration, frequency error, active
@@ -225,23 +237,26 @@ block-granular, and the reported delay also contains USB serial, firmware
 scheduling, ALSA/pipe buffering, amplifier, speaker, and acoustic delay.
 
 The undeclared output directory retains `station-fixture-report.json`, the
-captured `speaker-microphone.wav`, and clean pre-flash AprilTag and accepted
-peak-LED PNGs for both camera roles. The camera rings preallocate 512 full
-frames each so bounded serial delays and sequential shutdown cannot overwrite
-the short run; the exact allocation is recorded. Reports are written
-incrementally, and failure paths retain completed Feather records, audio
-diagnostics/WAV, and the latest available clean camera images. Presence of the
-AprilTag is a framing/focus/exposure sanity check only; it makes no pose or
+captured `speaker-microphone.wav`, and clean pre-flash AprilTag, locator-peak,
+and qualification-peak PNGs for both camera roles. Cyan ROI overlays and
+averaged stable-ON-minus-OFF red-difference PNGs make both accepted and rejected
+optical evidence inspectable. The camera rings preallocate 512 full frames each
+so bounded serial delays and sequential shutdown cannot overwrite the short
+run; the exact allocation is recorded. Reports are written incrementally, and
+failure paths retain completed Feather records, audio diagnostics/WAV, and the
+latest available clean camera images. Presence of the AprilTag is a
+framing/focus/exposure sanity check only; it makes no pose or
 geometric-calibration claim.
 
-The 2026-08-09 room-lit run passed in 8.8 seconds of test time. Down-the-line
-captured 304 frames and face-on 299, both at about 227.6 fps with zero timeouts
-and frame-ID gaps. The cameras observed 10 and 9 active LED frames respectively
-across the same ten-position span, or 44.078 ms in each device-clock domain.
-Both decoded `tag36h11` ID 0 with hamming 0 and decision margins 48.3/50.3. The
-audio check measured exactly 2 kHz, 20.1 dB SNR, and no clipping. The complete
-artifact is preserved under
-`artifacts/hil/station-fixture-20260809T014339Z-attempt10/`.
+The 2026-08-09 room-lit run passed in 6.0 seconds of test time. Down-the-line
+captured 418 frames and face-on 414, both at about 227.4 fps with zero timeouts
+and frame-ID gaps. Down-the-line had 10 consecutive supported and 10
+high-confidence frames; face-on had 10 consecutive supported and 7
+high-confidence frames. Both qualification windows covered 10 frame positions,
+or 44.078 ms in each device-clock domain. Both decoded `tag36h11` ID 0 with
+hamming 0 and decision margins 81.6/84.9. The audio check measured exactly 2
+kHz, 17.7 dB SNR, and no clipping. The complete artifact is preserved under
+`artifacts/hil/station_fixture/20260809T085952-supported-frame-final-pass/`.
 
 ### Station doctor
 

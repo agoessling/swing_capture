@@ -25,6 +25,7 @@ using swing_capture::optical::LedFrameDiagnostic;
 using swing_capture::optical::MapFrameHostTimes;
 using swing_capture::optical::MappedTagTimelineView;
 using swing_capture::optical::SelectLedAnalysisFrames;
+using swing_capture::optical::SelectLedLocatorFrames;
 using swing_capture::optical::SelectTagRepresentativeFrame;
 
 constexpr std::uint32_t kWidth = 8;
@@ -95,6 +96,7 @@ std::vector<LedFrameDiagnostic> MakeDiagnostics(std::span<const BayerRg8FrameVie
     diagnostic.mean_positive_red_delta =
         index >= active_begin && index < active_end_exclusive ? 60.0 : 0.0;
     diagnostic.baseline_frame = index < 8;
+    diagnostic.supported = index >= active_begin && index < active_end_exclusive;
     diagnostic.active = index >= active_begin && index < active_end_exclusive;
     diagnostics.push_back(diagnostic);
   }
@@ -158,7 +160,7 @@ void SelectsMappedPreflashTagAndInactiveFallback() {
                                                   kLedAnalysisFrameCount);
   const std::span<const Clock::time_point> mapped(all_mapped.begin() + window.begin_index,
                                                   kLedAnalysisFrameCount);
-  const auto diagnostics = MakeDiagnostics(frames, 16, 26);
+  auto diagnostics = MakeDiagnostics(frames, 16, 26);
 
   const auto mapped_tag =
       SelectTagRepresentativeFrame(frames, diagnostics,
@@ -174,6 +176,43 @@ void SelectsMappedPreflashTagAndInactiveFallback() {
   Expect(!fallback.used_preflash_mapping, "tag records inactive-run fallback");
   Expect(fallback.frame_index == 36, "fallback uses lower midpoint of longest inactive run");
   Expect(!diagnostics[fallback.frame_index].active, "fallback tag frame is inactive");
+
+  diagnostics[2].supported = true;
+  diagnostics[3].supported = true;
+  diagnostics[4].supported = true;
+  const auto supported_avoiding_tag =
+      SelectTagRepresentativeFrame(frames, diagnostics,
+                                   MappedTagTimelineView{
+                                       .frame_host_times = mapped,
+                                       .scheduled_start = window.schedule.target_start,
+                                   });
+  Expect(!diagnostics[supported_avoiding_tag.frame_index].supported &&
+             !diagnostics[supported_avoiding_tag.frame_index].active,
+         "mapped tag selection excludes lower-confidence supported frames");
+}
+
+void SelectsGuaranteedOffAndStableOnLocatorFrames() {
+  auto frames = MakeFrames(180);
+  const auto first_host = Clock::time_point(std::chrono::seconds(15));
+  const auto mapper = MakeMapper(frames.views, first_host);
+  const auto mapped = MapFrameHostTimes(frames.views, mapper);
+  const auto scheduled_start = mapped[60];
+  const swing_capture::optical::EstimatedStimulusHostSchedule schedule{
+      .earliest_start = scheduled_start - std::chrono::milliseconds(1),
+      .latest_start = scheduled_start + std::chrono::milliseconds(1),
+      .target_start = scheduled_start,
+  };
+
+  const auto selected =
+      SelectLedLocatorFrames(frames.views, mapped, schedule, std::chrono::milliseconds(300));
+  Expect(selected.baseline_begin_index == 52, "locator selects eight OFF baseline frames");
+  Expect(selected.baseline_end_index_exclusive == 60,
+         "locator baseline ends before earliest possible start");
+  Expect(selected.on_begin_index == 66, "locator ON frames begin after transition guard");
+  Expect(selected.on_end_index_exclusive == 130, "locator ON frames end before transition guard");
+  Expect(selected.on_end_index_exclusive - selected.on_begin_index >=
+             swing_capture::optical::kLedLocatorMinimumOnFrames,
+         "locator retains enough stable ON frames");
 }
 
 template <typename Function>
@@ -232,6 +271,22 @@ void RejectsMismatchedDiagnosticsAndInvalidSchedule() {
   };
   ExpectInvalidArgument([&] { (void)EstimateStimulusHostSchedule(invalid); },
                         "ACK before command rejected");
+
+  frames = MakeFrames(80);
+  const auto first_host = Clock::time_point(std::chrono::seconds(40));
+  const auto mapper = MakeMapper(frames.views, first_host);
+  const auto mapped = MapFrameHostTimes(frames.views, mapper);
+  const auto short_locator = swing_capture::optical::EstimatedStimulusHostSchedule{
+      .earliest_start = mapped[40],
+      .latest_start = mapped[40],
+      .target_start = mapped[40],
+  };
+  ExpectInvalidArgument(
+      [&] {
+        (void)SelectLedLocatorFrames(frames.views, mapped, short_locator,
+                                     std::chrono::milliseconds(40));
+      },
+      "locator without a guarded ON interior rejected");
 }
 
 }  // namespace
@@ -239,6 +294,7 @@ void RejectsMismatchedDiagnosticsAndInvalidSchedule() {
 int main() {
   EstimatesBracketAndSelectsBoundedWindow();
   SelectsMappedPreflashTagAndInactiveFallback();
+  SelectsGuaranteedOffAndStableOnLocatorFrames();
   RejectsMalformedFramesAndUnboundedSelections();
   RejectsMismatchedDiagnosticsAndInvalidSchedule();
   return failures == 0 ? 0 : 1;

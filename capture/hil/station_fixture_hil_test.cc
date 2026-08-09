@@ -82,6 +82,7 @@ using swing_capture::image::EncodePng;
 using swing_capture::image::ImageQualityMetrics;
 using swing_capture::image::MeasureRaw8ImageQuality;
 using swing_capture::image::Raw8ImageView;
+using swing_capture::image::Rgb8Image;
 using swing_capture::image::Rgb8ToLuminance;
 using swing_capture::optical::AnalyzeLedPulse;
 using swing_capture::optical::AprilTagDetection;
@@ -94,13 +95,16 @@ using swing_capture::optical::EstimateStimulusHostSchedule;
 using swing_capture::optical::EvaluateLedScheduleAssociation;
 using swing_capture::optical::FeatherAckScheduleBracket;
 using swing_capture::optical::LedAnalysisFrameSelection;
+using swing_capture::optical::LedLocatorFrameSelection;
 using swing_capture::optical::LedPulseOptions;
 using swing_capture::optical::LedPulseResult;
 using swing_capture::optical::LedScheduleAssociationOptions;
 using swing_capture::optical::LedScheduleAssociationResult;
 using swing_capture::optical::MappedTagTimelineView;
+using swing_capture::optical::PixelRegion;
 using swing_capture::optical::SelectAcceptedLedPeakFrame;
 using swing_capture::optical::SelectLedAnalysisFrames;
+using swing_capture::optical::SelectLedLocatorFrames;
 using swing_capture::optical::SelectTagRepresentativeFrame;
 using swing_capture::optical::TagRepresentativeFrameSelection;
 using swing_capture::optical::VerifyAprilTagPresence;
@@ -110,11 +114,13 @@ using swing_capture::station::StationConfig;
 constexpr std::uint32_t kAudioSampleRateHz = 32000;
 constexpr std::uint64_t kAudioBaselineSamples = kAudioSampleRateHz * 300U / 1000U;
 constexpr std::uint64_t kAudioPostCommandSamples = kAudioSampleRateHz * 750U / 1000U;
-// Covers the nominal 1.264 s sequence plus the controller's bounded serial
+// Covers the nominal 1.764 s locator/qualification/audio sequence plus bounded serial
 // delays and sequential camera shutdown without overwriting retained evidence.
 constexpr std::size_t kCameraRingFrames = 512;
 constexpr auto kBaselineDuration = std::chrono::milliseconds(300);
-constexpr auto kLedLead = std::chrono::microseconds(100000);
+constexpr auto kLocatorLedLead = std::chrono::microseconds(100000);
+constexpr auto kLocatorLedDuration = std::chrono::microseconds(300000);
+constexpr auto kQualificationLedLead = std::chrono::microseconds(200000);
 constexpr auto kLedDuration = std::chrono::microseconds(44053);
 constexpr auto kBetweenStimuli = std::chrono::milliseconds(100);
 constexpr auto kToneLead = std::chrono::microseconds(100000);
@@ -186,13 +192,106 @@ void WriteText(const std::filesystem::path &path, std::string_view text) {
   }
 }
 
+void DrawRegionOutline(Rgb8Image *image, const PixelRegion &region) {
+  if (image == nullptr ||
+      image->pixels.size() != static_cast<std::size_t>(image->width) * image->height * 3U ||
+      region.width == 0 || region.height == 0 || region.width > image->width ||
+      region.height > image->height || region.x > image->width - region.width ||
+      region.y > image->height - region.height) {
+    throw std::invalid_argument("cannot annotate invalid LED region");
+  }
+  const auto set_cyan = [image](std::uint32_t x, std::uint32_t y) {
+    const std::size_t offset = (static_cast<std::size_t>(y) * image->width + x) * 3U;
+    image->pixels[offset] = 0;
+    image->pixels[offset + 1U] = 255;
+    image->pixels[offset + 2U] = 255;
+  };
+  constexpr std::uint32_t kLineWidth = 3;
+  for (std::uint32_t inset = 0; inset < kLineWidth; ++inset) {
+    const std::uint32_t left = region.x + std::min(inset, region.width - 1U);
+    const std::uint32_t right = region.x + region.width - 1U - std::min(inset, region.width - 1U);
+    const std::uint32_t top = region.y + std::min(inset, region.height - 1U);
+    const std::uint32_t bottom =
+        region.y + region.height - 1U - std::min(inset, region.height - 1U);
+    for (std::uint32_t x = left; x <= right; ++x) {
+      set_cyan(x, top);
+      set_cyan(x, bottom);
+    }
+    for (std::uint32_t y = top; y <= bottom; ++y) {
+      set_cyan(left, y);
+      set_cyan(right, y);
+    }
+  }
+}
+
+void ValidateDifferenceFrames(std::span<const BayerRg8FrameView> frames, std::uint32_t width,
+                              std::uint32_t height) {
+  if (frames.empty()) {
+    throw std::invalid_argument("LED difference image requires nonempty frame groups");
+  }
+  for (const BayerRg8FrameView &frame : frames) {
+    const std::size_t stride =
+        frame.image.row_stride_bytes == 0 ? width : frame.image.row_stride_bytes;
+    if (frame.image.width != width || frame.image.height != height || stride < width ||
+        frame.image.pixels.size() < stride * height) {
+      throw std::invalid_argument("cannot make LED difference image from incompatible frames");
+    }
+  }
+}
+
+double MeanRedSample(std::span<const BayerRg8FrameView> frames, std::uint32_t x, std::uint32_t y) {
+  std::uint64_t sum = 0;
+  for (const BayerRg8FrameView &frame : frames) {
+    const std::size_t stride =
+        frame.image.row_stride_bytes == 0 ? frame.image.width : frame.image.row_stride_bytes;
+    sum +=
+        std::to_integer<std::uint8_t>(frame.image.pixels[static_cast<std::size_t>(y) * stride + x]);
+  }
+  return static_cast<double>(sum) / static_cast<double>(frames.size());
+}
+
+Rgb8Image MakeRedDifferenceImage(std::span<const BayerRg8FrameView> off_frames,
+                                 std::span<const BayerRg8FrameView> on_frames,
+                                 const PixelRegion &region) {
+  if (off_frames.empty() || on_frames.empty()) {
+    throw std::invalid_argument("LED difference image requires OFF and ON frames");
+  }
+  const std::uint32_t width = off_frames.front().image.width;
+  const std::uint32_t height = off_frames.front().image.height;
+  if (width == 0 || height == 0) {
+    throw std::invalid_argument("LED difference image requires nonzero frame geometry");
+  }
+  ValidateDifferenceFrames(off_frames, width, height);
+  ValidateDifferenceFrames(on_frames, width, height);
+  Rgb8Image result{
+      .width = width,
+      .height = height,
+      .pixels = std::vector<std::uint8_t>(static_cast<std::size_t>(width) * height * 3U),
+  };
+  for (std::uint32_t y = 0; y < height; y += 2U) {
+    for (std::uint32_t x = 0; x < width; x += 2U) {
+      const double difference =
+          std::max(0.0, MeanRedSample(on_frames, x, y) - MeanRedSample(off_frames, x, y));
+      const auto delta = static_cast<std::uint8_t>(std::min(255.0, difference * 24.0));
+      for (std::uint32_t dy = 0; dy < 2U && y + dy < height; ++dy) {
+        for (std::uint32_t dx = 0; dx < 2U && x + dx < width; ++dx) {
+          const std::size_t offset = (static_cast<std::size_t>(y + dy) * width + x + dx) * 3U;
+          result.pixels[offset] = delta;
+        }
+      }
+    }
+  }
+  DrawRegionOutline(&result, region);
+  return result;
+}
+
 json FeatherFailureJson(const FeatherHilFailureEvidence &evidence);
 
 json BaseReport() {
   return {
-      {"schema_version", 1},
+      {"schema_version", 2},
       {"passed", false},
-      {"scope", "dual_camera_led_apriltag_and_speaker_microphone"},
+      {"scope", "dual_camera_locator_led_timed_led_apriltag_and_speaker_microphone"},
       {"state", "initializing"},
   };
 }
@@ -475,18 +574,22 @@ class CameraCapture final {
   bool started_ = false;
 };
 
+BayerRg8FrameView OpticalView(const PooledRawFrameHandle &frame) {
+  return {
+      .image = {.pixels = frame.payload(),
+                .width = frame.metadata().width,
+                .height = frame.metadata().height,
+                .row_stride_bytes = frame.metadata().width},
+      .frame_id = frame.metadata().frame_id,
+      .device_timestamp = frame.metadata().device_timestamp,
+  };
+}
+
 std::vector<BayerRg8FrameView> OpticalViews(const PooledRawFrameSnapshot &snapshot) {
   std::vector<BayerRg8FrameView> views;
   views.reserve(snapshot.size());
   for (const auto &frame : snapshot.frames()) {
-    views.push_back({
-        .image = {.pixels = frame.payload(),
-                  .width = frame.metadata().width,
-                  .height = frame.metadata().height,
-                  .row_stride_bytes = frame.metadata().width},
-        .frame_id = frame.metadata().frame_id,
-        .device_timestamp = frame.metadata().device_timestamp,
-    });
+    views.push_back(OpticalView(frame));
   }
   return views;
 }
@@ -721,8 +824,22 @@ json LedJson(const LedPulseResult &result, const LedPulseOptions &options) {
         {"global_illumination_scale", frame.global_illumination_scale},
         {"global_illumination_offset", frame.global_illumination_offset},
         {"baseline", frame.baseline_frame},
-        {"active", frame.active},
+        {"supported", frame.supported},
+        {"high_confidence", frame.active},
     });
+  }
+  json locked_region = nullptr;
+  if (options.locked_region.has_value()) {
+    locked_region = {
+        {"x", options.locked_region->x},
+        {"y", options.locked_region->y},
+        {"width", options.locked_region->width},
+        {"height", options.locked_region->height},
+    };
+  }
+  json expected_start_frame_index = nullptr;
+  if (options.expected_start_frame_index.has_value()) {
+    expected_start_frame_index = *options.expected_start_frame_index;
   }
   return {
       {"detected", result.detected},
@@ -737,9 +854,22 @@ json LedJson(const LedPulseResult &result, const LedPulseOptions &options) {
         {"minimum_changed_red_samples", options.minimum_changed_red_samples},
         {"minimum_changed_red_fraction", options.minimum_changed_red_fraction},
         {"minimum_mean_positive_red_delta", options.minimum_mean_positive_red_delta},
-        {"minimum_active_frames", options.minimum_active_frames},
+        {"minimum_support_changed_red_fraction", options.minimum_support_changed_red_fraction},
+        {"minimum_support_mean_positive_red_delta",
+         options.minimum_support_mean_positive_red_delta},
+        {"minimum_high_confidence_frames", options.minimum_active_frames},
         {"maximum_pulse_span_frames", options.maximum_pulse_span_frames},
-        {"maximum_internal_inactive_frames", options.maximum_internal_inactive_frames}}},
+        {"maximum_internal_inactive_frames", options.maximum_internal_inactive_frames},
+        {"locked_region", std::move(locked_region)},
+        {"expected_start_frame_index", std::move(expected_start_frame_index)},
+        {"expected_start_tolerance_frames", options.expected_start_tolerance_frames},
+        {"minimum_matched_pulse_frames", options.minimum_matched_pulse_frames},
+        {"maximum_matched_pulse_frames", options.maximum_matched_pulse_frames},
+        {"minimum_matched_high_confidence_frames", options.minimum_matched_active_frames},
+        {"minimum_matched_supported_frames", options.minimum_matched_contiguous_supported_frames},
+        {"minimum_matched_mean_positive_red_delta",
+         options.minimum_matched_mean_positive_red_delta},
+        {"minimum_matched_changed_red_fraction", options.minimum_matched_changed_red_fraction}}},
       {"selected_region",
        {{"x", result.selected_region.x},
         {"y", result.selected_region.y},
@@ -747,7 +877,7 @@ json LedJson(const LedPulseResult &result, const LedPulseOptions &options) {
         {"height", result.selected_region.height}}},
       {"pulse_start_frame_index", result.pulse_start_frame_index},
       {"pulse_end_frame_index", result.pulse_end_frame_index},
-      {"active_frame_count", result.pulse_active_frame_count},
+      {"high_confidence_frame_count", result.pulse_active_frame_count},
       {"span_frame_count", result.pulse_span_frame_count},
       {"start_device_timestamp", result.start_device_timestamp},
       {"end_device_timestamp_exclusive", result.end_device_timestamp_exclusive},
@@ -755,6 +885,18 @@ json LedJson(const LedPulseResult &result, const LedPulseOptions &options) {
       {"duration_ticks", result.duration_ticks},
       {"duration_seconds", result.duration_seconds},
       {"missing_frame_ids", result.missing_frame_ids},
+      {"strongest_response_frame_index", result.strongest_response_frame_index},
+      {"strongest_mean_positive_red_delta", result.strongest_mean_positive_red_delta},
+      {"matched_window_used", result.matched_window_used},
+      {"matched_supported_frame_count", result.matched_supported_frame_count},
+      {"matched_high_confidence_frame_count", result.matched_high_confidence_frame_count},
+      {"matched_longest_contiguous_supported_frame_count",
+       result.matched_longest_contiguous_supported_frame_count},
+      {"matched_mean_positive_red_delta", result.matched_mean_positive_red_delta},
+      {"matched_changed_red_fraction", result.matched_changed_red_fraction},
+      {"matched_background_mean_positive_red_delta",
+       result.matched_background_mean_positive_red_delta},
+      {"matched_background_changed_red_fraction", result.matched_background_changed_red_fraction},
       {"frames", std::move(frames)},
   };
 }
@@ -1032,6 +1174,7 @@ json CheckpointFailureCamera(const CameraCapture &camera,
 }
 
 void CheckpointRunFailure(const std::filesystem::path &output_directory, std::string fatal_error,
+                          const std::optional<FeatherStimulusReceipt> &locator_led_receipt,
                           const std::optional<FeatherStimulusReceipt> &led_receipt,
                           const std::optional<FeatherStimulusReceipt> &tone_receipt,
                           const StationConfig &station, const AudioCaptureSession &audio,
@@ -1041,6 +1184,9 @@ void CheckpointRunFailure(const std::filesystem::path &output_directory, std::st
   (*report)["passed"] = false;
   (*report)["state"] = "failed";
   (*report)["fatal_error"] = std::move(fatal_error);
+  if (locator_led_receipt.has_value()) {
+    (*report)["feather"]["locator_led"] = ReceiptJson(*locator_led_receipt);
+  }
   if (led_receipt.has_value()) {
     (*report)["feather"]["led"] = ReceiptJson(*led_receipt);
   }
@@ -1054,24 +1200,84 @@ void CheckpointRunFailure(const std::filesystem::path &output_directory, std::st
 }
 
 struct CameraEvidence {
+  LedPulseResult locator_led;
   LedPulseResult led;
   LedScheduleAssociationResult led_schedule_association;
   RobustDeviceClockMappingDiagnostics robust_clock_mapping;
   std::vector<std::size_t> clock_mapping_outlier_indices;
   TagResult tag;
+  LedLocatorFrameSelection locator_selection;
   LedAnalysisFrameSelection led_selection;
   TagRepresentativeFrameSelection tag_selection;
+  LedPulseOptions locator_options;
   LedPulseOptions led_options;
   ImageQualityMetrics tag_image_quality;
+  std::size_t locator_retained_frame_index = 0;
   std::size_t tag_retained_frame_index = 0;
   std::size_t led_retained_frame_index = 0;
-  bool pulse_frame_count_passed = false;
+  bool pulse_frame_support_passed = false;
+  bool pulse_aggregate_response_passed = false;
   bool pulse_duration_passed = false;
+  std::string locator_image;
+  std::string locator_annotated_image;
+  std::string locator_difference_image;
   std::string tag_image;
   std::string led_image;
+  std::string led_annotated_image;
+  std::string led_difference_image;
 };
 
+struct LocatorAnalysisFrames {
+  std::vector<BayerRg8FrameView> views;
+  std::vector<std::size_t> retained_indices;
+};
+
+LocatorAnalysisFrames MakeLocatorAnalysisFrames(std::span<const BayerRg8FrameView> frames,
+                                                const LedLocatorFrameSelection &selection) {
+  LocatorAnalysisFrames result;
+  const std::size_t baseline_frames =
+      selection.baseline_end_index_exclusive - selection.baseline_begin_index;
+  const std::size_t on_frames = selection.on_end_index_exclusive - selection.on_begin_index;
+  result.views.reserve(baseline_frames + on_frames);
+  result.retained_indices.reserve(baseline_frames + on_frames);
+  const auto append = [&result, frames](std::size_t begin, std::size_t end) {
+    for (std::size_t index = begin; index < end; ++index) {
+      result.views.push_back(frames[index]);
+      result.retained_indices.push_back(index);
+    }
+  };
+  append(selection.baseline_begin_index, selection.baseline_end_index_exclusive);
+  append(selection.on_begin_index, selection.on_end_index_exclusive);
+  return result;
+}
+
+FeatherAckScheduleBracket ScheduleBracket(const FeatherStimulusReceipt &receipt) {
+  return {
+      .host_command_sent = receipt.host_command_sent,
+      .host_acknowledgement_received = receipt.host_acknowledgement_received,
+      .accepted_device_microseconds = receipt.accepted_device_microseconds,
+      .scheduled_device_microseconds = receipt.scheduled_device_microseconds,
+  };
+}
+
+void WriteLedImages(const std::filesystem::path &output_directory,
+                    const PooledRawFrameSnapshot &snapshot, std::size_t peak_index,
+                    std::span<const BayerRg8FrameView> off_frames,
+                    std::span<const BayerRg8FrameView> on_frames, const PixelRegion &region,
+                    std::string_view clean_name, std::string_view annotated_name,
+                    std::string_view difference_name) {
+  Rgb8Image peak =
+      DemosaicBayerRg8(snapshot.at(peak_index).payload(), snapshot.at(peak_index).metadata().width,
+                       snapshot.at(peak_index).metadata().height);
+  WriteText(output_directory / clean_name, EncodePng(peak));
+  DrawRegionOutline(&peak, region);
+  WriteText(output_directory / annotated_name, EncodePng(peak));
+  WriteText(output_directory / difference_name,
+            EncodePng(MakeRedDifferenceImage(off_frames, on_frames, region)));
+}
+
 CameraEvidence AnalyzeCamera(const CameraCapture &camera, const PooledRawFrameSnapshot &snapshot,
+                             const FeatherStimulusReceipt &locator_led_receipt,
                              const FeatherStimulusReceipt &led_receipt,
                              const std::filesystem::path &output_directory) {
   if (snapshot.size() < swing_capture::optical::kLedAnalysisFrameCount) {
@@ -1084,13 +1290,31 @@ CameraEvidence AnalyzeCamera(const CameraCapture &camera, const PooledRawFrameSn
       timestamp_samples, camera.diagnostics().timestamp_ticks_per_second);
   const std::vector<std::chrono::steady_clock::time_point> &mapped_host_times =
       robust_mapping.mapped_host_receipt_times;
-  const FeatherAckScheduleBracket schedule_bracket = {
-      .host_command_sent = led_receipt.host_command_sent,
-      .host_acknowledgement_received = led_receipt.host_acknowledgement_received,
-      .accepted_device_microseconds = led_receipt.accepted_device_microseconds,
-      .scheduled_device_microseconds = led_receipt.scheduled_device_microseconds,
-  };
-  const auto schedule = EstimateStimulusHostSchedule(schedule_bracket);
+  const auto locator_schedule = EstimateStimulusHostSchedule(ScheduleBracket(locator_led_receipt));
+  const LedLocatorFrameSelection locator_selection = SelectLedLocatorFrames(
+      frames, mapped_host_times, locator_schedule,
+      std::chrono::microseconds(locator_led_receipt.elapsed_device_microseconds));
+  LocatorAnalysisFrames locator_frames = MakeLocatorAnalysisFrames(frames, locator_selection);
+  const std::size_t locator_on_frames =
+      locator_selection.on_end_index_exclusive - locator_selection.on_begin_index;
+  LedPulseOptions locator_options;
+  locator_options.baseline_frame_count = swing_capture::optical::kLedLocatorBaselineFrames;
+  locator_options.minimum_red_sample_delta = 3;
+  locator_options.minimum_changed_red_fraction = 0.10;
+  locator_options.minimum_support_changed_red_fraction = 0.10;
+  locator_options.minimum_support_mean_positive_red_delta = 2.0;
+  locator_options.expected_start_frame_index = locator_options.baseline_frame_count;
+  locator_options.expected_start_tolerance_frames = 0;
+  locator_options.minimum_matched_pulse_frames = locator_on_frames;
+  locator_options.maximum_matched_pulse_frames = locator_on_frames;
+  locator_options.minimum_matched_active_frames =
+      swing_capture::optical::kLedLocatorMinimumOnFrames;
+  locator_options.minimum_matched_contiguous_supported_frames =
+      swing_capture::optical::kLedLocatorMinimumOnFrames;
+  LedPulseResult locator_led = AnalyzeLedPulse(
+      locator_frames.views, camera.diagnostics().timestamp_ticks_per_second, locator_options);
+
+  const auto schedule = EstimateStimulusHostSchedule(ScheduleBracket(led_receipt));
   const LedAnalysisFrameSelection led_selection =
       SelectLedAnalysisFrames(frames, mapped_host_times, schedule);
   const auto analysis_frames = std::span<const BayerRg8FrameView>(frames).subspan(
@@ -1103,8 +1327,17 @@ CameraEvidence AnalyzeCamera(const CameraCapture &camera, const PooledRawFrameSn
   LedPulseOptions led_options;
   led_options.baseline_frame_count = 8;
   led_options.minimum_red_sample_delta = 3;
-  led_options.minimum_active_frames = 9;
-  led_options.maximum_pulse_span_frames = 11;
+  led_options.minimum_changed_red_fraction = 0.10;
+  led_options.minimum_support_changed_red_fraction = 0.10;
+  led_options.minimum_support_mean_positive_red_delta = 2.0;
+  led_options.locked_region = locator_led.selected_region;
+  led_options.expected_start_frame_index = led_selection.pivot_index - led_selection.begin_index;
+  led_options.minimum_matched_pulse_frames = 9;
+  led_options.maximum_matched_pulse_frames = 11;
+  led_options.minimum_matched_active_frames = 3;
+  led_options.minimum_matched_contiguous_supported_frames = 9;
+  led_options.minimum_matched_mean_positive_red_delta = 3.0;
+  led_options.minimum_matched_changed_red_fraction = 0.20;
   LedPulseResult led = AnalyzeLedPulse(
       analysis_frames, camera.diagnostics().timestamp_ticks_per_second, led_options);
   const double frame_seconds = 1.0 / camera.diagnostics().resulting_frames_per_second;
@@ -1139,38 +1372,69 @@ CameraEvidence AnalyzeCamera(const CameraCapture &camera, const PooledRawFrameSn
   });
   const ImageQualityMetrics tag_image_quality = MeasureRaw8ImageQuality(frames[tag_index].image);
 
+  const std::size_t locator_analysis_index = locator_led.strongest_response_frame_index;
+  const std::size_t locator_index = locator_frames.retained_indices.at(locator_analysis_index);
   const std::size_t led_analysis_index =
-      led.detected ? SelectAcceptedLedPeakFrame(led) : tag_selection.frame_index;
+      led.detected ? SelectAcceptedLedPeakFrame(led) : led.strongest_response_frame_index;
   const std::size_t led_index = led_selection.begin_index + led_analysis_index;
+  const std::string locator_image = "locator-" + camera.role() + ".png";
+  const std::string locator_annotated_image = "locator-annotated-" + camera.role() + ".png";
+  const std::string locator_difference_image = "locator-difference-" + camera.role() + ".png";
   const std::string tag_image = "tag-" + camera.role() + ".png";
   const std::string led_image = "led-" + camera.role() + ".png";
+  const std::string led_annotated_image = "led-annotated-" + camera.role() + ".png";
+  const std::string led_difference_image = "led-difference-" + camera.role() + ".png";
   WriteText(output_directory / tag_image, EncodePng(tag_rgb));
-  WriteText(output_directory / led_image,
-            EncodePng(DemosaicBayerRg8(snapshot.at(led_index).payload(),
-                                       snapshot.at(led_index).metadata().width,
-                                       snapshot.at(led_index).metadata().height)));
+  const auto locator_analysis_span = std::span<const BayerRg8FrameView>(locator_frames.views);
+  WriteLedImages(output_directory, snapshot, locator_index,
+                 locator_analysis_span.first(locator_options.baseline_frame_count),
+                 locator_analysis_span.subspan(locator_options.baseline_frame_count),
+                 locator_led.selected_region, locator_image, locator_annotated_image,
+                 locator_difference_image);
+  WriteLedImages(output_directory, snapshot, led_index,
+                 analysis_frames.first(led_options.baseline_frame_count),
+                 analysis_frames.subspan(led.pulse_start_frame_index, led.pulse_span_frame_count),
+                 led.selected_region, led_image, led_annotated_image, led_difference_image);
 
-  const bool pulse_frame_count_passed =
-      led.pulse_active_frame_count >= 9 && led.pulse_active_frame_count <= 11;
-  const bool pulse_duration_passed = led.detected &&
+  const bool pulse_frame_support_passed =
+      led.matched_window_used && led.pulse_span_frame_count >= 9 &&
+      led.pulse_span_frame_count <= 11 &&
+      led.matched_longest_contiguous_supported_frame_count >=
+          led_options.minimum_matched_contiguous_supported_frames &&
+      led.matched_high_confidence_frame_count >= led_options.minimum_matched_active_frames;
+  const bool pulse_aggregate_response_passed =
+      led.matched_window_used &&
+      led.matched_mean_positive_red_delta >= led_options.minimum_matched_mean_positive_red_delta &&
+      led.matched_changed_red_fraction >= led_options.minimum_matched_changed_red_fraction;
+  const bool pulse_duration_passed = led.matched_window_used &&
                                      led.duration_ticks >= 9U * led.nominal_frame_interval_ticks &&
                                      led.duration_ticks <= 11U * led.nominal_frame_interval_ticks;
   return {
+      .locator_led = std::move(locator_led),
       .led = std::move(led),
       .led_schedule_association = std::move(led_schedule_association),
       .robust_clock_mapping = std::move(robust_mapping.diagnostics),
       .clock_mapping_outlier_indices = std::move(robust_mapping.outlier_sample_indices),
       .tag = std::move(tag),
+      .locator_selection = locator_selection,
       .led_selection = led_selection,
       .tag_selection = tag_selection,
+      .locator_options = locator_options,
       .led_options = led_options,
       .tag_image_quality = tag_image_quality,
+      .locator_retained_frame_index = locator_index,
       .tag_retained_frame_index = tag_index,
       .led_retained_frame_index = led_index,
-      .pulse_frame_count_passed = pulse_frame_count_passed,
+      .pulse_frame_support_passed = pulse_frame_support_passed,
+      .pulse_aggregate_response_passed = pulse_aggregate_response_passed,
       .pulse_duration_passed = pulse_duration_passed,
+      .locator_image = locator_image,
+      .locator_annotated_image = locator_annotated_image,
+      .locator_difference_image = locator_difference_image,
       .tag_image = tag_image,
       .led_image = led_image,
+      .led_annotated_image = led_annotated_image,
+      .led_difference_image = led_difference_image,
   };
 }
 
@@ -1193,8 +1457,9 @@ json CameraJson(const CameraCapture &camera, const CameraEvidence &evidence,
   const bool transport_passed = camera.timeouts() == 0 && camera.frame_id_gaps() == 0 &&
                                 retention_passed && camera.clock_mapper().ready() && fps_passed &&
                                 interval_passed && payload_passed;
-  const bool passed = transport_passed && evidence.led.detected &&
-                      evidence.pulse_frame_count_passed && evidence.pulse_duration_passed &&
+  const bool passed = transport_passed && evidence.locator_led.detected && evidence.led.detected &&
+                      evidence.pulse_frame_support_passed &&
+                      evidence.pulse_aggregate_response_passed && evidence.pulse_duration_passed &&
                       evidence.tag.accepted_detection.has_value();
   const json checks = json::array({
       {{"name", "timeouts_zero"},
@@ -1222,12 +1487,26 @@ json CameraJson(const CameraCapture &camera, const CameraEvidence &evidence,
        {"message",
         "host_seconds=" + std::to_string(camera.maximum_host_interval_seconds()) +
             " device_seconds=" + std::to_string(camera.maximum_device_interval_seconds())}},
+      {{"name", "locator_led_detected"},
+       {"passed", evidence.locator_led.detected},
+       {"message", evidence.locator_led.diagnostic}},
       {{"name", "led_detected"},
        {"passed", evidence.led.detected},
        {"message", evidence.led.diagnostic}},
-      {{"name", "led_visible_frame_count"},
-       {"passed", evidence.pulse_frame_count_passed},
-       {"message", "active_frames=" + std::to_string(evidence.led.pulse_active_frame_count)}},
+      {{"name", "led_frame_support"},
+       {"passed", evidence.pulse_frame_support_passed},
+       {"message",
+        "span_frames=" + std::to_string(evidence.led.pulse_span_frame_count) +
+            " supported_frames=" + std::to_string(evidence.led.matched_supported_frame_count) +
+            " longest_contiguous_supported_frames=" +
+            std::to_string(evidence.led.matched_longest_contiguous_supported_frame_count) +
+            " high_confidence_frames=" +
+            std::to_string(evidence.led.matched_high_confidence_frame_count)}},
+      {{"name", "led_aggregate_response"},
+       {"passed", evidence.pulse_aggregate_response_passed},
+       {"message",
+        "mean_red_excess=" + std::to_string(evidence.led.matched_mean_positive_red_delta) +
+            " changed_red_fraction=" + std::to_string(evidence.led.matched_changed_red_fraction)}},
       {{"name", "led_duration"},
        {"passed", evidence.pulse_duration_passed},
        {"message", "duration_seconds=" + std::to_string(evidence.led.duration_seconds)}},
@@ -1284,10 +1563,28 @@ json CameraJson(const CameraCapture &camera, const CameraEvidence &evidence,
       {"maximum_device_interval_seconds", camera.maximum_device_interval_seconds()},
       {"exposure_us", camera.diagnostics().exposure_microseconds},
       {"gain_db", camera.diagnostics().gain_decibels},
-      {"pulse_frame_count_passed", evidence.pulse_frame_count_passed},
+      {"pulse_frame_support_passed", evidence.pulse_frame_support_passed},
+      {"pulse_aggregate_response_passed", evidence.pulse_aggregate_response_passed},
       {"pulse_duration_passed", evidence.pulse_duration_passed},
       {"optical_selection",
-       {{"analysis_begin_retained_index", evidence.led_selection.begin_index},
+       {{"locator_baseline_begin_retained_index", evidence.locator_selection.baseline_begin_index},
+        {"locator_baseline_end_retained_index_exclusive",
+         evidence.locator_selection.baseline_end_index_exclusive},
+        {"locator_on_begin_retained_index", evidence.locator_selection.on_begin_index},
+        {"locator_on_end_retained_index_exclusive",
+         evidence.locator_selection.on_end_index_exclusive},
+        {"locator_excluded_transition_frames",
+         evidence.locator_selection.on_begin_index -
+             evidence.locator_selection.baseline_end_index_exclusive},
+        {"locator_analysis_frame_id_gaps_are_selection_gaps", true},
+        {"locator_estimated_start_earliest_host_ns",
+         SteadyNanoseconds(evidence.locator_selection.schedule.earliest_start)},
+        {"locator_estimated_start_latest_host_ns",
+         SteadyNanoseconds(evidence.locator_selection.schedule.latest_start)},
+        {"locator_estimated_start_target_host_ns",
+         SteadyNanoseconds(evidence.locator_selection.schedule.target_start)},
+        {"locator_peak_retained_frame_index", evidence.locator_retained_frame_index},
+        {"analysis_begin_retained_index", evidence.led_selection.begin_index},
         {"analysis_pivot_retained_index", evidence.led_selection.pivot_index},
         {"analysis_end_retained_index_exclusive", evidence.led_selection.end_index_exclusive},
         {"estimated_start_earliest_host_ns",
@@ -1301,12 +1598,18 @@ json CameraJson(const CameraCapture &camera, const CameraEvidence &evidence,
         {"tag_used_preflash_mapping", evidence.tag_selection.used_preflash_mapping},
         {"tag_selection_diagnostic", evidence.tag_selection.diagnostic},
         {"led_peak_retained_frame_index", evidence.led_retained_frame_index}}},
+      {"locator_led", LedJson(evidence.locator_led, evidence.locator_options)},
       {"led", LedJson(evidence.led, evidence.led_options)},
       {"led_schedule_association", LedScheduleAssociationJson(evidence.led_schedule_association)},
       {"april_tag", TagJson(evidence.tag)},
       {"tag_frame_image_quality", ImageQualityJson(evidence.tag_image_quality)},
+      {"locator_image", evidence.locator_image},
+      {"locator_annotated_image", evidence.locator_annotated_image},
+      {"locator_difference_image", evidence.locator_difference_image},
       {"tag_image", evidence.tag_image},
       {"led_image", evidence.led_image},
+      {"led_annotated_image", evidence.led_annotated_image},
+      {"led_difference_image", evidence.led_difference_image},
       {"checks", checks},
   };
 }
@@ -1372,6 +1675,7 @@ int RunFixtureHil() {
       .frames_per_block = 1024,
       .read_timeout = std::chrono::milliseconds(250),
   }));
+  std::optional<FeatherStimulusReceipt> locator_led_receipt;
   std::optional<FeatherStimulusReceipt> led_receipt;
   std::optional<FeatherStimulusReceipt> tone_receipt;
   std::uint64_t tone_command_sample_offset = 0;
@@ -1389,7 +1693,8 @@ int RunFixtureHil() {
         audio.WaitForCompletedSamples(kAudioBaselineSamples,
                                       std::chrono::steady_clock::now() + std::chrono::seconds(2)),
         "collecting microphone baseline");
-    led_receipt = feather.PulseLed(kLedLead, kLedDuration);
+    locator_led_receipt = feather.PulseLed(kLocatorLedLead, kLocatorLedDuration);
+    led_receipt = feather.PulseLed(kQualificationLedLead, kLedDuration);
     std::this_thread::sleep_for(kBetweenStimuli);
     tone_command_sample_offset = audio.completed_sample_count();
     tone_command_sample_snapshot_time = std::chrono::steady_clock::now();
@@ -1451,8 +1756,9 @@ int RunFixtureHil() {
   }
   const auto checkpoint_failure = [&](const std::exception_ptr &exception) {
     try {
-      CheckpointRunFailure(output_directory, ExceptionMessage(exception), led_receipt, tone_receipt,
-                           station, audio, audio_stop, down_the_line, face_on, &report);
+      CheckpointRunFailure(output_directory, ExceptionMessage(exception), locator_led_receipt,
+                           led_receipt, tone_receipt, station, audio, audio_stop, down_the_line,
+                           face_on, &report);
     } catch (const std::exception &evidence_error) {
       std::cerr << "cannot checkpoint station fixture failure evidence: " << evidence_error.what()
                 << '\n';
@@ -1463,17 +1769,17 @@ int RunFixtureHil() {
     std::rethrow_exception(failure);
   }
   try {
-    if (!led_receipt.has_value() || !tone_receipt.has_value()) {
+    if (!locator_led_receipt.has_value() || !led_receipt.has_value() || !tone_receipt.has_value()) {
       throw std::logic_error("fixture stimuli completed without receipts");
     }
 
     const AudioCaptureResult &audio_result = audio.result();
     const PooledRawFrameSnapshot down_snapshot = down_the_line.Freeze();
     const PooledRawFrameSnapshot face_snapshot = face_on.Freeze();
-    const CameraEvidence down_evidence =
-        AnalyzeCamera(down_the_line, down_snapshot, *led_receipt, output_directory);
+    const CameraEvidence down_evidence = AnalyzeCamera(
+        down_the_line, down_snapshot, *locator_led_receipt, *led_receipt, output_directory);
     const CameraEvidence face_evidence =
-        AnalyzeCamera(face_on, face_snapshot, *led_receipt, output_directory);
+        AnalyzeCamera(face_on, face_snapshot, *locator_led_receipt, *led_receipt, output_directory);
     const CommandedToneStimulus tone_stimulus = {
         .lead = kToneLead,
         .duration = kToneDuration,
@@ -1490,6 +1796,9 @@ int RunFixtureHil() {
     const std::vector<std::byte> wav =
         EncodeMonoPcmS16Wav(audio_result.samples, kAudioSampleRateHz);
 
+    const bool locator_led_device_timing_passed =
+        std::abs(static_cast<std::int64_t>(locator_led_receipt->elapsed_device_microseconds) -
+                 kLocatorLedDuration.count()) <= 100;
     const bool led_device_timing_passed =
         std::abs(static_cast<std::int64_t>(led_receipt->elapsed_device_microseconds) -
                  kLedDuration.count()) <= 100;
@@ -1499,20 +1808,22 @@ int RunFixtureHil() {
     json down_json = CameraJson(down_the_line, down_evidence, down_snapshot.size());
     json face_json = CameraJson(face_on, face_evidence, face_snapshot.size());
     const bool same_april_tag_identity = SameTagIdentity(down_evidence, face_evidence);
-    const bool passed = kFeatherCompatible && led_device_timing_passed &&
-                        tone_device_timing_passed && down_json.at("passed").get<bool>() &&
-                        face_json.at("passed").get<bool>() && same_april_tag_identity &&
-                        tone_evaluation.passed;
+    const bool passed = kFeatherCompatible && locator_led_device_timing_passed &&
+                        led_device_timing_passed && tone_device_timing_passed &&
+                        down_json.at("passed").get<bool>() && face_json.at("passed").get<bool>() &&
+                        same_april_tag_identity && tone_evaluation.passed;
     report = {
-        {"schema_version", 1},
+        {"schema_version", 2},
         {"passed", passed},
         {"state", "complete"},
-        {"scope", "dual_camera_led_apriltag_and_speaker_microphone"},
+        {"scope", "dual_camera_locator_led_timed_led_apriltag_and_speaker_microphone"},
         {"station", station_evidence},
         {"feather",
          {{"serial_path", station.feather_serial_path.string()},
           {"info", DeviceInfoJson(info)},
           {"compatible", kFeatherCompatible},
+          {"locator_led", ReceiptJson(*locator_led_receipt)},
+          {"locator_led_device_timing_passed", locator_led_device_timing_passed},
           {"led", ReceiptJson(*led_receipt)},
           {"led_device_timing_passed", led_device_timing_passed},
           {"tone", ReceiptJson(*tone_receipt)},
@@ -1531,10 +1842,14 @@ int RunFixtureHil() {
          "camera device clocks are evaluated independently; one nominal frame of fixed "
          "camera/USB delivery latency is only an operational assumption, so schedule "
          "association is diagnostic and does not prove absolute camera-to-Feather timing; LED "
-         "acceptance is based on detection and duration in the selected command-relative "
-         "48-frame window plus Feather command/device evidence; audio delay is not calibrated "
-         "absolute latency; free-running exposure phases need not yield exactly ten active "
-         "frames"},
+         "acceptance first locates a stable camera-local response with a long pulse, then locks "
+         "the timed 44.053 ms qualification to that ROI and evaluates its integrated response "
+         "in a 9-11 frame command-relative window plus Feather command/device evidence; the "
+         "selected ROI may be a reflection of the emitter rather than the emitter package "
+         "itself; audio delay is not calibrated absolute latency; qualification requires at "
+         "least nine contiguous lower-threshold supported frames and "
+         "three nested high-confidence frames; partial exposure-edge frames need not reach the "
+         "support threshold"},
     };
     WriteReport(output_directory, report);
     std::cout << "Station fixture HIL " << (passed ? "PASS" : "FAIL")

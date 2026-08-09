@@ -70,6 +70,10 @@ std::chrono::steady_clock::duration AbsoluteDuration(std::chrono::steady_clock::
   return duration < std::chrono::steady_clock::duration::zero() ? -duration : duration;
 }
 
+bool HasLedEvidence(const LedFrameDiagnostic &diagnostic) {
+  return diagnostic.supported || diagnostic.active;
+}
+
 void ValidateLedDiagnostics(std::span<const BayerRg8FrameView> frames,
                             std::span<const LedFrameDiagnostic> diagnostics) {
   if (diagnostics.size() != frames.size()) {
@@ -90,7 +94,7 @@ std::size_t SelectMappedTagFrame(
   std::size_t selected = diagnostics.size();
   auto selected_distance = std::chrono::steady_clock::duration::max();
   for (std::size_t index = 0; index < diagnostics.size(); ++index) {
-    if (diagnostics[index].active) {
+    if (HasLedEvidence(diagnostics[index])) {
       continue;
     }
     const auto distance = AbsoluteDuration(mapped_host_times[index] - target);
@@ -106,12 +110,12 @@ std::size_t SelectInactiveRunMidpoint(std::span<const LedFrameDiagnostic> diagno
   std::size_t best_start = diagnostics.size();
   std::size_t best_length = 0;
   for (std::size_t index = 0; index < diagnostics.size();) {
-    if (diagnostics[index].active) {
+    if (HasLedEvidence(diagnostics[index])) {
       ++index;
       continue;
     }
     const std::size_t start = index;
-    while (index < diagnostics.size() && !diagnostics[index].active) {
+    while (index < diagnostics.size() && !HasLedEvidence(diagnostics[index])) {
       ++index;
     }
     const std::size_t length = index - start;
@@ -219,6 +223,51 @@ LedAnalysisFrameSelection SelectLedAnalysisFrames(
     const FeatherAckScheduleBracket &bracket) {
   const auto mapped = MapFrameHostTimes(retained_frames, clock_mapper);
   return SelectLedAnalysisFrames(retained_frames, mapped, EstimateStimulusHostSchedule(bracket));
+}
+
+LedLocatorFrameSelection SelectLedLocatorFrames(
+    std::span<const BayerRg8FrameView> retained_frames,
+    std::span<const std::chrono::steady_clock::time_point> mapped_host_times,
+    const EstimatedStimulusHostSchedule &schedule, std::chrono::microseconds locator_duration) {
+  ValidateRetainedFrames(retained_frames);
+  ValidateMappedHostTimes(retained_frames, mapped_host_times);
+  if (schedule.latest_start < schedule.earliest_start ||
+      schedule.target_start < schedule.earliest_start ||
+      schedule.target_start > schedule.latest_start) {
+    throw std::invalid_argument("estimated Feather locator schedule is inconsistent");
+  }
+  if (locator_duration <= 2 * kLedLocatorEdgeGuard) {
+    throw std::invalid_argument("LED locator duration is too short for guarded ON frames");
+  }
+
+  const auto baseline_end = std::ranges::lower_bound(mapped_host_times, schedule.earliest_start);
+  const auto baseline_end_index =
+      static_cast<std::size_t>(std::distance(mapped_host_times.begin(), baseline_end));
+  if (baseline_end_index < kLedLocatorBaselineFrames) {
+    throw std::invalid_argument("retained frames do not contain the LED locator OFF baseline");
+  }
+
+  const auto guarded_on_start = schedule.latest_start + kLedLocatorEdgeGuard;
+  const auto guarded_on_end = schedule.earliest_start + locator_duration - kLedLocatorEdgeGuard;
+  if (guarded_on_end <= guarded_on_start) {
+    throw std::invalid_argument("LED locator ACK uncertainty consumes its guarded ON interval");
+  }
+  const auto on_begin = std::ranges::lower_bound(mapped_host_times, guarded_on_start);
+  const auto on_end = std::ranges::lower_bound(mapped_host_times, guarded_on_end);
+  const auto on_begin_index =
+      static_cast<std::size_t>(std::distance(mapped_host_times.begin(), on_begin));
+  const auto on_end_index =
+      static_cast<std::size_t>(std::distance(mapped_host_times.begin(), on_end));
+  if (on_end_index - on_begin_index < kLedLocatorMinimumOnFrames) {
+    throw std::invalid_argument("retained frames contain too few guarded LED locator ON frames");
+  }
+  return {
+      .baseline_begin_index = baseline_end_index - kLedLocatorBaselineFrames,
+      .baseline_end_index_exclusive = baseline_end_index,
+      .on_begin_index = on_begin_index,
+      .on_end_index_exclusive = on_end_index,
+      .schedule = schedule,
+  };
 }
 
 TagRepresentativeFrameSelection SelectTagRepresentativeFrame(

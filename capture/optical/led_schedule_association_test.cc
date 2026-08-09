@@ -59,6 +59,7 @@ LedPulseResult MakePulse(std::size_t start, std::size_t end) {
     frame.frame_id = 100U + index;
     frame.device_timestamp = 1'000'000U + index * 4'000U;
     frame.baseline_frame = index < 8;
+    frame.supported = index >= start && index <= end;
     frame.active = index >= start && index <= end;
     frame.mean_positive_red_delta = frame.active ? 50.0 : 0.0;
   }
@@ -111,6 +112,25 @@ void AcceptsAssociatedPulseAndSelectsPeakInsideRun() {
   Expect(result.observed_end_exclusive == times[26], "observed exclusive end recorded");
   Expect(SelectAcceptedLedPeakFrame(pulse) == 20,
          "peak selection ignores stronger inactive outlier outside accepted run");
+}
+
+void AcceptsMatchedWindowWithSubthresholdEdgeFrames() {
+  const auto times = MakeTimes();
+  auto pulse = MakePulse(16, 25);
+  pulse.matched_window_used = true;
+  pulse.frames[16].active = false;
+  pulse.frames[25].active = false;
+  pulse.pulse_active_frame_count = 8;
+  pulse.matched_supported_frame_count = 10;
+  pulse.matched_high_confidence_frame_count = 8;
+  pulse.matched_longest_contiguous_supported_frame_count = 10;
+  pulse.frames[20].mean_positive_red_delta = 90.0;
+
+  const auto result =
+      EvaluateLedScheduleAssociation(times, pulse, ScheduleAt(times[16]), Options());
+  Expect(result.passed, "matched window accepts subthreshold exposure-edge frames");
+  Expect(SelectAcceptedLedPeakFrame(pulse) == 20,
+         "matched-window peak selection still uses a strict active frame");
 }
 
 void AppliesExactlyOneFrameOfTimestampTolerance() {
@@ -233,12 +253,21 @@ void RejectsMalformedEvidence() {
   pulse.pulse_active_frame_count -= 1U;
   ExpectInvalidArgument([&] { (void)SelectAcceptedLedPeakFrame(pulse); },
                         "inconsistent active count rejected");
+
+  pulse = MakePulse(16, 25);
+  pulse.matched_window_used = true;
+  pulse.matched_supported_frame_count = 9;
+  pulse.matched_high_confidence_frame_count = 10;
+  pulse.matched_longest_contiguous_supported_frame_count = 10;
+  ExpectInvalidArgument([&] { (void)SelectAcceptedLedPeakFrame(pulse); },
+                        "inconsistent matched support count rejected");
 }
 
 }  // namespace
 
 int main() {
   AcceptsAssociatedPulseAndSelectsPeakInsideRun();
+  AcceptsMatchedWindowWithSubthresholdEdgeFrames();
   AppliesExactlyOneFrameOfTimestampTolerance();
   FrameDeliveryLatencyBoundIsExplicit();
   ExposureToleranceIsExplicit();

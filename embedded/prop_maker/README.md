@@ -20,12 +20,13 @@ SC-HIL/1 <id> LED <lead_us> <duration_us>
 SC-HIL/1 <id> TONE <lead_us> <duration_us> <frequency_hz> <level_permille>
 ```
 
-For example, a ten-frame LED pulse at 227 fps and a conservative audio
-stimulus are:
+For example, the combined fixture uses a long locator pulse, a ten-frame
+qualification pulse at 227 fps, and a conservative audio stimulus:
 
 ```text
-SC-HIL/1 101 LED 100000 44053
-SC-HIL/1 102 TONE 100000 20000 2000 125
+SC-HIL/1 101 LED 100000 300000
+SC-HIL/1 102 LED 200000 44053
+SC-HIL/1 103 TONE 100000 20000 2000 10
 ```
 
 `QUERY` returns the firmware version, protocol version, capability names, all

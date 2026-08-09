@@ -236,29 +236,38 @@ bazel test //capture/hil:station_fixture_hil_test \
   --test_output=streamed --nocache_test_results
 ```
 
-It requests a 44,053 us Feather LED pulse and checks for nine through eleven
-visible frames in each free-running camera after correcting whole-frame room
-light variation and subtracting a local background ring. It verifies that the
-same AprilTag identity is present in both views and checks that a conservative
-20 ms, 2 kHz speaker tone has the expected energy, frequency content, and
-duration above the microphone noise floor. It retains an incremental JSON
-report, a WAV, and clean
-tag/accepted-peak-LED PNGs for both roles, including partial evidence on
-failure. This target requires the HIL image to have been explicitly flashed
-beforehand and shares the camera hardware lock with the preview service.
+It first requests a 300 ms Feather LED locator pulse, averages a guarded stable
+ON interval against a guaranteed-OFF baseline, and chooses one localized
+response per camera. It then locks a 44,053 us qualification pulse to that ROI
+and checks its response across a scheduled nine-through-eleven-frame matched
+window. At least nine consecutive frames must meet the lower support threshold,
+at least three of those must also meet the nested high-confidence threshold,
+and the complete window must pass aggregate signal gates. Partial free-running
+exposure-edge frames may fall below support. Whole-frame room-light variation
+is corrected and a local background ring is subtracted in both stages. It also
+verifies that the same AprilTag identity is present in both views and checks
+that a conservative 20 ms, 2 kHz speaker tone has the expected energy,
+frequency content, and duration above the microphone noise floor. It retains
+an incremental JSON report, a WAV, clean tag/locator/qualification PNGs, ROI
+overlays, and averaged red-difference images for both roles, including partial
+evidence on failure. The selected ROI can be an optically useful reflection
+rather than the LED package itself. This target requires the HIL image to have
+been explicitly flashed beforehand and shares the camera hardware lock with
+the preview service.
 AprilTag presence is a framing/focus/exposure sanity check, not pose or
 geometric calibration.
 
 The 2026-08-09 lit-room run passed: both cameras had zero timeouts and frame-ID
-gaps, detected the localized red response to the 44.078 ms commanded pulse over
-ten frame positions (10 active frames down-the-line and 9 face-on), decoded
-`tag36h11` ID 0 with zero corrected bits, and recorded a 2 kHz tone at 20.1 dB
-SNR with no clipped samples. The selected optical regions appear to be nearby
-reflections rather than direct localization of the Feather LED package. Camera
-receipt times are also compared with the Feather schedule, but that comparison
-is an explicit non-gating diagnostic: fixed camera/readout/USB delivery latency
-has not been calibrated, so absolute camera-to-Feather edge association is not
-claimed.
+gaps. Down-the-line had 10 consecutive supported and 10 high-confidence frames;
+face-on had 10 consecutive supported and 7 high-confidence frames. Both
+qualification windows covered 10 frame positions. Both cameras decoded
+`tag36h11` ID 0 with zero corrected bits, and the microphone recorded the
+commanded 2 kHz tone at 17.7 dB SNR with no clipped samples. The selected
+optical regions appear to be nearby reflections rather than direct localization
+of the Feather LED package. Camera receipt times are also compared with the
+Feather schedule, but that comparison is an explicit non-gating diagnostic:
+fixed camera/readout/USB delivery latency has not been calibrated, so absolute
+camera-to-Feather edge association is not claimed.
 
 For unattended operation,
 `bazel run //tools:run_unattended_hil -- smoke|qualify|soak` invokes the

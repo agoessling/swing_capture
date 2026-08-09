@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -26,6 +27,7 @@ struct RegionResponse {
   double local_mean_positive_delta = 0.0;
   double background_mean_positive_delta = 0.0;
   double mean_positive_delta = 0.0;
+  bool supported = false;
   bool active = false;
 };
 
@@ -77,6 +79,31 @@ struct PulseRun {
   double response_sum = 0.0;
 };
 
+struct MatchedWindow {
+  std::size_t start = 0;
+  std::size_t end = 0;
+  std::size_t supported_frames = 0;
+  std::size_t high_confidence_frames = 0;
+  std::size_t longest_contiguous_supported_frames = 0;
+  double mean_positive_delta = 0.0;
+  double changed_fraction = 0.0;
+  double background_mean_positive_delta = 0.0;
+  double background_changed_fraction = 0.0;
+  double score = 0.0;
+};
+
+struct MatchedWindowSpec {
+  std::size_t baseline_frame_count = 0;
+  std::size_t start = 0;
+  std::size_t length = 0;
+};
+
+struct PulseTimingSpec {
+  std::uint64_t timestamp_ticks_per_second = 0;
+  std::size_t start = 0;
+  std::size_t end = 0;
+};
+
 struct CandidateAxis {
   std::uint32_t extent = 0;
   std::uint32_t region_extent = 0;
@@ -113,9 +140,37 @@ void ValidateOptions(const LedPulseOptions &options) {
   if (!(options.minimum_mean_positive_red_delta > 0.0)) {
     throw std::invalid_argument("LED pulse mean positive red delta must be positive");
   }
+  if (!(options.minimum_support_changed_red_fraction > 0.0) ||
+      options.minimum_support_changed_red_fraction > 1.0 ||
+      !(options.minimum_support_mean_positive_red_delta > 0.0)) {
+    throw std::invalid_argument(
+        "LED pulse support thresholds must contain a positive mean delta and a changed-red "
+        "fraction in (0, 1]");
+  }
+  if (options.minimum_support_changed_red_fraction > options.minimum_changed_red_fraction ||
+      options.minimum_support_mean_positive_red_delta > options.minimum_mean_positive_red_delta) {
+    throw std::invalid_argument(
+        "LED pulse support thresholds cannot be stricter than high-confidence thresholds");
+  }
   if (options.minimum_active_frames == 0 || options.maximum_pulse_span_frames == 0 ||
       options.minimum_active_frames > options.maximum_pulse_span_frames) {
     throw std::invalid_argument("LED pulse frame-count limits are inconsistent");
+  }
+  if (options.expected_start_frame_index.has_value()) {
+    if (options.minimum_matched_pulse_frames == 0 ||
+        options.minimum_matched_pulse_frames > options.maximum_matched_pulse_frames ||
+        options.minimum_matched_active_frames == 0 ||
+        options.minimum_matched_active_frames > options.maximum_matched_pulse_frames ||
+        options.minimum_matched_contiguous_supported_frames == 0 ||
+        options.minimum_matched_contiguous_supported_frames >
+            options.maximum_matched_pulse_frames) {
+      throw std::invalid_argument("LED matched-window frame-count limits are inconsistent");
+    }
+    if (!(options.minimum_matched_mean_positive_red_delta > 0.0) ||
+        !(options.minimum_matched_changed_red_fraction > 0.0) ||
+        options.minimum_matched_changed_red_fraction > 1.0) {
+      throw std::invalid_argument("LED matched-window response limits are inconsistent");
+    }
   }
 }
 
@@ -188,6 +243,17 @@ std::vector<std::uint32_t> CandidateAnchors(const CandidateAxis &axis) {
 
 std::vector<PixelRegion> CandidateRegions(const image::Raw8ImageView &image,
                                           const LedPulseOptions &options) {
+  if (options.locked_region.has_value()) {
+    const PixelRegion &region = *options.locked_region;
+    const std::uint64_t right = static_cast<std::uint64_t>(region.x) + region.width;
+    const std::uint64_t bottom = static_cast<std::uint64_t>(region.y) + region.height;
+    if (region.width == 0 || region.height == 0 || right > image.width || bottom > image.height ||
+        (region.x == 0 && region.y == 0 && region.width == image.width &&
+         region.height == image.height)) {
+      throw std::invalid_argument("locked LED region is outside the frame or leaves no background");
+    }
+    return {region};
+  }
   const auto x_anchors = CandidateAnchors({
       .extent = image.width,
       .region_extent = options.region_width,
@@ -355,7 +421,11 @@ RegionResponse MakeResponse(const RegionSums &sums, const LedPulseOptions &optio
       .mean_positive_delta =
           std::max(0.0, local_mean_positive_delta - background_mean_positive_delta),
   };
-  response.active = response.changed_samples >= options.minimum_changed_red_samples &&
+  response.supported =
+      response.changed_fraction >= options.minimum_support_changed_red_fraction &&
+      response.mean_positive_delta >= options.minimum_support_mean_positive_red_delta;
+  response.active = response.supported &&
+                    response.changed_samples >= options.minimum_changed_red_samples &&
                     response.changed_fraction >= options.minimum_changed_red_fraction &&
                     response.mean_positive_delta >= options.minimum_mean_positive_red_delta;
   return response;
@@ -525,6 +595,116 @@ std::vector<PulseRun> FindRuns(std::span<const LedFrameDiagnostic> diagnostics,
   return runs;
 }
 
+MatchedWindow MeasureMatchedWindow(std::span<const LedFrameDiagnostic> diagnostics,
+                                   const MatchedWindowSpec &spec) {
+  MatchedWindow result{
+      .start = spec.start,
+      .end = spec.start + spec.length - 1U,
+  };
+  double signal_delta_sum = 0.0;
+  double signal_fraction_sum = 0.0;
+  double background_delta_sum = 0.0;
+  double background_fraction_sum = 0.0;
+  std::size_t background_frames = 0;
+  std::size_t contiguous_supported_frames = 0;
+  for (std::size_t index = spec.baseline_frame_count; index < diagnostics.size(); ++index) {
+    const LedFrameDiagnostic &frame = diagnostics[index];
+    if (index >= result.start && index <= result.end) {
+      signal_delta_sum += frame.mean_positive_red_delta;
+      signal_fraction_sum += frame.changed_red_fraction;
+      result.supported_frames += frame.supported ? 1U : 0U;
+      result.high_confidence_frames += frame.active ? 1U : 0U;
+      contiguous_supported_frames = frame.supported ? contiguous_supported_frames + 1U : 0U;
+      result.longest_contiguous_supported_frames =
+          std::max(result.longest_contiguous_supported_frames, contiguous_supported_frames);
+    } else {
+      background_delta_sum += frame.mean_positive_red_delta;
+      background_fraction_sum += frame.changed_red_fraction;
+      ++background_frames;
+    }
+  }
+  const auto signal_frames = static_cast<double>(spec.length);
+  const auto background_denominator = static_cast<double>(background_frames);
+  result.background_mean_positive_delta =
+      background_frames == 0 ? 0.0 : background_delta_sum / background_denominator;
+  result.background_changed_fraction =
+      background_frames == 0 ? 0.0 : background_fraction_sum / background_denominator;
+  result.mean_positive_delta =
+      std::max(0.0, signal_delta_sum / signal_frames - result.background_mean_positive_delta);
+  result.changed_fraction =
+      std::max(0.0, signal_fraction_sum / signal_frames - result.background_changed_fraction);
+  result.score = result.mean_positive_delta * signal_frames;
+  return result;
+}
+
+std::size_t StartDistance(std::size_t start, std::size_t expected) {
+  return start > expected ? start - expected : expected - start;
+}
+
+bool IsBetterMatchedWindow(const MatchedWindow &left, const MatchedWindow &right,
+                           std::size_t expected_start) {
+  const auto left_evidence =
+      std::tuple(left.longest_contiguous_supported_frames, left.supported_frames,
+                 left.high_confidence_frames, left.score, left.changed_fraction);
+  const auto right_evidence =
+      std::tuple(right.longest_contiguous_supported_frames, right.supported_frames,
+                 right.high_confidence_frames, right.score, right.changed_fraction);
+  if (left_evidence != right_evidence) {
+    return left_evidence > right_evidence;
+  }
+  const std::size_t left_unsupported = left.end - left.start + 1U - left.supported_frames;
+  const std::size_t right_unsupported = right.end - right.start + 1U - right.supported_frames;
+  if (left_unsupported != right_unsupported) {
+    return left_unsupported < right_unsupported;
+  }
+  return StartDistance(left.start, expected_start) < StartDistance(right.start, expected_start);
+}
+
+MatchedWindow FindBestMatchedWindow(std::span<const LedFrameDiagnostic> diagnostics,
+                                    const LedPulseOptions &options) {
+  if (!options.expected_start_frame_index.has_value()) {
+    throw std::invalid_argument("LED matched-window search requires an expected start");
+  }
+  const std::size_t expected = options.expected_start_frame_index.value();
+  if (expected < options.baseline_frame_count || expected >= diagnostics.size()) {
+    throw std::invalid_argument("LED matched-window expected start is outside analyzable frames");
+  }
+  const std::size_t earliest = std::max(options.baseline_frame_count,
+                                        expected > options.expected_start_tolerance_frames
+                                            ? expected - options.expected_start_tolerance_frames
+                                            : std::size_t{0});
+  const std::size_t latest_by_tolerance =
+      expected > std::numeric_limits<std::size_t>::max() - options.expected_start_tolerance_frames
+          ? std::numeric_limits<std::size_t>::max()
+          : expected + options.expected_start_tolerance_frames;
+  if (diagnostics.size() < options.minimum_matched_pulse_frames) {
+    throw std::invalid_argument("LED matched-window input is shorter than its minimum span");
+  }
+  const std::size_t latest =
+      std::min(latest_by_tolerance, diagnostics.size() - options.minimum_matched_pulse_frames);
+  if (earliest > latest) {
+    throw std::invalid_argument("LED matched-window has no candidate near the expected start");
+  }
+
+  std::optional<MatchedWindow> best;
+  for (std::size_t start = earliest; start <= latest; ++start) {
+    for (std::size_t length = options.minimum_matched_pulse_frames;
+         length <= options.maximum_matched_pulse_frames && length <= diagnostics.size() - start;
+         ++length) {
+      const MatchedWindow candidate = MeasureMatchedWindow(
+          diagnostics,
+          {.baseline_frame_count = options.baseline_frame_count, .start = start, .length = length});
+      if (!best.has_value() || IsBetterMatchedWindow(candidate, *best, expected)) {
+        best = candidate;
+      }
+    }
+  }
+  if (!best.has_value()) {
+    throw std::invalid_argument("LED matched-window search produced no candidate");
+  }
+  return *best;
+}
+
 std::uint64_t MedianFrameInterval(std::span<const BayerRg8FrameView> frames) {
   std::vector<std::uint64_t> intervals;
   intervals.reserve(frames.size() - 1U);
@@ -544,6 +724,170 @@ bool IsBetterRun(const PulseRun &left, const PulseRun &right) {
          std::tuple(right.active_frames, right.response_sum);
 }
 
+void PopulatePulseTiming(LedPulseResult *result, std::span<const BayerRg8FrameView> frames,
+                         const PulseTimingSpec &spec) {
+  result->pulse_start_frame_index = spec.start;
+  result->pulse_end_frame_index = spec.end;
+  result->pulse_span_frame_count = spec.end - spec.start + 1U;
+  result->start_device_timestamp = frames[spec.start].device_timestamp;
+  result->nominal_frame_interval_ticks = MedianFrameInterval(frames);
+  const std::uint64_t timestamp_span =
+      frames[spec.end].device_timestamp - frames[spec.start].device_timestamp;
+  if (timestamp_span >
+      std::numeric_limits<std::uint64_t>::max() - result->nominal_frame_interval_ticks) {
+    throw std::invalid_argument("LED pulse device-timestamp duration overflows");
+  }
+  result->duration_ticks = timestamp_span + result->nominal_frame_interval_ticks;
+  if (result->start_device_timestamp >
+      std::numeric_limits<std::uint64_t>::max() - result->duration_ticks) {
+    throw std::invalid_argument("LED pulse exclusive end timestamp overflows");
+  }
+  result->end_device_timestamp_exclusive = result->start_device_timestamp + result->duration_ticks;
+  result->duration_seconds = static_cast<double>(result->duration_ticks) /
+                             static_cast<double>(spec.timestamp_ticks_per_second);
+}
+
+void MeasureSelectedRegion(LedPulseResult *result, std::span<const BayerRg8FrameView> frames,
+                           std::span<const double> baseline,
+                           std::span<const IlluminationModel> illumination_models,
+                           const LedPulseOptions &options) {
+  result->frames.reserve(frames.size());
+  for (std::size_t index = 0; index < frames.size(); ++index) {
+    const RegionResponse response = MeasureRegion(
+        frames[index], baseline, illumination_models[index], result->selected_region, options);
+    result->frames.push_back({
+        .frame_id = frames[index].frame_id,
+        .device_timestamp = frames[index].device_timestamp,
+        .changed_red_samples = response.changed_samples,
+        .red_samples = response.sample_count,
+        .local_changed_red_fraction = response.local_changed_fraction,
+        .background_changed_red_fraction = response.background_changed_fraction,
+        .changed_red_fraction = response.changed_fraction,
+        .local_mean_positive_red_delta = response.local_mean_positive_delta,
+        .background_mean_positive_red_delta = response.background_mean_positive_delta,
+        .mean_positive_red_delta = response.mean_positive_delta,
+        .global_illumination_scale = illumination_models[index].scale,
+        .global_illumination_offset = illumination_models[index].offset,
+        .baseline_frame = index < options.baseline_frame_count,
+        .supported = index >= options.baseline_frame_count && response.supported,
+        .active = index >= options.baseline_frame_count && response.active,
+    });
+  }
+}
+
+void RecordStrongestResponse(LedPulseResult *result, std::size_t baseline_frame_count) {
+  result->strongest_response_frame_index = baseline_frame_count;
+  for (std::size_t index = baseline_frame_count; index < result->frames.size(); ++index) {
+    if (result->frames[index].mean_positive_red_delta > result->strongest_mean_positive_red_delta) {
+      result->strongest_response_frame_index = index;
+      result->strongest_mean_positive_red_delta = result->frames[index].mean_positive_red_delta;
+    }
+  }
+}
+
+void ApplyMatchedWindowDetection(LedPulseResult *result, std::span<const BayerRg8FrameView> frames,
+                                 std::uint64_t timestamp_ticks_per_second,
+                                 const LedPulseOptions &options) {
+  const MatchedWindow matched = FindBestMatchedWindow(result->frames, options);
+  result->matched_window_used = true;
+  result->matched_mean_positive_red_delta = matched.mean_positive_delta;
+  result->matched_changed_red_fraction = matched.changed_fraction;
+  result->matched_background_mean_positive_red_delta = matched.background_mean_positive_delta;
+  result->matched_background_changed_red_fraction = matched.background_changed_fraction;
+  result->matched_supported_frame_count = matched.supported_frames;
+  result->matched_high_confidence_frame_count = matched.high_confidence_frames;
+  result->matched_longest_contiguous_supported_frame_count =
+      matched.longest_contiguous_supported_frames;
+  result->pulse_active_frame_count = matched.high_confidence_frames;
+  PopulatePulseTiming(result, frames,
+                      {.timestamp_ticks_per_second = timestamp_ticks_per_second,
+                       .start = matched.start,
+                       .end = matched.end});
+  result->detected =
+      matched.high_confidence_frames >= options.minimum_matched_active_frames &&
+      matched.longest_contiguous_supported_frames >=
+          options.minimum_matched_contiguous_supported_frames &&
+      matched.mean_positive_delta >= options.minimum_matched_mean_positive_red_delta &&
+      matched.changed_fraction >= options.minimum_matched_changed_red_fraction;
+  if (result->detected) {
+    return;
+  }
+  std::ostringstream message;
+  message << "no scheduled LED pulse met the matched-window thresholds in locked region x="
+          << result->selected_region.x << ", y=" << result->selected_region.y << "; best "
+          << result->pulse_span_frame_count << "-frame window had "
+          << result->matched_supported_frame_count << " supported frames and "
+          << result->matched_high_confidence_frame_count
+          << " high-confidence frames; longest contiguous support="
+          << result->matched_longest_contiguous_supported_frame_count
+          << " frames; mean red excess=" << result->matched_mean_positive_red_delta
+          << ", changed-red excess=" << result->matched_changed_red_fraction;
+  result->diagnostic = message.str();
+}
+
+void ApplyThresholdRunDetection(LedPulseResult *result, std::span<const BayerRg8FrameView> frames,
+                                std::uint64_t timestamp_ticks_per_second,
+                                const LedPulseOptions &options) {
+  const auto runs = FindRuns(result->frames, options);
+  auto valid = runs.end();
+  for (auto candidate = runs.begin(); candidate != runs.end(); ++candidate) {
+    const std::size_t span = candidate->end - candidate->start + 1U;
+    if (candidate->active_frames >= options.minimum_active_frames &&
+        span <= options.maximum_pulse_span_frames &&
+        (valid == runs.end() || IsBetterRun(*candidate, *valid))) {
+      valid = candidate;
+    }
+  }
+  if (valid != runs.end()) {
+    result->detected = true;
+    result->pulse_active_frame_count = valid->active_frames;
+    PopulatePulseTiming(result, frames,
+                        {.timestamp_ticks_per_second = timestamp_ticks_per_second,
+                         .start = valid->start,
+                         .end = valid->end});
+    return;
+  }
+
+  const auto best = std::ranges::max_element(runs, {}, [](const PulseRun &run) {
+    return std::tuple(run.active_frames, run.response_sum);
+  });
+  std::ostringstream message;
+  message << "no short LED pulse met the " << options.minimum_active_frames << " active-frame and "
+          << options.maximum_pulse_span_frames
+          << " span-frame limits in region x=" << result->selected_region.x
+          << ", y=" << result->selected_region.y;
+  if (best != runs.end()) {
+    message << "; best run had " << best->active_frames << " active frames across "
+            << (best->end - best->start + 1U) << " frame positions";
+  } else {
+    message << "; no frame crossed the global-corrected local/background excess thresholds";
+  }
+  result->diagnostic = message.str();
+}
+
+std::string SuccessfulDiagnostic(const LedPulseResult &result) {
+  std::ostringstream message;
+  message << (result.matched_window_used ? "matched scheduled" : "detected") << " LED pulse with "
+          << result.pulse_active_frame_count << " high-confidence frames across "
+          << result.pulse_span_frame_count
+          << " frame positions in region x=" << result.selected_region.x
+          << ", y=" << result.selected_region.y
+          << "; response is global-affine corrected and background normalized"
+          << "; device-local duration=" << result.duration_seconds << " seconds";
+  if (result.matched_window_used) {
+    message << "; matched supported frames=" << result.matched_supported_frame_count
+            << ", high-confidence frames=" << result.matched_high_confidence_frame_count
+            << ", longest contiguous support="
+            << result.matched_longest_contiguous_supported_frame_count
+            << "; matched mean red excess=" << result.matched_mean_positive_red_delta
+            << ", changed-red excess=" << result.matched_changed_red_fraction;
+  }
+  if (result.missing_frame_ids != 0) {
+    message << "; input sequence is missing " << result.missing_frame_ids << " frame IDs";
+  }
+  return message.str();
+}
+
 }  // namespace
 
 LedPulseResult AnalyzeLedPulse(std::span<const BayerRg8FrameView> frames,
@@ -558,90 +902,17 @@ LedPulseResult AnalyzeLedPulse(std::span<const BayerRg8FrameView> frames,
   const std::size_t selected_index =
       SelectCandidate(frames, baseline, regions, illumination_models, options);
   result.selected_region = regions[selected_index];
-  result.frames.reserve(frames.size());
-  for (std::size_t index = 0; index < frames.size(); ++index) {
-    const RegionResponse response = MeasureRegion(
-        frames[index], baseline, illumination_models[index], result.selected_region, options);
-    result.frames.push_back({
-        .frame_id = frames[index].frame_id,
-        .device_timestamp = frames[index].device_timestamp,
-        .changed_red_samples = response.changed_samples,
-        .red_samples = response.sample_count,
-        .local_changed_red_fraction = response.local_changed_fraction,
-        .background_changed_red_fraction = response.background_changed_fraction,
-        .changed_red_fraction = response.changed_fraction,
-        .local_mean_positive_red_delta = response.local_mean_positive_delta,
-        .background_mean_positive_red_delta = response.background_mean_positive_delta,
-        .mean_positive_red_delta = response.mean_positive_delta,
-        .global_illumination_scale = illumination_models[index].scale,
-        .global_illumination_offset = illumination_models[index].offset,
-        .baseline_frame = index < options.baseline_frame_count,
-        .active = index >= options.baseline_frame_count && response.active,
-    });
-  }
+  MeasureSelectedRegion(&result, frames, baseline, illumination_models, options);
+  RecordStrongestResponse(&result, options.baseline_frame_count);
 
-  const auto runs = FindRuns(result.frames, options);
-  auto valid = runs.end();
-  for (auto candidate = runs.begin(); candidate != runs.end(); ++candidate) {
-    const std::size_t span = candidate->end - candidate->start + 1U;
-    if (candidate->active_frames >= options.minimum_active_frames &&
-        span <= options.maximum_pulse_span_frames &&
-        (valid == runs.end() || IsBetterRun(*candidate, *valid))) {
-      valid = candidate;
-    }
+  if (options.expected_start_frame_index.has_value()) {
+    ApplyMatchedWindowDetection(&result, frames, timestamp_ticks_per_second, options);
+  } else {
+    ApplyThresholdRunDetection(&result, frames, timestamp_ticks_per_second, options);
   }
-  if (valid == runs.end()) {
-    const auto best = std::ranges::max_element(runs, {}, [](const PulseRun &run) {
-      return std::tuple(run.active_frames, run.response_sum);
-    });
-    std::ostringstream message;
-    message << "no short LED pulse met the " << options.minimum_active_frames
-            << " active-frame and " << options.maximum_pulse_span_frames
-            << " span-frame limits in region x=" << result.selected_region.x
-            << ", y=" << result.selected_region.y;
-    if (best != runs.end()) {
-      message << "; best run had " << best->active_frames << " active frames across "
-              << (best->end - best->start + 1U) << " frame positions";
-    } else {
-      message << "; no frame crossed the global-corrected local/background excess thresholds";
-    }
-    result.diagnostic = message.str();
-    return result;
+  if (result.detected) {
+    result.diagnostic = SuccessfulDiagnostic(result);
   }
-
-  result.detected = true;
-  result.pulse_start_frame_index = valid->start;
-  result.pulse_end_frame_index = valid->end;
-  result.pulse_active_frame_count = valid->active_frames;
-  result.pulse_span_frame_count = valid->end - valid->start + 1U;
-  result.start_device_timestamp = frames[valid->start].device_timestamp;
-  result.nominal_frame_interval_ticks = MedianFrameInterval(frames);
-  const std::uint64_t timestamp_span =
-      frames[valid->end].device_timestamp - frames[valid->start].device_timestamp;
-  if (timestamp_span >
-      std::numeric_limits<std::uint64_t>::max() - result.nominal_frame_interval_ticks) {
-    throw std::invalid_argument("LED pulse device-timestamp duration overflows");
-  }
-  result.duration_ticks = timestamp_span + result.nominal_frame_interval_ticks;
-  if (result.start_device_timestamp >
-      std::numeric_limits<std::uint64_t>::max() - result.duration_ticks) {
-    throw std::invalid_argument("LED pulse exclusive end timestamp overflows");
-  }
-  result.end_device_timestamp_exclusive = result.start_device_timestamp + result.duration_ticks;
-  result.duration_seconds =
-      static_cast<double>(result.duration_ticks) / static_cast<double>(timestamp_ticks_per_second);
-
-  std::ostringstream message;
-  message << "detected " << result.pulse_active_frame_count << " active frames across "
-          << result.pulse_span_frame_count
-          << " frame positions in region x=" << result.selected_region.x
-          << ", y=" << result.selected_region.y
-          << "; response is global-affine corrected and background normalized"
-          << "; device-local duration=" << result.duration_seconds << " seconds";
-  if (result.missing_frame_ids != 0) {
-    message << "; input sequence is missing " << result.missing_frame_ids << " frame IDs";
-  }
-  result.diagnostic = message.str();
   return result;
 }
 

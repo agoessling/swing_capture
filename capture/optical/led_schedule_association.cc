@@ -77,7 +77,7 @@ Clock::duration MedianFrameInterval(std::span<const Clock::time_point> frame_hos
   return intervals[middle - 1U] + (intervals[middle] - intervals[middle - 1U]) / 2;
 }
 
-std::size_t CountActiveFramesInAcceptedSpan(const LedPulseResult &pulse) {
+std::size_t ValidateAcceptedSpan(const LedPulseResult &pulse) {
   if (!pulse.detected) {
     throw std::invalid_argument("accepted LED pulse operation requires a detected pulse");
   }
@@ -86,8 +86,9 @@ std::size_t CountActiveFramesInAcceptedSpan(const LedPulseResult &pulse) {
     throw std::invalid_argument("detected LED pulse has invalid accepted-run indices");
   }
   const std::size_t span = pulse.pulse_end_frame_index - pulse.pulse_start_frame_index + 1U;
-  if (pulse.pulse_span_frame_count != span || !pulse.frames[pulse.pulse_start_frame_index].active ||
-      !pulse.frames[pulse.pulse_end_frame_index].active) {
+  if (pulse.pulse_span_frame_count != span ||
+      (!pulse.matched_window_used && (!pulse.frames[pulse.pulse_start_frame_index].active ||
+                                      !pulse.frames[pulse.pulse_end_frame_index].active))) {
     throw std::invalid_argument("detected LED pulse has inconsistent accepted-run span");
   }
   const auto begin =
@@ -98,6 +99,25 @@ std::size_t CountActiveFramesInAcceptedSpan(const LedPulseResult &pulse) {
       static_cast<std::size_t>(std::ranges::count_if(begin, end, &LedFrameDiagnostic::active));
   if (active == 0 || active != pulse.pulse_active_frame_count) {
     throw std::invalid_argument("detected LED pulse has inconsistent active-frame count");
+  }
+  if (pulse.matched_window_used) {
+    const auto supported =
+        static_cast<std::size_t>(std::ranges::count_if(begin, end, &LedFrameDiagnostic::supported));
+    std::size_t longest_contiguous_supported = 0;
+    std::size_t contiguous_supported = 0;
+    for (auto frame = begin; frame != end; ++frame) {
+      if (frame->active && !frame->supported) {
+        throw std::invalid_argument(
+            "detected LED pulse has high-confidence evidence without frame support");
+      }
+      contiguous_supported = frame->supported ? contiguous_supported + 1U : 0U;
+      longest_contiguous_supported = std::max(longest_contiguous_supported, contiguous_supported);
+    }
+    if (supported != pulse.matched_supported_frame_count ||
+        active != pulse.matched_high_confidence_frame_count ||
+        longest_contiguous_supported != pulse.matched_longest_contiguous_supported_frame_count) {
+      throw std::invalid_argument("detected LED pulse has inconsistent matched support counts");
+    }
   }
   return active;
 }
@@ -157,7 +177,7 @@ LedScheduleAssociationResult EvaluateLedScheduleAssociation(
     result.passed = false;
     return result;
   }
-  (void)CountActiveFramesInAcceptedSpan(pulse);
+  (void)ValidateAcceptedSpan(pulse);
 
   result.observed_start = selected_frame_host_times[pulse.pulse_start_frame_index];
   result.observed_end_exclusive =
@@ -196,7 +216,7 @@ LedScheduleAssociationResult EvaluateLedScheduleAssociation(
 }
 
 std::size_t SelectAcceptedLedPeakFrame(const LedPulseResult &pulse) {
-  (void)CountActiveFramesInAcceptedSpan(pulse);
+  (void)ValidateAcceptedSpan(pulse);
   std::size_t selected = pulse.frames.size();
   double selected_response = 0.0;
   for (std::size_t index = pulse.pulse_start_frame_index; index <= pulse.pulse_end_frame_index;

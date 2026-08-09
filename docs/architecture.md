@@ -69,19 +69,26 @@ classification remains diagnostic evidence rather than a transport gate.
 The short station-fixture HIL stops and joins both camera producer threads
 before stopping either Galaxy stream, then analyzes immutable ring snapshots.
 Its LED detector removes a fitted per-frame global illumination change and
-requires a localized response above a surrounding background ring. AprilTag
-presence is evaluated on luminance derived from an offline demosaic, rather
-than interpreting the color Bayer mosaic as grayscale. The same `tag36h11` ID
-must decode in both views; this is a framing/focus/exposure check, not a pose or
-geometric-calibration claim.
+requires a localized response above a surrounding background ring. A long
+guarded locator pulse chooses one ROI per camera; a later 44.053 ms pulse is
+evaluated only there with a scheduled matched window. Qualification requires
+nine consecutive lower-threshold supported frames, three nested
+high-confidence anchors, and aggregate signal strength. This separates
+continuous weak evidence from isolated bright frames while allowing partial
+free-running exposure-edge frames. The strongest frames are retained even on
+rejection, together with clean images, ROI overlays, and averaged
+red-difference diagnostics. AprilTag presence is evaluated on luminance derived
+from an offline demosaic, rather than interpreting the color Bayer mosaic as
+grayscale. The same `tag36h11` ID must decode in both views; this is a
+framing/focus/exposure check, not a pose or geometric-calibration claim.
 
 Robust batch clock fitting maps camera device ticks to normal host receipt
 times while rejecting queued-delivery outliers. A constant camera/readout/USB
 delivery delay is not observable in those samples. The LED-versus-Feather
 schedule comparison therefore records its one-frame delivery assumption and
-remains diagnostic; station acceptance instead gates the localized pulse
-duration in the command-relative retained window plus the independently
-verified Feather command/device timing.
+remains diagnostic; station acceptance instead gates locator consistency and
+the short pulse's integrated response and duration in its command-relative
+retained window, plus independently verified Feather command/device timing.
 
 ## Headless setup preview
 
