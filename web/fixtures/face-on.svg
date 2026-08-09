@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1080" role="img" aria-labelledby="title description">
+  <title id="title">Face-on camera fixture</title>
+  <desc id="description">A synthetic golf hitting bay viewed from in front of the golfer.</desc>
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#485b62"/>
+      <stop offset="1" stop-color="#182326"/>
+    </linearGradient>
+    <pattern id="lines" width="80" height="80" patternUnits="userSpaceOnUse">
+      <path d="M0 80L80 0M-20 20L20-20M60 100l40-40" stroke="#7de7dd" stroke-opacity=".08" stroke-width="4"/>
+    </pattern>
+  </defs>
+  <rect width="1440" height="1080" fill="#101617"/>
+  <rect width="1440" height="760" fill="url(#wall)"/>
+  <rect y="760" width="1440" height="320" fill="#142a22"/>
+  <rect x="94" y="146" width="430" height="498" rx="8" fill="#192426" stroke="#a8b6b6" stroke-width="4"/>
+  <g stroke="#596a6d" stroke-width="5">
+    <path d="M237 146v498M380 146v498M94 312h430M94 478h430"/>
+  </g>
+  <rect x="958" y="98" width="328" height="612" rx="8" fill="#dce7e1"/>
+  <path d="M1122 98v612M958 404h328" stroke="#92a5a1" stroke-width="3" stroke-dasharray="12 12"/>
+  <path d="M420 841h666l94 176H335z" fill="#39744f" stroke="#8ec99b" stroke-width="5"/>
+  <ellipse cx="757" cy="884" rx="13" ry="7" fill="#fff"/>
+  <circle cx="692" cy="405" r="59" fill="#151a1b"/>
+  <path d="M636 462c-50 108-44 243-26 348h170c14-117 12-245-34-348z" fill="#bce839"/>
+  <path d="M640 805l-51 147M746 806l55 146" stroke="#1b2021" stroke-width="29" stroke-linecap="round"/>
+  <path d="M648 524l108 92 95-34" stroke="#ecf2ef" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M850 582l-77 297" stroke="#dce2df" stroke-width="7"/>
+  <rect width="1440" height="1080" fill="url(#lines)"/>
+  <g fill="#7df3e8" font-family="system-ui,sans-serif">
+    <text x="42" y="62" font-size="24" font-weight="700" letter-spacing="4">FACE-ON · FIXTURE</text>
+    <text x="42" y="1014" font-size="20">Focus reference: shelving, shirt edge, club grip</text>
+  </g>
+  <g stroke="#7df3e8" stroke-width="3" opacity=".75">
+    <path d="M720 72v60M690 102h60M720 948v60M690 978h60"/>
+    <circle cx="720" cy="540" r="36" fill="none"/>
+    <path d="M664 540h112M720 484v112"/>
+  </g>
+</svg>

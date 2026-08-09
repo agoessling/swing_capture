@@ -13,11 +13,22 @@ tool_binary(
     src = "@bazel_devtools_llvm_toolchain_llvm//:bin/clang-tidy",
 )
 
+alias(
+    name = "biome",
+    actual = "@bazel_devtools//tools:biome",
+)
+
+alias(
+    name = "biome_cwd",
+    actual = "@bazel_devtools//tools:biome_cwd",
+)
+
 bazel_devtools_formatters(
     name = "formatters",
     languages = [
         "python",
         "cpp",
+        "typescript",
     ],
     clang_format = ":clang_format",
 )

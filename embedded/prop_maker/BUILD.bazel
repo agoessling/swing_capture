@@ -1,5 +1,20 @@
-load("@pico-sdk//bazel:defs.bzl", "pico_board_config")
+load("@pico-sdk//bazel:defs.bzl", "pico_board_config", "pico_generate_pio_header")
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
 load("//embedded/rp2040:defs.bzl", "rp2040_firmware", "rp2040_flash")
+
+cc_library(
+    name = "hil_protocol",
+    srcs = ["hil_protocol.c"],
+    hdrs = ["hil_protocol.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "hil_protocol_test",
+    size = "small",
+    srcs = ["hil_protocol_test.cc"],
+    deps = [":hil_protocol"],
+)
 
 pico_board_config(
     name = "board_config",
@@ -20,9 +35,46 @@ rp2040_firmware(
     deps = ["@pico-sdk//src/rp2_common/pico_stdlib"],
 )
 
+pico_generate_pio_header(
+    name = "audio_i2s_pio",
+    srcs = ["audio_i2s.pio"],
+)
+
+rp2040_firmware(
+    name = "hil_firmware",
+    srcs = ["hil_firmware.c"],
+    board_config = "//embedded/prop_maker:board_config",
+    # Pico SDK public headers intentionally use GNU C statement expressions,
+    # so this embedded vendor boundary cannot enable -Wpedantic. Keep all
+    # other warnings fatal for the first-party firmware translation unit.
+    copts = [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    deps = [
+        ":audio_i2s_pio",
+        ":hil_protocol",
+        "@pico-sdk//src/rp2_common/hardware_clocks",
+        "@pico-sdk//src/rp2_common/hardware_dma",
+        "@pico-sdk//src/rp2_common/hardware_pio",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
 rp2040_flash(
     name = "flash_diagnostic",
     firmware = ":diagnostic_firmware",
+    tags = [
+        "manual",
+        "no-host-sanitizer",
+        "requires-rp2040",
+    ],
+)
+
+rp2040_flash(
+    name = "flash_hil",
+    firmware = ":hil_firmware",
     tags = [
         "manual",
         "no-host-sanitizer",

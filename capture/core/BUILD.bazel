@@ -1,5 +1,4 @@
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "camera_source",
@@ -11,6 +10,13 @@ cc_library(
     name = "device_clock_mapper",
     srcs = ["device_clock_mapper.cc"],
     hdrs = ["device_clock_mapper.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_library(
+    name = "robust_device_clock_mapping",
+    srcs = ["robust_device_clock_mapping.cc"],
+    hdrs = ["robust_device_clock_mapping.h"],
     visibility = ["//capture:__subpackages__"],
 )
 
@@ -56,4 +62,11 @@ cc_test(
     size = "small",
     srcs = ["device_clock_mapper_test.cc"],
     deps = [":device_clock_mapper"],
+)
+
+cc_test(
+    name = "robust_device_clock_mapping_test",
+    size = "small",
+    srcs = ["robust_device_clock_mapping_test.cc"],
+    deps = [":robust_device_clock_mapping"],
 )

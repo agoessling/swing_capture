@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -17,6 +18,7 @@
 #include "capture/audio/arecord_pcm_source.h"
 #include "capture/audio/audio_hil_metrics.h"
 #include "capture/trigger/impact_detector.h"
+#include "station/station_config.h"
 
 namespace {
 
@@ -32,8 +34,6 @@ using swing_capture::ImpactEvent;
 using swing_capture::PcmReadStatus;
 
 constexpr std::uint32_t kSampleRateHz = 32000;
-constexpr std::uint16_t kChannelCount = 2;
-constexpr std::uint16_t kSelectedChannel = 0;
 constexpr std::uint64_t kTargetFrames = kSampleRateHz * 3;
 constexpr AudioHilThresholds kThresholds = {};
 
@@ -75,7 +75,8 @@ std::filesystem::path OutputPath() {
 void WriteReport(const std::filesystem::path &path, const AudioHilMeasurements &measurements,
                  const AudioHilThresholds &thresholds, const AudioHilEvaluation &evaluation,
                  std::uint64_t blocks, std::uint64_t impact_events,
-                 std::uint64_t dropped_impact_events, std::string_view device) {
+                 std::uint64_t dropped_impact_events, std::string_view device,
+                 std::uint16_t channel_count, std::uint16_t selected_channel) {
   std::ofstream output(path);
   if (!output) {
     throw std::runtime_error("cannot open audio HIL report: " + path.string());
@@ -86,8 +87,8 @@ void WriteReport(const std::filesystem::path &path, const AudioHilMeasurements &
          << "  \"passed\": " << (evaluation.passed ? "true" : "false") << ",\n"
          << "  \"device\": \"" << JsonEscape(device) << "\",\n"
          << "  \"sample_rate_hz\": " << measurements.sample_rate_hz << ",\n"
-         << "  \"channel_count\": " << kChannelCount << ",\n"
-         << "  \"selected_channel\": " << kSelectedChannel << ",\n"
+         << "  \"channel_count\": " << channel_count << ",\n"
+         << "  \"selected_channel\": " << selected_channel << ",\n"
          << "  \"target_mono_samples\": " << measurements.target_frames << ",\n"
          << "  \"received_mono_samples\": " << measurements.received_frames << ",\n"
          << "  \"blocks\": " << blocks << ",\n"
@@ -132,14 +133,22 @@ void WriteReport(const std::filesystem::path &path, const AudioHilMeasurements &
 
 }  // namespace
 
-int main() {
+int RunAudioHil() {
+  const std::optional<std::filesystem::path> station_path =
+      swing_capture::station::StationConfigPathFromEnvironment();
+  if (!station_path.has_value()) {
+    throw std::runtime_error(
+        "SWING_CAPTURE_STATION_CONFIG is not set; configure it in .bazelrc.local");
+  }
+  const swing_capture::station::StationConfig station =
+      swing_capture::station::LoadStationConfig(*station_path);
   const auto report_path = OutputPath();
   ArecordPcmConfig config = {
       .capture_executable = "/usr/bin/arecord",
-      .device = "hw:CARD=C925e,DEV=0",
+      .device = station.audio_alsa_device,
       .sample_rate_hz = kSampleRateHz,
-      .channel_count = kChannelCount,
-      .selected_channel = kSelectedChannel,
+      .channel_count = station.audio_channel_count,
+      .selected_channel = station.audio_selected_channel,
       .frames_per_block = 1024,
       .read_timeout = std::chrono::seconds(2),
   };
@@ -211,7 +220,7 @@ int main() {
   };
   const AudioHilEvaluation evaluation = EvaluateAudioHil(measurements, kThresholds);
   WriteReport(report_path, measurements, kThresholds, evaluation, blocks, impact_events,
-              dropped_impact_events, config.device);
+              dropped_impact_events, config.device, config.channel_count, config.selected_channel);
 
   std::cout << "Audio HIL " << (evaluation.passed ? "PASS" : "FAIL") << ": samples=" << frames
             << " blocks=" << blocks << " rms=" << rms_amplitude << " peak=" << peak_amplitude
@@ -228,4 +237,13 @@ int main() {
     return 1;
   }
   return 0;
+}
+
+int main() {
+  try {
+    return RunAudioHil();
+  } catch (const std::exception &error) {
+    std::cerr << "audio_hil_test: " << error.what() << '\n';
+    return 1;
+  }
 }

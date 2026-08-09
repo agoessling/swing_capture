@@ -7,10 +7,24 @@
       "ownership": "managed_file",
       "template_version": "0.1.0"
     },
+    ".bazel_devtools/biome.json": {
+      "base": "{\n  \"$schema\": \"https://biomejs.dev/schemas/2.5.6/schema.json\",\n  \"files\": {\n    \"includes\": [\"**\", \"!**/bazel-*\", \"!**/node_modules\"]\n  },\n  \"formatter\": {\n    \"enabled\": true,\n    \"formatWithErrors\": false,\n    \"indentStyle\": \"space\",\n    \"lineEnding\": \"lf\",\n    \"lineWidth\": 100\n  },\n  \"linter\": {\n    \"enabled\": true,\n    \"rules\": {\n      \"recommended\": true\n    }\n  },\n  \"javascript\": {\n    \"formatter\": {\n      \"jsxQuoteStyle\": \"double\",\n      \"quoteStyle\": \"double\",\n      \"semicolons\": \"always\"\n    }\n  }\n}\n",
+      "block_id": null,
+      "digest": "7dc56fe2a29c254651c15af7519d6799d25b2d7575270ac7fbbb68a6e80d3873",
+      "ownership": "managed_file",
+      "template_version": "0.1.0"
+    },
     ".bazel_devtools/ruff.toml": {
       "base": "line-length = 100\n\n[lint]\nselect = [\"ALL\"]\nignore = [\n    # These rules conflict with Ruff's formatter.\n    \"COM812\",\n    \"ISC001\",\n    # A repository-level license is sufficient; per-file notices add churn.\n    \"CPY001\",\n    # Bazel package boundaries do not imply Python package boundaries.\n    \"INP001\",\n    # Assertions and unittest assertion helpers are valid project policy.\n    \"PT009\",\n    \"PT027\",\n    \"S101\",\n    # These security audits are low-signal for Bazel-owned tool invocations\n    # and Bazel-generated XML.\n    \"S314\",\n    \"S603\",\n    \"S607\",\n    # CLI tools intentionally use print as their user interface.\n    \"T201\",\n]\n\n[lint.pydocstyle]\nconvention = \"google\"\n\n[format]\ndocstring-code-format = true\nline-ending = \"lf\"\n",
       "block_id": null,
       "digest": "8af87c889cd2f77dd1731c68de009b97cf3bca4100c421b3a936b376b1481ed9",
+      "ownership": "managed_file",
+      "template_version": "0.1.0"
+    },
+    ".bazel_devtools/tsconfig.json": {
+      "base": "{\n  \"compilerOptions\": {\n    \"allowJs\": false,\n    \"esModuleInterop\": true,\n    \"exactOptionalPropertyTypes\": true,\n    \"forceConsistentCasingInFileNames\": true,\n    \"isolatedModules\": true,\n    \"jsx\": \"react-jsx\",\n    \"lib\": [\"DOM\", \"DOM.Iterable\", \"ES2023\"],\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"noEmit\": true,\n    \"noFallthroughCasesInSwitch\": true,\n    \"noImplicitOverride\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"noUnusedLocals\": true,\n    \"noUnusedParameters\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"verbatimModuleSyntax\": true\n  }\n}\n",
+      "block_id": null,
+      "digest": "9c384c2b8888ccbf066b989bdd3af9cc476cfa90938ad1eea5c56251d2efb9df",
       "ownership": "managed_file",
       "template_version": "0.1.0"
     },
@@ -22,9 +36,9 @@
       "template_version": "0.1.0"
     },
     ".bazelrc.bazel_devtools": {
-      "base": "# Do not synthesize empty __init__.py files in Python runfiles trees.\ncommon --incompatible_default_to_explicit_init_py\n\n# Compile and check manual tests selected by wildcard target patterns, but do\n# not execute them. Manual non-test targets retain Bazel's normal exclusion.\nbuild --build_manual_tests\n\n# Apply checks to every target requested by `bazel test`.\ntest --aspects=//tools/bazel_devtools:aspects.bzl%ruff\ntest --aspects=//tools/bazel_devtools:aspects.bzl%basedpyright\ntest --aspects=//tools/bazel_devtools:aspects.bzl%ruff_format\ntest --aspects=//tools/bazel_devtools:aspects.bzl%clang_tidy\ntest --aspects=//tools/bazel_devtools:aspects.bzl%clang_format\ntest --@@aspect_rules_lint+//lint:fail_on_violation\n",
+      "base": "# Do not synthesize empty __init__.py files in Python runfiles trees.\ncommon --incompatible_default_to_explicit_init_py\n\n# Compile and check manual tests selected by wildcard target patterns, but do\n# not execute them. Manual non-test targets retain Bazel's normal exclusion.\nbuild --build_manual_tests\n\n# Apply checks to every target requested by `bazel test`.\ntest --aspects=//tools/bazel_devtools:aspects.bzl%ruff\ntest --aspects=//tools/bazel_devtools:aspects.bzl%basedpyright\ntest --aspects=//tools/bazel_devtools:aspects.bzl%ruff_format\ntest --aspects=//tools/bazel_devtools:aspects.bzl%clang_tidy\ntest --aspects=//tools/bazel_devtools:aspects.bzl%clang_format\ntest --aspects=//tools/bazel_devtools:aspects.bzl%biome_lint\ntest --aspects=//tools/bazel_devtools:aspects.bzl%biome_format\ntest --@@aspect_rules_lint+//lint:fail_on_violation\n",
       "block_id": "checks",
-      "digest": "b93f7d1f86b51c07d20e914ae7a72fa23933b1fed5705e58c924ff8f2ac19f67",
+      "digest": "52c562b4683d3bfd5adc0d739520485e39594dcc4267c8c7efb86afebf87130d",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     },
@@ -50,9 +64,9 @@
       "template_version": "0.1.0"
     },
     ".gitignore": {
-      "base": "/compile_commands.json\n/pyrightconfig.json\n/rust-project.json\n/.cache/\n/.ruff_cache/\n/external\n/.bazel_devtools/updates/\n",
+      "base": "/compile_commands.json\n/pyrightconfig.json\n/rust-project.json\n/.cache/\n/.ruff_cache/\n/external\n/.bazel_devtools/updates/\n/node_modules/\n",
       "block_id": "generated-ide-files",
-      "digest": "3fa710d1fc96670367946cedcf2bda00cd0545db71ee92b32136ee1253decbbf",
+      "digest": "7a6d109e0a53bfd441cd31651c6f50ae4b9a9d27b92ea4833a9a8317279a0b0b",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     },
@@ -64,30 +78,37 @@
       "template_version": "0.1.0"
     },
     "BUILD.bazel": {
-      "base": "exports_files([\n    \".bazel_devtools/basedpyright.json\",\n    \".bazel_devtools/ruff.toml\",\n    \".clang-format\",\n    \".clang-tidy\",\n    \".github/workflows/bazel-devtools.yml\",\n    \".pre-commit-config.yaml\",\n    \".ruff.toml\",\n    \"basedpyright.json\",\n])\n\nalias(\n    name = \"format\",\n    actual = \"@bazel_devtools//tools:format\",\n)\n\nalias(\n    name = \"ide-sync\",\n    actual = \"@bazel_devtools//tools:ide_sync\",\n)\n\nalias(\n    name = \"install-hooks\",\n    actual = \"@bazel_devtools//tools:install-hooks\",\n)\n\nalias(\n    name = \"pre-commit\",\n    actual = \"@bazel_devtools//tools:pre-commit\",\n)\n",
+      "base": "load(\"@aspect_rules_ts//ts:defs.bzl\", \"ts_config\")\n\nts_config(\n    name = \"tsconfig_base\",\n    src = \".bazel_devtools/tsconfig.json\",\n    visibility = [\"//visibility:public\"],\n)\n\nts_config(\n    name = \"tsconfig\",\n    src = \"tsconfig.json\",\n    deps = [\":tsconfig_base\"],\n    visibility = [\"//visibility:public\"],\n)\n\nexports_files([\n    \".bazel_devtools/basedpyright.json\",\n    \".bazel_devtools/biome.json\",\n    \".bazel_devtools/ruff.toml\",\n    \".bazel_devtools/tsconfig.json\",\n    \".clang-format\",\n    \".clang-tidy\",\n    \".github/workflows/bazel-devtools.yml\",\n    \".pre-commit-config.yaml\",\n    \".ruff.toml\",\n    \"basedpyright.json\",\n    \"biome.json\",\n    \"tsconfig.json\",\n])\n\nalias(\n    name = \"format\",\n    actual = \"@bazel_devtools//tools:format\",\n)\n\nalias(\n    name = \"ide-sync\",\n    actual = \"@bazel_devtools//tools:ide_sync\",\n)\n\nalias(\n    name = \"install-hooks\",\n    actual = \"@bazel_devtools//tools:install-hooks\",\n)\n\nalias(\n    name = \"pre-commit\",\n    actual = \"@bazel_devtools//tools:pre-commit\",\n)\n",
       "block_id": "root-aliases",
-      "digest": "c9ec20a43b5a3945b4053914c752b887a7a1d0bc399b0d05c9633da7c8718924",
+      "digest": "86f45a2726414095ba54a4aafa98d2f1f559ef1e8156c9baf48515e51697c590",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     },
     "MODULE.bazel": {
-      "base": "bazel_dep(name = \"toolchains_llvm\", version = \"1.8.0\", dev_dependency = True)\nbazel_dep(name = \"hedron_compile_commands\", dev_dependency = True)\ngit_override(\n    module_name = \"hedron_compile_commands\",\n    commit = \"abb61a688167623088f8768cc9264798df6a9d10\",\n    remote = \"https://github.com/hedronvision/bazel-compile-commands-extractor.git\",\n)\n\nbazel_devtools_llvm = use_extension(\n    \"@toolchains_llvm//toolchain/extensions:llvm.bzl\",\n    \"llvm\",\n    dev_dependency = True,\n)\nbazel_devtools_llvm.toolchain(\n    name = \"bazel_devtools_llvm_toolchain\",\n    llvm_version = \"22.1.6\",\n)\nuse_repo(\n    bazel_devtools_llvm,\n    \"bazel_devtools_llvm_toolchain\",\n    \"bazel_devtools_llvm_toolchain_llvm\",\n)\n",
+      "base": "bazel_dep(name = \"toolchains_llvm\", version = \"1.8.0\", dev_dependency = True)\nbazel_dep(name = \"hedron_compile_commands\", dev_dependency = True)\ngit_override(\n    module_name = \"hedron_compile_commands\",\n    commit = \"abb61a688167623088f8768cc9264798df6a9d10\",\n    remote = \"https://github.com/hedronvision/bazel-compile-commands-extractor.git\",\n)\n\nbazel_devtools_llvm = use_extension(\n    \"@toolchains_llvm//toolchain/extensions:llvm.bzl\",\n    \"llvm\",\n    dev_dependency = True,\n)\nbazel_devtools_llvm.toolchain(\n    name = \"bazel_devtools_llvm_toolchain\",\n    llvm_version = \"22.1.6\",\n)\nuse_repo(\n    bazel_devtools_llvm,\n    \"bazel_devtools_llvm_toolchain\",\n    \"bazel_devtools_llvm_toolchain_llvm\",\n)\n\nbazel_dep(name = \"aspect_rules_js\", version = \"3.4.0\")\nbazel_dep(name = \"aspect_rules_ts\", version = \"3.10.0\")\n\nbazel_devtools_rules_ts = use_extension(\n    \"@aspect_rules_ts//ts:extensions.bzl\",\n    \"typescript\",\n)\nbazel_devtools_rules_ts.deps(version = \"5.9.3\")\nuse_repo(bazel_devtools_rules_ts, \"npm_typescript\")\n",
       "block_id": "ide-dependencies",
-      "digest": "9726be42bb94681cb48ae9ebaca97ce730aca95b029d63e66e51c5f9508ca7b4",
+      "digest": "273f4ee8feb3530e499b07c45afc0ed1d5eb925e875b1720f401740deff04e92",
+      "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    "REPO.bazel": {
+      "base": "ignore_directories([\"**/node_modules\"])\n",
+      "block_id": "typescript-node-modules",
+      "digest": "f66b93ddb3381f1d8503230d82e7dfe896cc0d867f227682801a82bbb7d7eb59",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     },
     "tools/bazel_devtools/BUILD.bazel": {
-      "base": "load(\"@bazel_devtools//tools:defs.bzl\", \"bazel_devtools_formatters\", \"tool_binary\")\n\npackage(default_visibility = [\"//visibility:public\"])\n\ntool_binary(\n    name = \"clang_format\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-format\",\n)\n\ntool_binary(\n    name = \"clang_tidy\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-tidy\",\n)\n\nbazel_devtools_formatters(\n    name = \"formatters\",\n    languages = [\n        \"python\",\n        \"cpp\",\n    ],\n    clang_format = \":clang_format\",\n)\n",
+      "base": "load(\"@bazel_devtools//tools:defs.bzl\", \"bazel_devtools_formatters\", \"tool_binary\")\n\npackage(default_visibility = [\"//visibility:public\"])\n\ntool_binary(\n    name = \"clang_format\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-format\",\n)\n\ntool_binary(\n    name = \"clang_tidy\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-tidy\",\n)\n\nalias(\n    name = \"biome\",\n    actual = \"@bazel_devtools//tools:biome\",\n)\n\nalias(\n    name = \"biome_cwd\",\n    actual = \"@bazel_devtools//tools:biome_cwd\",\n)\n\nbazel_devtools_formatters(\n    name = \"formatters\",\n    languages = [\n        \"python\",\n        \"cpp\",\n        \"typescript\",\n    ],\n    clang_format = \":clang_format\",\n)\n",
       "block_id": "tools",
-      "digest": "2ba9a97ff9a2652a35fa6d322c04a57bd2dec1135f92f9b5da44d0fb27de7ee6",
+      "digest": "58ffac9a09890a99685b58eb11961fe7443e5832b58f25946e296dd0963ded45",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     },
     "tools/bazel_devtools/aspects.bzl": {
-      "base": "load(\n    \"@bazel_devtools//checks:python.bzl\",\n    \"basedpyright_aspect\",\n    \"ruff_format_aspect\",\n    \"ruff_lint_aspect\",\n)\n\nload(\n    \"@bazel_devtools//checks:cpp.bzl\",\n    \"clang_format_aspect\",\n    \"lint_clang_tidy_aspect\",\n)\n\nruff = ruff_lint_aspect(\n    binary = Label(\"@bazel_devtools//tools:ruff\"),\n    configs = [\n        Label(\"//:.ruff.toml\"),\n        Label(\"//:.bazel_devtools/ruff.toml\"),\n    ],\n)\n\nbasedpyright = basedpyright_aspect(\n    binary = Label(\"@bazel_devtools//tools:basedpyright\"),\n    config = Label(\"//:basedpyright.json\"),\n    configs = [Label(\"//:.bazel_devtools/basedpyright.json\")],\n)\n\nruff_format = ruff_format_aspect(\n    binary = Label(\"@bazel_devtools//tools:ruff\"),\n    configs = [\n        Label(\"//:.ruff.toml\"),\n        Label(\"//:.bazel_devtools/ruff.toml\"),\n    ],\n)\n\nclang_tidy = lint_clang_tidy_aspect(\n    binary = Label(\"//tools/bazel_devtools:clang_tidy\"),\n    global_config = [Label(\"//:.clang-tidy\")],\n    lint_target_headers = True,\n)\n\nclang_format = clang_format_aspect(\n    binary = Label(\"//tools/bazel_devtools:clang_format\"),\n    config = Label(\"//:.clang-format\"),\n)\n",
+      "base": "load(\n    \"@bazel_devtools//checks:python.bzl\",\n    \"basedpyright_aspect\",\n    \"ruff_format_aspect\",\n    \"ruff_lint_aspect\",\n)\n\nload(\n    \"@bazel_devtools//checks:cpp.bzl\",\n    \"clang_format_aspect\",\n    \"lint_clang_tidy_aspect\",\n)\n\nload(\n    \"@bazel_devtools//checks:typescript.bzl\",\n    \"biome_format_aspect\",\n    \"biome_lint_aspect\",\n)\n\nruff = ruff_lint_aspect(\n    binary = Label(\"@bazel_devtools//tools:ruff\"),\n    configs = [\n        Label(\"//:.ruff.toml\"),\n        Label(\"//:.bazel_devtools/ruff.toml\"),\n    ],\n)\n\nbasedpyright = basedpyright_aspect(\n    binary = Label(\"@bazel_devtools//tools:basedpyright\"),\n    config = Label(\"//:basedpyright.json\"),\n    configs = [Label(\"//:.bazel_devtools/basedpyright.json\")],\n)\n\nruff_format = ruff_format_aspect(\n    binary = Label(\"@bazel_devtools//tools:ruff\"),\n    configs = [\n        Label(\"//:.ruff.toml\"),\n        Label(\"//:.bazel_devtools/ruff.toml\"),\n    ],\n)\n\nclang_tidy = lint_clang_tidy_aspect(\n    binary = Label(\"//tools/bazel_devtools:clang_tidy\"),\n    global_config = [Label(\"//:.clang-tidy\")],\n    lint_target_headers = True,\n)\n\nclang_format = clang_format_aspect(\n    binary = Label(\"//tools/bazel_devtools:clang_format\"),\n    config = Label(\"//:.clang-format\"),\n)\n\nbiome_lint = biome_lint_aspect(\n    binary = Label(\"@bazel_devtools//tools:biome\"),\n    config = Label(\"//:biome.json\"),\n    configs = [Label(\"//:.bazel_devtools/biome.json\")],\n)\n\nbiome_format = biome_format_aspect(\n    binary = Label(\"@bazel_devtools//tools:biome\"),\n    config = Label(\"//:biome.json\"),\n    configs = [Label(\"//:.bazel_devtools/biome.json\")],\n)\n",
       "block_id": "aspects",
-      "digest": "0a30a0b0a385ae737e57f571eddb29229d69c15d8016cab13ad3eb89f77d81e8",
+      "digest": "713bb09995bba466f3cea5ed02e1f99bdd2edc1307c1047a7ca84008a631479a",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     }
@@ -95,7 +116,8 @@
   "installed_version": "0.1.0",
   "languages": [
     "python",
-    "cpp"
+    "cpp",
+    "typescript"
   ],
   "schema_version": 2
 }

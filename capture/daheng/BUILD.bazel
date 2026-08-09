@@ -1,6 +1,4 @@
-load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
 load(":hil_test.bzl", "daheng_dual_camera_hil_test")
 
 cc_library(
@@ -24,6 +22,9 @@ cc_library(
     name = "daheng_camera",
     srcs = ["daheng_camera.cc"],
     hdrs = ["daheng_camera.h"],
+    # GXDef.h contains an ignored typedef diagnostic with no warning category,
+    # so GCC cannot downgrade only that vendor warning under -Werror.
+    strict_warnings = False,
     visibility = ["//capture:__subpackages__"],
     tags = ["requires-daheng-sdk"],
     deps = [
@@ -43,6 +44,7 @@ cc_binary(
         "//capture/hil:hil_metrics",
         "//capture/image:bayer_rg8",
         "//capture/image:image_quality",
+        "//station:station_config",
         ":daheng_camera",
     ],
 )

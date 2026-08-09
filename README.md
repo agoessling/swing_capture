@@ -14,24 +14,28 @@ The current milestone proves simultaneous full-resolution capture from two
 Daheng `MER2-160-227U3C` cameras through the Galaxy Linux SDK. The capture
 path now includes independently fitted device clocks, preallocated
 freeze/continue frame rings, audio impact detection, strike-relative clip
-planning, and machine-readable HIL evidence. A synthetic end-to-end test drives
-those pieces from an audio impact through a retained dual-view clip while
-capture continues.
+planning, persistent machine-local device/role selection, and machine-readable
+HIL evidence. A synthetic end-to-end test drives those pieces from an audio
+impact through a retained dual-view clip while capture continues.
 
-Product services, clip encoding, and the review application remain future
-milestones.
+A headless setup service now streams responsive, bounded-rate compressed
+640x480 previews from the two full-speed acquisition loops, renders an explicit
+full-resolution focus view on demand, and serves a React/TypeScript camera setup
+UI. Clip encoding and the review application remain future milestones.
 
 ## Build
 
-The repository uses Bazel 9.2 and Bzlmod. Bazelisk reads `.bazelversion`.
+The repository uses Bazel 9.2, Bzlmod, and C++23. Bazelisk reads
+`.bazelversion`.
 
 ```bash
 bazel test //...
 ```
 
-This runs 14 hardware-independent C++ `cc_test` targets plus two Python tests
-covering the SDK extractor and unattended HIL runner. It includes the synthetic
-capture-pipeline, audio-HIL-metrics, and Daheng runtime-packaging tests. Bazel
+This runs the hardware-independent C++, Python, and TypeScript/UI suite. It
+covers the station doctor, SDK extractor, unattended HIL runner, synthetic
+capture pipeline, setup-preview service, station configuration, HIL protocol
+and analysis components, and Daheng runtime packaging. Bazel
 downloads checksum-pinned CPython 3.11.14 for every Python target, so those
 targets do not use the host Python runtime. The Daheng repository bootstrap
 does require a broadly compatible host `python3` to unpack the vendor's
@@ -72,6 +76,56 @@ device. It then prints camera identity, negotiated capture settings, frame
 counts, payload failures, frame-ID gaps, device timestamp span, host elapsed
 time, measured frame rate, and representative-frame image diagnostics.
 
+## Machine-local station configuration
+
+Physical tests read stable identifiers from an ignored `.station.local.conf`.
+The file records down-the-line and face-on camera serials, a named ALSA device,
+and the Feather's `/dev/serial/by-id` path. `.bazelrc.local` passes its absolute
+path to Bazel tests through `SWING_CAPTURE_STATION_CONFIG`; neither file belongs
+in Git. Camera HIL refuses to start until `camera.roles_verified = true` records
+that a person has physically confirmed both views.
+
+Run the read-only readiness workflow before HIL:
+
+```bash
+bazel run //tools:station_doctor -- --json artifacts/station/doctor.json
+```
+
+The doctor validates the schema and role gate, exact installed udev/service
+files, active `plugdev` membership, persistent USB buffering, camera serials,
+SuperSpeed access and root-controller topology, the configured ALSA capture
+node, and the stable Feather serial link. See
+[`docs/headless_setup.md`](docs/headless_setup.md) for the file format and setup
+sequence.
+
+## Headless camera setup UI
+
+Run the camera setup service from the repository root:
+
+```bash
+bazel run //capture/service:preview_server
+```
+
+It listens on port 8080 on all interfaces so another computer on the trusted
+station network can open `http://<station-address>:8080/`. The service opens
+both configured cameras exclusively, keeps their acquisition loops at the
+camera's full configured rate, and renders up to five compressed 640x480
+routine PNGs per second on a separate latest-only renderer thread. A
+full-resolution focus image is encoded only when its link is requested. Browser
+polling fetches the two routine images as one capacity-one pair, atomically
+swaps both views after both downloads complete, and skips superseded pairs
+without cancelling downloads or forming a queue. It does not control or block
+the capture cadence.
+
+Exposure and gain changes are validated against each camera's read-back range,
+then performed on that camera's owner thread as a stop/configure/start cycle.
+They are session-local in this milestone. Stop the preview service before
+running a direct camera HIL target. The service and unattended HIL runner share
+`artifacts/hil/hardware.lock`, which prevents those two entry points from
+opening the cameras concurrently. Installed services can set
+`SWING_CAPTURE_HARDWARE_LOCK` to a provisioned runtime path; the unattended
+runner must receive the same value.
+
 ## Prop-Maker firmware
 
 The Adafruit Feather RP2040 Prop-Maker firmware also uses Bazel as its only
@@ -81,6 +135,7 @@ or system cross-compiler is required.
 
 ```bash
 bazel build //embedded/prop_maker:diagnostic_firmware
+bazel build //embedded/prop_maker:hil_firmware
 sudo ./tools/setup_prop_maker_host.sh  # one time per host
 bazel run //embedded/prop_maker:flash_diagnostic
 ```
@@ -90,6 +145,11 @@ USB serial. The initial factory image may require entering BOOTSEL manually:
 hold **BOOT**, tap **RESET**, release **BOOT**, and rerun the flash target.
 Firmware built by this repository enables picotool's USB reset interface, so
 later flashes can normally reboot and program the board without button presses.
+The separate HIL image implements the negotiated `SC-HIL/1` LED/tone protocol;
+it is programmed only through the explicit
+`//embedded/prop_maker:flash_hil` target. A tone temporarily enables GPIO23,
+which powers the speaker amplifier and the external NeoPixel and servo rails
+together, so review the exact flash disclosure in the embedded guide first.
 See [`docs/embedded.md`](docs/embedded.md) for the complete workflow and board
 configuration evidence.
 
@@ -110,9 +170,10 @@ bazel test //capture/daheng:dual_camera_soak_hil_test \
   --test_output=streamed --nocache_test_results
 ```
 
-These targets open both cameras by serial number, configure full-resolution
-`BayerRG8` capture at approximately 227 fps with exposure and gain automation
-disabled, a fixed 4000 us exposure, and fixed 0 dB analog gain. They exercise a
+These targets open the two station-assigned camera roles by serial number,
+record each role in the report, and configure full-resolution `BayerRG8`
+capture at approximately 227 fps with exposure and gain automation disabled, a
+fixed 500 us exposure, and fixed 24 dB analog gain. They exercise a
 two-second raw frame ring per camera, freeze the full retained window without
 copying its payloads, and continue recording from a preallocated reserve. At
 the current 1,555,200-byte frame size, the active and reserve pools use about
@@ -132,11 +193,10 @@ The report stores each PNG as a relative `diagnostic_frame_path`, so a report
 and its images can be moved together. The image-quality section records raw
 histogram percentiles, black/white fractions, and Bayer-aware gradient energy.
 
-**Current image warning:** the 2026-07-26 smoke classified both connected views
-as `underexposed_or_obscured` (one view was almost entirely black). Transport
-passed, but framing, lighting, lens/iris state, and exposure must be corrected
-before these cameras are ready to record swings. Image quality is currently an
-advisory diagnostic rather than a transport pass/fail gate.
+The 2026-08-09 room-lit station-fixture run replaced the earlier dark image
+baseline. Both retained views decode the printed `tag36h11` ID 0 without a bit
+correction, with decision margins of 48.3 and 50.3. Image-quality histograms
+remain diagnostic rather than a transport gate.
 
 The stages run for 15 seconds, 5 minutes, and 30 minutes respectively.
 Qualification requires at least 99% of the requested frame rate with no
@@ -157,8 +217,8 @@ bazel test //capture/audio:audio_hil_test \
   --test_output=streamed --nocache_test_results
 ```
 
-It currently exercises the C925e at 32 kHz stereo, selecting channel 0, and
-writes
+It exercises the station-configured ALSA device at 32 kHz using its configured
+hardware channel count and mono channel selection, and writes
 `bazel-testlogs/capture/audio/audio_hil_test/test.outputs/audio_hil_summary.json`.
 It rejects source errors, short captures, implausible real-time cadence,
 silence, and more than 0.1% clipped samples. The 2026-07-26 live run passed all
@@ -167,6 +227,38 @@ clipped samples.
 Its timestamps are derived from host read completion and sample continuity;
 ALSA/device latency is not yet measured.
 
+The shortest combined station-fixture check verifies the scene the operator
+can see in the setup preview:
+
+```bash
+bazel test //capture/hil:station_fixture_hil_test \
+  --test_output=streamed --nocache_test_results
+```
+
+It requests a 44,053 us Feather LED pulse and checks for nine through eleven
+visible frames in each free-running camera after correcting whole-frame room
+light variation and subtracting a local background ring. It verifies that the
+same AprilTag identity is present in both views and checks that a conservative
+20 ms, 2 kHz speaker tone has the expected energy, frequency content, and
+duration above the microphone noise floor. It retains an incremental JSON
+report, a WAV, and clean
+tag/accepted-peak-LED PNGs for both roles, including partial evidence on
+failure. This target requires the HIL image to have been explicitly flashed
+beforehand and shares the camera hardware lock with the preview service.
+AprilTag presence is a framing/focus/exposure sanity check, not pose or
+geometric calibration.
+
+The 2026-08-09 lit-room run passed: both cameras had zero timeouts and frame-ID
+gaps, detected the localized red response to the 44.078 ms commanded pulse over
+ten frame positions (10 active frames down-the-line and 9 face-on), decoded
+`tag36h11` ID 0 with zero corrected bits, and recorded a 2 kHz tone at 20.1 dB
+SNR with no clipped samples. The selected optical regions appear to be nearby
+reflections rather than direct localization of the Feather LED package. Camera
+receipt times are also compared with the Feather schedule, but that comparison
+is an explicit non-gating diagnostic: fixed camera/readout/USB delivery latency
+has not been calibrated, so absolute camera-to-Feather edge association is not
+claimed.
+
 For unattended operation,
 `bazel run //tools:run_unattended_hil -- smoke|qualify|soak` invokes the
 corresponding Bazel test. The Python runner supplies operational concerns: a
@@ -174,6 +266,7 @@ host lock, external watchdog, periodic machine-readable status, durable reports
 under `artifacts/hil/runs/`, and automatic per-camera diagnostics after a
 dual-camera failure. It is not a test implementation.
 
-This test validates simultaneous transport, not exposure synchronization.
+The transport and station-fixture tests do not prove exposure synchronization.
 The current USB cameras have independent clocks; true time synchronization
-will require a shared electrical frame trigger or an optical-pulse HIL test.
+will require a verified shared electrical frame trigger. The optical pulse is
+retained as visibility and independently mapped timing evidence only.

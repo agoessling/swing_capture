@@ -1,6 +1,6 @@
 """Bazel-native hardware-in-the-loop test definitions."""
 
-load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tools:strict_cc.bzl", "cc_test")
 
 def daheng_dual_camera_hil_test(
         name,
@@ -28,6 +28,7 @@ def daheng_dual_camera_hil_test(
             "--exercise-frozen-ring",
             "--require-camera-count",
             "2",
+            "--require-station-config",
         ],
         size = size,
         tags = [
@@ -46,6 +47,7 @@ def daheng_dual_camera_hil_test(
             "//capture/hil:hil_metrics",
             "//capture/image:bayer_rg8",
             "//capture/image:image_quality",
+            "//station:station_config",
             ":daheng_camera",
         ],
     )

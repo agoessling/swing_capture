@@ -1,11 +1,99 @@
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "feather_hil_protocol",
+    srcs = ["feather_hil_protocol.cc"],
+    hdrs = ["feather_hil_protocol.h"],
+)
+
+cc_test(
+    name = "feather_hil_protocol_test",
+    size = "small",
+    srcs = ["feather_hil_protocol_test.cc"],
+    deps = [":feather_hil_protocol"],
+)
+
+cc_library(
+    name = "feather_hil_serial",
+    srcs = ["feather_hil_serial.cc"],
+    hdrs = ["feather_hil_serial.h"],
+    deps = [":feather_hil_protocol"],
+)
+
+cc_test(
+    name = "feather_hil_serial_test",
+    size = "small",
+    srcs = ["feather_hil_serial_test.cc"],
+    deps = [
+        ":feather_hil_protocol",
+        ":feather_hil_serial",
+    ],
+)
+
+cc_library(
+    name = "feather_hil_controller",
+    srcs = ["feather_hil_controller.cc"],
+    hdrs = ["feather_hil_controller.h"],
+    deps = [
+        ":feather_hil_protocol",
+        ":feather_hil_serial",
+    ],
+)
+
+cc_test(
+    name = "feather_hil_controller_test",
+    size = "small",
+    srcs = ["feather_hil_controller_test.cc"],
+    deps = [
+        ":feather_hil_controller",
+        ":feather_hil_serial",
+    ],
+)
 
 cc_library(
     name = "hil_metrics",
     srcs = ["hil_metrics.cc"],
     hdrs = ["hil_metrics.h"],
     visibility = ["//capture:__subpackages__"],
+)
+
+cc_test(
+    name = "station_fixture_hil_test",
+    size = "medium",
+    srcs = ["station_fixture_hil_test.cc"],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-audio",
+        "requires-daheng-camera",
+        "requires-daheng-sdk",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":feather_hil_controller",
+        ":feather_hil_serial",
+        "//capture/audio:audio_capture_session",
+        "//capture/audio:commanded_tone_analyzer",
+        "//capture/audio:pcm_wav",
+        "//capture/core:camera_source",
+        "//capture/core:device_clock_mapper",
+        "//capture/core:pooled_raw_frame_ring",
+        "//capture/core:robust_device_clock_mapping",
+        "//capture/daheng:daheng_camera",
+        "//capture/image:bayer_rg8",
+        "//capture/image:image_quality",
+        "//capture/optical:april_tag",
+        "//capture/optical:frame_selection",
+        "//capture/optical:led_pulse",
+        "//capture/optical:led_schedule_association",
+        "//station:hardware_lock",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
 )
 
 cc_test(

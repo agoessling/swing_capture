@@ -1,6 +1,8 @@
 #include "capture/image/bayer_rg8.h"
 
-#include <algorithm>
+#include <zconf.h>
+#include <zlib.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -119,9 +121,13 @@ void AppendPngChunk(std::string &output, std::string_view type, std::string_view
 }
 
 void ValidateRgbImage(const Rgb8Image &image) {
-  const std::size_t pixel_count = static_cast<std::size_t>(image.width) * image.height;
   if (image.width == 0 || image.height == 0 ||
-      pixel_count > std::numeric_limits<std::size_t>::max() / 3U ||
+      static_cast<std::size_t>(image.height) >
+          std::numeric_limits<std::size_t>::max() / image.width) {
+    throw std::invalid_argument("invalid RGB image");
+  }
+  const std::size_t pixel_count = static_cast<std::size_t>(image.width) * image.height;
+  if (pixel_count > std::numeric_limits<std::size_t>::max() / 3U ||
       image.pixels.size() != pixel_count * 3U) {
     throw std::invalid_argument("invalid RGB image");
   }
@@ -186,6 +192,19 @@ Rgb8Image DemosaicBayerRg8(std::span<const std::byte> bayer, std::uint32_t width
   return image;
 }
 
+std::vector<std::byte> Rgb8ToLuminance(const Rgb8Image &image) {
+  ValidateRgbImage(image);
+  const std::size_t pixel_count = static_cast<std::size_t>(image.width) * image.height;
+  std::vector<std::byte> luminance(pixel_count);
+  for (std::size_t pixel = 0; pixel < pixel_count; ++pixel) {
+    const std::size_t input = pixel * 3U;
+    const std::uint32_t weighted = 77U * image.pixels[input] + 150U * image.pixels[input + 1U] +
+                                   29U * image.pixels[input + 2U];
+    luminance[pixel] = std::byte{static_cast<std::uint8_t>((weighted + 128U) >> 8U)};
+  }
+  return luminance;
+}
+
 std::string EncodePpm(const Rgb8Image &image) {
   ValidateRgbImage(image);
 
@@ -211,40 +230,34 @@ std::string EncodePng(const Rgb8Image &image) {
   scanlines.reserve((row_bytes + 1U) * image.height);
   const std::span<const std::uint8_t> pixels(image.pixels);
   for (std::uint32_t y = 0; y < image.height; ++y) {
-    scanlines.push_back('\0');
+    // PNG's Sub filter turns spatially correlated camera pixels into small
+    // deltas, substantially reducing setup-preview bandwidth at low cost.
+    scanlines.push_back('\x01');
     const std::size_t offset = static_cast<std::size_t>(y) * row_bytes;
-    for (const std::uint8_t byte : pixels.subspan(offset, row_bytes)) {
-      scanlines.push_back(static_cast<char>(byte));
+    const std::span<const std::uint8_t> row = pixels.subspan(offset, row_bytes);
+    for (std::size_t index = 0; index < row.size(); ++index) {
+      const std::uint8_t left = index < 3U ? 0U : row[index - 3U];
+      const auto filtered = static_cast<std::uint8_t>(row[index] - left);
+      scanlines.push_back(static_cast<char>(filtered));
     }
   }
 
-  std::string zlib_stream;
-  zlib_stream.reserve(scanlines.size() + (((scanlines.size() / 65535U) + 1U) * 5U) + 6U);
-  zlib_stream.push_back(static_cast<char>(0x78));
-  zlib_stream.push_back(static_cast<char>(0x01));
-  std::size_t offset = 0;
-  while (offset < scanlines.size()) {
-    const std::size_t block_size = std::min<std::size_t>(65535U, scanlines.size() - offset);
-    const bool final_block = offset + block_size == scanlines.size();
-    zlib_stream.push_back(final_block ? '\x01' : '\0');
-    const auto length = static_cast<std::uint16_t>(block_size);
-    const auto inverted = static_cast<std::uint16_t>(~length);
-    zlib_stream.push_back(static_cast<char>(length & 0xffU));
-    zlib_stream.push_back(static_cast<char>(length >> 8U));
-    zlib_stream.push_back(static_cast<char>(inverted & 0xffU));
-    zlib_stream.push_back(static_cast<char>(inverted >> 8U));
-    zlib_stream.append(scanlines, offset, block_size);
-    offset += block_size;
+  if (scanlines.size() > std::numeric_limits<uLong>::max()) {
+    throw std::length_error("PNG scanlines exceed the zlib input limit");
   }
-
-  constexpr std::uint32_t kAdlerModulus = 65521U;
-  std::uint32_t adler_a = 1U;
-  std::uint32_t adler_b = 0U;
-  for (const unsigned char byte : scanlines) {
-    adler_a = (adler_a + byte) % kAdlerModulus;
-    adler_b = (adler_b + adler_a) % kAdlerModulus;
+  const auto input_size = static_cast<uLong>(scanlines.size());
+  uLongf compressed_size = compressBound(input_size);
+  std::string zlib_stream(compressed_size, '\0');
+  // zlib's C API predates std::span and requires byte-pointer casts here.
+  // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+  const int compression_result =
+      compress2(reinterpret_cast<Bytef *>(zlib_stream.data()), &compressed_size,
+                reinterpret_cast<const Bytef *>(scanlines.data()), input_size, Z_BEST_SPEED);
+  // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+  if (compression_result != Z_OK) {
+    throw std::runtime_error("zlib failed to compress PNG scanlines");
   }
-  AppendBigEndian32(zlib_stream, (adler_b << 16U) | adler_a);
+  zlib_stream.resize(compressed_size);
 
   std::string ihdr;
   ihdr.reserve(13);

@@ -12,6 +12,9 @@
 
 namespace swing_capture::daheng {
 
+inline constexpr double kDefaultExposureMicroseconds = 500.0;
+inline constexpr double kDefaultGainDecibels = 24.0;
+
 struct DiscoveredCamera {
   CameraIdentity identity;
   std::string transport;
@@ -39,8 +42,8 @@ struct DahengConfiguration {
   std::uint32_t width = 1440;
   std::uint32_t height = 1080;
   double target_frames_per_second = 227.0;
-  double exposure_microseconds = 4000.0;
-  double gain_decibels = 0.0;
+  double exposure_microseconds = kDefaultExposureMicroseconds;
+  double gain_decibels = kDefaultGainDecibels;
   std::uint64_t acquisition_buffer_count = 40;
   // Zero preserves the Galaxy transport producer's detected default.
   std::int64_t stream_transfer_bytes = 0;

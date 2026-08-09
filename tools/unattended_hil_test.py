@@ -54,6 +54,22 @@ class UnattendedHilTest(unittest.TestCase):
                 unattended_hil.repository_root({"BUILD_WORKSPACE_DIRECTORY": str(root)}, Path("/")),
             )
 
+    def test_hardware_lock_path_supports_one_deployment_override(self) -> None:
+        """Share one explicit lock path across installed camera owners."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            default = root / "artifacts" / "hil" / "hardware.lock"
+            self.assertEqual(default, unattended_hil.hardware_lock_path(root, {}))
+
+            configured = root / "runtime" / "hardware.lock"
+            self.assertEqual(
+                configured.resolve(),
+                unattended_hil.hardware_lock_path(
+                    root,
+                    {unattended_hil.HARDWARE_LOCK_ENVIRONMENT: str(configured)},
+                ),
+            )
+
     def test_status_is_typed_and_published_atomically(self) -> None:
         """Publish typed status snapshots to run-specific and latest paths."""
         with tempfile.TemporaryDirectory() as temporary:

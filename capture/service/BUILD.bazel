@@ -1,0 +1,80 @@
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
+
+cc_library(
+    name = "preview_api",
+    srcs = ["preview_api.cc"],
+    hdrs = ["preview_api.h"],
+    deps = [
+        "@cpp-httplib//:httplib",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "preview_api_test",
+    size = "small",
+    srcs = ["preview_api_test.cc"],
+    deps = [
+        ":preview_api",
+        "@cpp-httplib//:httplib",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "preview_station",
+    srcs = ["preview_station.cc"],
+    hdrs = ["preview_station.h"],
+    tags = ["requires-daheng-sdk"],
+    deps = [
+        ":camera_worker",
+        ":preview_api",
+        "//capture/core:camera_source",
+        "//capture/daheng:daheng_camera",
+        "//station:station_config",
+    ],
+)
+
+cc_binary(
+    name = "preview_server",
+    srcs = ["preview_server.cc"],
+    data = ["//web:static_app"],
+    tags = ["requires-daheng-sdk"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":preview_api",
+        ":preview_station",
+        "//station:hardware_lock",
+        "//station:station_config",
+        "@bazel_tools//tools/cpp/runfiles",
+        "@cpp-httplib//:httplib",
+    ],
+)
+
+cc_library(
+    name = "camera_worker",
+    srcs = ["camera_worker.cc"],
+    hdrs = ["camera_worker.h"],
+    tags = ["requires-daheng-sdk"],
+    deps = [
+        ":preview_api",
+        "//capture/core:camera_source",
+        "//capture/daheng:daheng_camera",
+        "//capture/image:image_quality",
+        "//capture/preview:camera_settings",
+        "//capture/preview:latest_frame_sampler",
+        "//capture/preview:preview_image",
+    ],
+)
+
+cc_test(
+    name = "camera_worker_test",
+    size = "small",
+    srcs = ["camera_worker_test.cc"],
+    tags = ["requires-daheng-sdk"],
+    deps = [
+        ":camera_worker",
+        "//capture/core:camera_source",
+        "//capture/daheng:daheng_camera",
+    ],
+)

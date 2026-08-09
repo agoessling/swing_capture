@@ -1,6 +1,4 @@
-load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
 
 cc_library(
     name = "arecord_pcm_source",
@@ -15,6 +13,37 @@ cc_library(
     hdrs = ["audio_hil_metrics.h"],
 )
 
+cc_library(
+    name = "audio_capture_session",
+    srcs = ["audio_capture_session.cc"],
+    hdrs = ["audio_capture_session.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [":arecord_pcm_source"],
+)
+
+cc_library(
+    name = "commanded_click_analyzer",
+    srcs = ["commanded_click_analyzer.cc"],
+    hdrs = ["commanded_click_analyzer.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [":audio_hil_metrics"],
+)
+
+cc_library(
+    name = "commanded_tone_analyzer",
+    srcs = ["commanded_tone_analyzer.cc"],
+    hdrs = ["commanded_tone_analyzer.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [":audio_hil_metrics"],
+)
+
+cc_library(
+    name = "pcm_wav",
+    srcs = ["pcm_wav.cc"],
+    hdrs = ["pcm_wav.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
 cc_binary(
     name = "fake_pcm_producer",
     srcs = ["fake_pcm_producer.cc"],
@@ -25,6 +54,34 @@ cc_test(
     size = "small",
     srcs = ["audio_hil_metrics_test.cc"],
     deps = [":audio_hil_metrics"],
+)
+
+cc_test(
+    name = "audio_capture_session_test",
+    size = "small",
+    srcs = ["audio_capture_session_test.cc"],
+    deps = [":audio_capture_session"],
+)
+
+cc_test(
+    name = "commanded_click_analyzer_test",
+    size = "small",
+    srcs = ["commanded_click_analyzer_test.cc"],
+    deps = [":commanded_click_analyzer"],
+)
+
+cc_test(
+    name = "commanded_tone_analyzer_test",
+    size = "small",
+    srcs = ["commanded_tone_analyzer_test.cc"],
+    deps = [":commanded_tone_analyzer"],
+)
+
+cc_test(
+    name = "pcm_wav_test",
+    size = "small",
+    srcs = ["pcm_wav_test.cc"],
+    deps = [":pcm_wav"],
 )
 
 cc_test(
@@ -55,5 +112,6 @@ cc_test(
         ":arecord_pcm_source",
         ":audio_hil_metrics",
         "//capture/trigger:impact_detector",
+        "//station:station_config",
     ],
 )

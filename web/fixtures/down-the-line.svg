@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1080" role="img" aria-labelledby="title description">
+  <title id="title">Down-the-line camera fixture</title>
+  <desc id="description">A synthetic golf hitting bay viewed from behind the golfer.</desc>
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#80909b"/>
+      <stop offset="1" stop-color="#26343a"/>
+    </linearGradient>
+    <linearGradient id="floor" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#243b32"/>
+      <stop offset="1" stop-color="#101c19"/>
+    </linearGradient>
+    <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
+      <path d="M60 0H0V60" fill="none" stroke="#d9ff6a" stroke-opacity=".15" stroke-width="2"/>
+    </pattern>
+  </defs>
+  <rect width="1440" height="1080" fill="#111719"/>
+  <path d="M0 0h1440v690L0 840z" fill="url(#wall)"/>
+  <path d="M0 840l1440-150v390H0z" fill="url(#floor)"/>
+  <rect x="510" y="118" width="620" height="572" rx="8" fill="#162124" stroke="#d7e4e4" stroke-width="5"/>
+  <rect x="536" y="144" width="568" height="520" fill="#edf3ee"/>
+  <path d="M820 144v520M536 404h568" stroke="#9caeaa" stroke-width="3" stroke-dasharray="12 12"/>
+  <path d="M720 876l320-35 85 151-493 25z" fill="#3d7654" stroke="#9ad0a2" stroke-width="5"/>
+  <ellipse cx="862" cy="888" rx="13" ry="7" fill="#f8fbf7"/>
+  <path d="M865 882L942 546" stroke="#d7dad4" stroke-width="7"/>
+  <path d="M944 545l-14-88" stroke="#d7dad4" stroke-width="8"/>
+  <circle cx="790" cy="496" r="55" fill="#171c1d"/>
+  <path d="M765 546c-35 84-41 170-22 259l95 9c22-104 13-190-5-269z" fill="#d1ff42"/>
+  <path d="M775 803l-45 137M828 807l43 125" stroke="#1b2021" stroke-width="26" stroke-linecap="round"/>
+  <path d="M777 595l117 85" stroke="#e8eeec" stroke-width="20" stroke-linecap="round"/>
+  <path d="M0 0h1440v1080H0z" fill="url(#grid)" opacity=".2"/>
+  <g fill="#d1ff42" font-family="system-ui,sans-serif">
+    <text x="42" y="62" font-size="24" font-weight="700" letter-spacing="4">DOWN-THE-LINE · FIXTURE</text>
+    <text x="42" y="1014" font-size="20">Focus reference: screen frame, club shaft, mat edge</text>
+  </g>
+  <g stroke="#d1ff42" stroke-width="3" opacity=".75">
+    <path d="M720 72v60M690 102h60M720 948v60M690 978h60"/>
+    <circle cx="720" cy="540" r="36" fill="none"/>
+    <path d="M664 540h112M720 484v112"/>
+  </g>
+</svg>

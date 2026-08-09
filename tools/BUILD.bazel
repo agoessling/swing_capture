@@ -1,6 +1,25 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
 
+exports_files(
+    ["strict_cc.bzl"],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "station_doctor",
+    srcs = ["station_doctor.py"],
+    legacy_create_init = False,
+)
+
+py_test(
+    name = "station_doctor_test",
+    size = "small",
+    srcs = ["station_doctor_test.py"],
+    legacy_create_init = False,
+    deps = [":station_doctor"],
+)
+
 py_binary(
     name = "run_unattended_hil",
     srcs = ["run_unattended_hil.py"],

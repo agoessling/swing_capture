@@ -1,0 +1,81 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "led_pulse",
+    srcs = ["led_pulse.cc"],
+    hdrs = ["led_pulse.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = ["//capture/image:image_quality"],
+)
+
+cc_test(
+    name = "led_pulse_test",
+    size = "small",
+    srcs = ["led_pulse_test.cc"],
+    deps = [":led_pulse"],
+)
+
+cc_library(
+    name = "frame_selection",
+    srcs = ["frame_selection.cc"],
+    hdrs = ["frame_selection.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [
+        ":led_pulse",
+        "//capture/core:device_clock_mapper",
+    ],
+)
+
+cc_test(
+    name = "frame_selection_test",
+    size = "small",
+    srcs = ["frame_selection_test.cc"],
+    deps = [
+        ":frame_selection",
+        ":led_pulse",
+        "//capture/core:device_clock_mapper",
+    ],
+)
+
+cc_library(
+    name = "led_schedule_association",
+    srcs = ["led_schedule_association.cc"],
+    hdrs = ["led_schedule_association.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [
+        ":frame_selection",
+        ":led_pulse",
+    ],
+)
+
+cc_test(
+    name = "led_schedule_association_test",
+    size = "small",
+    srcs = ["led_schedule_association_test.cc"],
+    deps = [
+        ":frame_selection",
+        ":led_pulse",
+        ":led_schedule_association",
+    ],
+)
+
+cc_library(
+    name = "april_tag",
+    srcs = ["april_tag.cc"],
+    hdrs = ["april_tag.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [
+        "//capture/image:image_quality",
+        "@apriltag//:apriltag",
+    ],
+)
+
+cc_test(
+    name = "april_tag_test",
+    size = "small",
+    srcs = ["april_tag_test.cc"],
+    deps = [
+        ":april_tag",
+        "@apriltag//:apriltag",
+    ],
+)

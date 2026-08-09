@@ -74,12 +74,44 @@ picotool selection arguments can be forwarded after `--` when needed.
 The diagnostic image toggles GPIO13, the onboard red LED, every 500 ms and
 writes a heartbeat over USB serial. It intentionally leaves GPIO23 low, keeping
 power disabled for the speaker amplifier, servo header, and external NeoPixel
-terminal. This gives the programming workflow a safe first hardware test before
-the HIL stimulus firmware is added.
+terminal. This remains the minimal recovery image even though the separate HIL
+stimulus image now exists.
 
 If application firmware is invalid, the BOOT/RESET sequence always returns the
 RP2040 to its ROM bootloader. A UF2 can then be flashed again with the same Bazel
 target.
+
+## Versioned HIL stimulus image
+
+Build the HIL image without accessing the board:
+
+```bash
+bazel build //embedded/prop_maker:hil_firmware
+```
+
+Programming it is a separate, explicit operation:
+
+```bash
+bazel run //embedded/prop_maker:flash_hil
+```
+
+That operation replaces the diagnostic heartbeat image with the `SC-HIL/1`
+USB CDC stimulus image and resets the Feather. It does not modify a camera or
+the host. The serial device can briefly disappear and re-enumerate during the
+reset.
+
+The HIL image initializes every output inactive. An accepted LED request pulses
+the onboard GPIO13 LED. An accepted tone request briefly raises GPIO23 and
+therefore powers the MAX98357 speaker amplifier, the external NeoPixel rail,
+and the servo rail together; it then drives a bounded I2S tone on GPIO16--18
+before returning the shared power rail and I2S pins low. Nothing should be
+connected to the external powered rails unless that temporary power-up is
+known to be safe.
+
+The complete commands, negotiated bounds, response records, timing semantics,
+and recovery behavior are documented in
+[`embedded/prop_maker/README.md`](../embedded/prop_maker/README.md). Build and
+host-side parser tests do not access or flash the board.
 
 ## Board configuration
 

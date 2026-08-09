@@ -1,0 +1,3 @@
+# ##BAZEL_DEVTOOLS_MANAGED_BEGIN:typescript-node-modules##
+ignore_directories(["**/node_modules"])
+# ##BAZEL_DEVTOOLS_MANAGED_END:typescript-node-modules##

@@ -1,0 +1,133 @@
+load("@aspect_rules_esbuild//esbuild:defs.bzl", "esbuild")
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+npm_link_all_packages(name = "node_modules")
+
+filegroup(
+    name = "tsconfig_esbuild",
+    srcs = ["tsconfig.esbuild.json"],
+)
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
+    deps = ["//:tsconfig"],
+)
+
+APP_SRCS = [
+    "src/api.ts",
+    "src/app.tsx",
+    "src/assets.d.ts",
+    "src/fake_api.ts",
+    "src/paired_preview.ts",
+]
+
+NPM_APP_DEPS = [
+    ":node_modules/@types/node",
+    ":node_modules/@types/react",
+    ":node_modules/@types/react-dom",
+    ":node_modules/react",
+    ":node_modules/react-dom",
+]
+
+NPM_TEST_DEPS = NPM_APP_DEPS + [
+    ":node_modules/@testing-library/react",
+    ":node_modules/@types/jsdom",
+    ":node_modules/axe-core",
+    ":node_modules/jsdom",
+]
+
+ts_project(
+    name = "typescript",
+    srcs = APP_SRCS + [
+        "src/app.test.tsx",
+        "src/demo.tsx",
+        "src/main.tsx",
+    ],
+    deps = NPM_TEST_DEPS,
+    no_emit = True,
+    transpiler = "tsc",
+    tsconfig = ":tsconfig",
+)
+
+esbuild(
+    name = "app_bundle",
+    srcs = APP_SRCS + [
+        "src/main.tsx",
+        "src/styles.css",
+    ],
+    deps = NPM_APP_DEPS,
+    entry_point = "src/main.tsx",
+    minify = True,
+    output = "app.js",
+    output_css = "app.css",
+    platform = "browser",
+    target = "es2022",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+esbuild(
+    name = "demo_bundle",
+    srcs = APP_SRCS + [
+        "src/demo.tsx",
+        "src/styles.css",
+    ],
+    deps = NPM_APP_DEPS,
+    entry_point = "src/demo.tsx",
+    minify = True,
+    output = "demo.js",
+    output_css = "demo.css",
+    platform = "browser",
+    target = "es2022",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+esbuild(
+    name = "component_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/app.test.tsx"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/app.test.tsx",
+    external = [
+        "@testing-library/react",
+        "axe-core",
+        "jsdom",
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "component_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "component_test",
+    size = "small",
+    data = NPM_TEST_DEPS,
+    entry_point = ":component_test.js",
+)
+
+copy_to_directory(
+    name = "static_app",
+    srcs = [
+        ":app_bundle",
+        "index.html",
+    ] + glob(["fixtures/**"]),
+    visibility = ["//visibility:public"],
+)
+
+copy_to_directory(
+    name = "fixture_demo",
+    srcs = [
+        ":demo_bundle",
+        "demo.html",
+    ] + glob(["fixtures/**"]),
+    visibility = ["//visibility:public"],
+)

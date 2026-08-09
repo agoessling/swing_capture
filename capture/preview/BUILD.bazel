@@ -1,0 +1,57 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "latest_frame_sampler",
+    srcs = ["latest_frame_sampler.cc"],
+    hdrs = ["latest_frame_sampler.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = ["//capture/core:camera_source"],
+)
+
+cc_library(
+    name = "preview_image",
+    srcs = ["preview_image.cc"],
+    hdrs = ["preview_image.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [
+        ":latest_frame_sampler",
+        "//capture/image:bayer_rg8",
+        "//capture/image:image_quality",
+    ],
+)
+
+cc_library(
+    name = "camera_settings",
+    srcs = ["camera_settings.cc"],
+    hdrs = ["camera_settings.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_test(
+    name = "latest_frame_sampler_test",
+    size = "small",
+    srcs = ["latest_frame_sampler_test.cc"],
+    deps = [
+        ":latest_frame_sampler",
+        "//capture/core:camera_source",
+    ],
+)
+
+cc_test(
+    name = "preview_image_test",
+    size = "small",
+    srcs = ["preview_image_test.cc"],
+    deps = [
+        ":latest_frame_sampler",
+        ":preview_image",
+        "//capture/core:camera_source",
+        "//capture/image:image_quality",
+    ],
+)
+
+cc_test(
+    name = "camera_settings_test",
+    size = "small",
+    srcs = ["camera_settings_test.cc"],
+    deps = [":camera_settings"],
+)

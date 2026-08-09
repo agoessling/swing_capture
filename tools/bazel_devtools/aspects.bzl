@@ -12,6 +12,12 @@ load(
     "lint_clang_tidy_aspect",
 )
 
+load(
+    "@bazel_devtools//checks:typescript.bzl",
+    "biome_format_aspect",
+    "biome_lint_aspect",
+)
+
 ruff = ruff_lint_aspect(
     binary = Label("@bazel_devtools//tools:ruff"),
     configs = [
@@ -43,5 +49,17 @@ clang_tidy = lint_clang_tidy_aspect(
 clang_format = clang_format_aspect(
     binary = Label("//tools/bazel_devtools:clang_format"),
     config = Label("//:.clang-format"),
+)
+
+biome_lint = biome_lint_aspect(
+    binary = Label("@bazel_devtools//tools:biome"),
+    config = Label("//:biome.json"),
+    configs = [Label("//:.bazel_devtools/biome.json")],
+)
+
+biome_format = biome_format_aspect(
+    binary = Label("@bazel_devtools//tools:biome"),
+    config = Label("//:biome.json"),
+    configs = [Label("//:.bazel_devtools/biome.json")],
 )
 # ##BAZEL_DEVTOOLS_MANAGED_END:aspects##

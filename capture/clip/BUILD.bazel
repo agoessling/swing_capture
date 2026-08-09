@@ -1,5 +1,4 @@
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "clip_window_planner",

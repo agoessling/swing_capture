@@ -1,11 +1,11 @@
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "bayer_rg8",
     srcs = ["bayer_rg8.cc"],
     hdrs = ["bayer_rg8.h"],
     visibility = ["//capture:__subpackages__"],
+    deps = ["@zlib//:zlib"],
 )
 
 cc_library(

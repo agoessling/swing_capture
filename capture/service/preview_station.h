@@ -1,0 +1,39 @@
+#ifndef SWING_CAPTURE_CAPTURE_SERVICE_PREVIEW_STATION_H_
+#define SWING_CAPTURE_CAPTURE_SERVICE_PREVIEW_STATION_H_
+
+#include <memory>
+#include <optional>
+#include <vector>
+
+#include "capture/service/preview_api.h"
+#include "station/station_config.h"
+
+namespace swing_capture::service {
+
+// Owns the Galaxy SDK and both role-assigned camera workers. Missing or failed
+// cameras remain represented as disconnected status entries so the setup UI
+// can still identify the affected station role.
+class PreviewStation final : public StationBackend {
+ public:
+  explicit PreviewStation(const station::StationConfig &config);
+  ~PreviewStation() override;
+
+  PreviewStation(const PreviewStation &) = delete;
+  PreviewStation &operator=(const PreviewStation &) = delete;
+  PreviewStation(PreviewStation &&) = delete;
+  PreviewStation &operator=(PreviewStation &&) = delete;
+
+  [[nodiscard]] std::vector<CameraStatus> CameraStatuses() override;
+  [[nodiscard]] std::optional<PreviewPng> LatestPreview(CameraRole role,
+                                                        bool full_resolution) override;
+  [[nodiscard]] CameraStatus UpdateCameraSettings(CameraRole role,
+                                                  const CameraSettingsUpdate &settings) override;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace swing_capture::service
+
+#endif  // SWING_CAPTURE_CAPTURE_SERVICE_PREVIEW_STATION_H_

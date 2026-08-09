@@ -36,6 +36,7 @@
 #include "capture/hil/hil_metrics.h"
 #include "capture/image/bayer_rg8.h"
 #include "capture/image/image_quality.h"
+#include "station/station_config.h"
 
 namespace {
 
@@ -51,6 +52,8 @@ using swing_capture::daheng::DahengConfiguration;
 using swing_capture::daheng::DahengDiagnostics;
 using swing_capture::daheng::DiscoveredCamera;
 using swing_capture::daheng::GalaxySdk;
+using swing_capture::daheng::kDefaultExposureMicroseconds;
+using swing_capture::daheng::kDefaultGainDecibels;
 using swing_capture::hil::CameraMetrics;
 using swing_capture::hil::Check;
 using swing_capture::hil::EvaluateCamera;
@@ -62,8 +65,8 @@ struct Options {
   bool show_help = false;
   int duration_seconds = 10;
   double target_fps = 227.0;
-  double exposure_microseconds = 4000.0;
-  double gain_decibels = 0.0;
+  double exposure_microseconds = kDefaultExposureMicroseconds;
+  double gain_decibels = kDefaultGainDecibels;
   double minimum_fps_ratio = 0.95;
   double maximum_host_frame_interval_multiple = 10.0;
   double maximum_device_frame_interval_multiple = 4.0;
@@ -71,9 +74,16 @@ struct Options {
   double ring_reserve_seconds = 0.0;
   bool exercise_frozen_ring = false;
   std::size_t required_camera_count = 0;
-  bool require_distinct_root_controllers = true;
+  bool require_distinct_root_controllers = false;
+  bool require_station_config = false;
   std::vector<std::string> serial_numbers;
+  std::optional<std::filesystem::path> station_config_path;
   std::optional<std::filesystem::path> json_output;
+};
+
+struct CameraSelection {
+  std::string role;
+  std::string serial;
 };
 
 struct UsbDevice {
@@ -114,6 +124,7 @@ struct RunningMoments {
 };
 
 struct CaptureStats {
+  std::string role;
   std::string serial;
   std::uint64_t successful_frames = 0;
   std::uint64_t incomplete_frames = 0;
@@ -332,7 +343,10 @@ void PrintUsage(const char *program) {
             << "                        Blocks available while a snapshot is frozen\n"
             << "  --exercise-frozen-ring\n"
             << "  --require-camera-count N\n"
-            << "  --allow-shared-root-controller\n"
+            << "  --station-config PATH Use persistent camera role assignments\n"
+            << "  --require-station-config\n"
+            << "  --require-distinct-root-controller\n"
+            << "  --allow-shared-root-controller  Accepted for compatibility; this is the default\n"
             << "  --json PATH           Write machine-readable results\n";
 }
 
@@ -402,8 +416,20 @@ bool ApplyNamedOption(std::string_view argument, std::span<char *> arguments, st
         static_cast<std::size_t>(std::stoul(RequireValue(arguments, index, argument)));
     return true;
   }
+  if (argument == "--station-config") {
+    options->station_config_path = RequireValue(arguments, index, argument);
+    return true;
+  }
+  if (argument == "--require-station-config") {
+    options->require_station_config = true;
+    return true;
+  }
   if (argument == "--allow-shared-root-controller") {
     options->require_distinct_root_controllers = false;
+    return true;
+  }
+  if (argument == "--require-distinct-root-controller") {
+    options->require_distinct_root_controllers = true;
     return true;
   }
   if (argument == "--json") {
@@ -488,7 +514,7 @@ std::string JsonEscape(const std::string &value) {
 std::string BuildFatalErrorJson(const std::string &message) {
   std::ostringstream json;
   json << "{\n"
-       << "  \"schema_version\": 3,\n"
+       << "  \"schema_version\": 4,\n"
        << "  \"test_scope\": \"transport_and_retention\",\n"
        << "  \"passed\": false,\n"
        << "  \"diagnostic_images_nominal\": false,\n"
@@ -539,15 +565,17 @@ const UsbDevice *FindUsbDevice(const std::vector<UsbDevice> &devices, const std:
 }
 
 TopologyResult EvaluateTopology(const Options &options, const std::vector<UsbDevice> &usb_devices,
-                                const std::vector<std::string> &selected_serials) {
+                                std::span<const CameraSelection> selected) {
   TopologyResult result = {
       .all_usb_devices_found = true,
       .all_device_nodes_read_write = true,
       .distinct_root_controllers = true,
+      .passed = false,
+      .message = {},
   };
   std::set<std::string> root_controllers;
-  for (const std::string &serial : selected_serials) {
-    const UsbDevice *usb = FindUsbDevice(usb_devices, serial);
+  for (const CameraSelection &selection : selected) {
+    const UsbDevice *usb = FindUsbDevice(usb_devices, selection.serial);
     if (usb == nullptr) {
       result.all_usb_devices_found = false;
       result.all_device_nodes_read_write = false;
@@ -561,14 +589,13 @@ TopologyResult EvaluateTopology(const Options &options, const std::vector<UsbDev
       root_controllers.insert(usb->root_controller);
     }
   }
-  if (selected_serials.size() > 1) {
+  if (selected.size() > 1) {
     result.distinct_root_controllers =
-        result.distinct_root_controllers && root_controllers.size() == selected_serials.size();
+        result.distinct_root_controllers && root_controllers.size() == selected.size();
   }
 
   const bool controller_policy_passed = !options.require_distinct_root_controllers ||
-                                        selected_serials.size() < 2 ||
-                                        result.distinct_root_controllers;
+                                        selected.size() < 2 || result.distinct_root_controllers;
   result.passed = result.all_usb_devices_found && result.all_device_nodes_read_write &&
                   controller_policy_passed;
 
@@ -763,7 +790,7 @@ std::string BuildJson(const Options &options, const std::vector<UsbDevice> &usb_
   std::ostringstream json;
   json << std::fixed << std::setprecision(6);
   json << "{\n"
-       << "  \"schema_version\": 3,\n"
+       << "  \"schema_version\": 4,\n"
        << "  \"test_scope\": \"transport_and_retention\",\n"
        << "  \"passed\": " << JsonBoolean(passed) << ",\n"
        << "  \"diagnostic_images_nominal\": " << JsonBoolean(diagnostic_images_nominal) << ",\n"
@@ -813,6 +840,7 @@ std::string BuildJson(const Options &options, const std::vector<UsbDevice> &usb_
         });
 
     json << "    {\n"
+         << "      \"role\": \"" << JsonEscape(camera_stats.role) << "\",\n"
          << "      \"serial\": \"" << JsonEscape(camera_stats.serial) << "\",\n"
          << "      \"usb_node\": \"" << JsonEscape(usb_details.device_node) << "\",\n"
          << "      \"usb_root_controller\": \"" << JsonEscape(usb_details.root_controller)
@@ -932,61 +960,97 @@ void PrintUsbDevices(std::span<const UsbDevice> devices) {
   std::cout.flush();
 }
 
-std::vector<std::string> SelectSerials(const Options &options,
-                                       std::span<const DiscoveredCamera> discovered) {
+std::string RoleForSerial(const swing_capture::station::StationConfig &station,
+                          std::string_view serial) {
+  if (serial == station.down_the_line_camera_serial) {
+    return "down_the_line";
+  }
+  if (serial == station.face_on_camera_serial) {
+    return "face_on";
+  }
+  throw std::invalid_argument("requested camera is not assigned a station role: " +
+                              std::string(serial));
+}
+
+std::vector<CameraSelection> SelectCameras(
+    const Options &options, std::span<const DiscoveredCamera> discovered,
+    const std::optional<swing_capture::station::StationConfig> &station) {
   if (discovered.empty()) {
     throw std::runtime_error("Galaxy found no cameras");
   }
 
-  std::vector<std::string> selected_serials = options.serial_numbers;
-  if (selected_serials.empty()) {
-    for (const DiscoveredCamera &camera : discovered) {
-      selected_serials.push_back(camera.identity.serial_number);
+  std::vector<CameraSelection> selected;
+  if (station.has_value()) {
+    if (!station->camera_roles_verified) {
+      throw std::runtime_error(
+          "station camera roles are not verified; identify both views before camera HIL");
     }
-    std::ranges::sort(selected_serials);
+    if (options.serial_numbers.empty()) {
+      selected = {
+          {.role = "down_the_line", .serial = station->down_the_line_camera_serial},
+          {.role = "face_on", .serial = station->face_on_camera_serial},
+      };
+    } else {
+      selected.reserve(options.serial_numbers.size());
+      for (const std::string &serial : options.serial_numbers) {
+        selected.push_back({.role = RoleForSerial(*station, serial), .serial = serial});
+      }
+    }
+  } else if (options.serial_numbers.empty()) {
+    for (const DiscoveredCamera &camera : discovered) {
+      selected.push_back({.role = "unassigned", .serial = camera.identity.serial_number});
+    }
+    std::ranges::sort(selected, {}, &CameraSelection::serial);
+  } else {
+    selected.reserve(options.serial_numbers.size());
+    for (const std::string &serial : options.serial_numbers) {
+      selected.push_back({.role = "unassigned", .serial = serial});
+    }
   }
-  if (options.required_camera_count > 0 &&
-      selected_serials.size() != options.required_camera_count) {
+  if (options.required_camera_count > 0 && selected.size() != options.required_camera_count) {
     throw std::runtime_error("camera-count gate failed: required " +
                              std::to_string(options.required_camera_count) + ", found " +
-                             std::to_string(selected_serials.size()));
+                             std::to_string(selected.size()));
   }
 
-  for (const std::string &serial : selected_serials) {
-    if (std::ranges::find(discovered, serial, [](const auto &camera) {
+  for (const CameraSelection &selection : selected) {
+    if (std::ranges::find(discovered, selection.serial, [](const auto &camera) {
           return camera.identity.serial_number;
         }) == discovered.end()) {
-      throw std::invalid_argument("requested camera not found: " + serial);
+      throw std::invalid_argument("requested camera not found: " + selection.serial);
     }
   }
-  return selected_serials;
+  return selected;
 }
 
 struct ConfiguredCapture {
   std::vector<std::unique_ptr<DahengCamera>> cameras;
   std::vector<std::unique_ptr<PooledRawFrameRing>> rings;
   std::vector<DahengDiagnostics> diagnostics;
+  std::vector<std::string> roles;
 };
 
 ConfiguredCapture ConfigureCameras(GalaxySdk &sdk, const Options &options,
-                                   std::span<const std::string> selected_serials) {
+                                   std::span<const CameraSelection> selected) {
   const DahengConfiguration configuration = {
       .target_frames_per_second = options.target_fps,
       .exposure_microseconds = options.exposure_microseconds,
       .gain_decibels = options.gain_decibels,
   };
   ConfiguredCapture configured;
-  configured.cameras.reserve(selected_serials.size());
-  configured.rings.reserve(selected_serials.size());
-  configured.diagnostics.reserve(selected_serials.size());
-  for (const std::string &serial : selected_serials) {
-    auto camera = std::make_unique<DahengCamera>(sdk, serial);
+  configured.cameras.reserve(selected.size());
+  configured.rings.reserve(selected.size());
+  configured.diagnostics.reserve(selected.size());
+  configured.roles.reserve(selected.size());
+  for (const CameraSelection &selection : selected) {
+    auto camera = std::make_unique<DahengCamera>(sdk, selection.serial);
     camera->Configure(configuration);
     const auto identity = camera->identity();
     const auto profile = camera->profile();
     const auto diagnostics = camera->diagnostics();
-    std::cout << "Configured: " << identity.model << " serial=" << identity.serial_number << ' '
-              << profile.width << 'x' << profile.height << ' ' << profile.pixel_format
+    std::cout << "Configured: role=" << selection.role << ' ' << identity.model
+              << " serial=" << identity.serial_number << ' ' << profile.width << 'x'
+              << profile.height << ' ' << profile.pixel_format
               << " exposure_us=" << diagnostics.exposure_microseconds
               << " gain_db=" << diagnostics.gain_decibels
               << " target_fps=" << diagnostics.target_frames_per_second
@@ -994,6 +1058,7 @@ ConfiguredCapture ConfigureCameras(GalaxySdk &sdk, const Options &options,
               << " transfer_bytes=" << diagnostics.stream_transfer_bytes
               << " urbs=" << diagnostics.stream_urb_count << '\n';
     configured.diagnostics.push_back(diagnostics);
+    configured.roles.push_back(selection.role);
     if (options.ring_seconds > 0.0) {
       const auto frame_capacity = static_cast<std::size_t>(
           std::ceil(diagnostics.resulting_frames_per_second * options.ring_seconds));
@@ -1090,6 +1155,7 @@ CaptureRun CaptureAllCameras(const Options &options, ConfiguredCapture &configur
   run.stats.resize(configured.cameras.size());
   run.frozen_snapshots.resize(configured.cameras.size());
   for (std::size_t index = 0; index < configured.cameras.size(); ++index) {
+    run.stats[index].role = configured.roles[index];
     run.stats[index].serial = configured.cameras[index]->identity().serial_number;
     if (configured.diagnostics[index].timestamp_ticks_per_second > 0) {
       run.stats[index].clock_mapper = std::make_unique<DeviceClockMapper>(
@@ -1204,8 +1270,8 @@ bool EvaluateAndPrint(const Options &options, const TopologyResult &topology,
         });
     passed = passed && evaluation.passed;
 
-    std::cout << std::fixed << std::setprecision(3) << "Result: serial=" << camera_stats.serial
-              << " pass=" << (evaluation.passed ? "yes" : "no")
+    std::cout << std::fixed << std::setprecision(3) << "Result: role=" << camera_stats.role
+              << " serial=" << camera_stats.serial << " pass=" << (evaluation.passed ? "yes" : "no")
               << " frames=" << camera_stats.successful_frames
               << " incomplete=" << camera_stats.incomplete_frames
               << " timeouts=" << camera_stats.timeouts << " gaps=" << camera_stats.frame_id_gaps
@@ -1240,14 +1306,25 @@ int RunProbe(const Options &options) {
   const std::vector<UsbDevice> usb_devices = FindDahengUsbDevices();
   PrintUsbDevices(usb_devices);
 
+  std::optional<swing_capture::station::StationConfig> station;
+  if (options.station_config_path.has_value()) {
+    station = swing_capture::station::LoadStationConfig(*options.station_config_path);
+    if (!station->camera_roles_verified) {
+      throw std::runtime_error(
+          "station camera roles are not verified; identify both views before camera HIL");
+    }
+  } else if (options.require_station_config) {
+    throw std::runtime_error(
+        "station config is required; set SWING_CAPTURE_STATION_CONFIG in .bazelrc.local");
+  }
   GalaxySdk sdk;
   const std::vector<DiscoveredCamera> discovered = sdk.Discover(std::chrono::seconds(1));
-  const std::vector<std::string> selected_serials = SelectSerials(options, discovered);
-  const TopologyResult topology = EvaluateTopology(options, usb_devices, selected_serials);
+  const std::vector<CameraSelection> selected = SelectCameras(options, discovered, station);
+  const TopologyResult topology = EvaluateTopology(options, usb_devices, selected);
   std::cout << "Topology: " << topology.message << " pass=" << (topology.passed ? "yes" : "no")
             << '\n';
 
-  ConfiguredCapture configured = ConfigureCameras(sdk, options, selected_serials);
+  ConfiguredCapture configured = ConfigureCameras(sdk, options, selected);
   CaptureRun run = CaptureAllCameras(options, configured);
   const std::optional<std::filesystem::path> json_output =
       WriteDiagnosticFrames(options, configured, run);
@@ -1278,6 +1355,9 @@ int main(int argc, char **argv) {
           test_outputs.has_value() && !test_outputs->empty()) {
         options.json_output = std::filesystem::path(*test_outputs) / "report.json";
       }
+    }
+    if (!options.station_config_path.has_value()) {
+      options.station_config_path = swing_capture::station::StationConfigPathFromEnvironment();
     }
     return RunProbe(options);
   } catch (const std::exception &error) {

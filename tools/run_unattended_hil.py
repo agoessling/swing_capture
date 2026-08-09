@@ -56,6 +56,7 @@ STAGES: dict[str, Stage] = {
 
 ACTIVE_STATES = frozenset(("building", "running", "isolating"))
 SERIAL_PATTERN = re.compile(r"^USB:.* serial=([^ ]+)", re.MULTILINE)
+HARDWARE_LOCK_ENVIRONMENT = "SWING_CAPTURE_HARDWARE_LOCK"
 
 
 def utc_now() -> datetime.datetime:
@@ -90,6 +91,14 @@ def repository_root(environment: Mapping[str, str], current_directory: Path) -> 
     invocation = "'bazel run //tools:run_unattended_hil -- <stage>'"
     message = f"cannot locate the repository; invoke with {invocation}"
     raise RuntimeError(message)
+
+
+def hardware_lock_path(root: Path, environment: Mapping[str, str]) -> Path:
+    """Resolve the lock shared by every supported camera-owning process."""
+    configured = environment.get(HARDWARE_LOCK_ENVIRONMENT)
+    if configured:
+        return Path(configured).resolve()
+    return root / "artifacts" / "hil" / "hardware.lock"
 
 
 def atomic_copy(source: Path, destination: Path) -> None:
@@ -386,6 +395,7 @@ def append_log(log: Path, message: str) -> None:
 @dataclasses.dataclass(frozen=True)
 class _RunContext:
     root: Path
+    hardware_lock: Path
     stage: Stage
     watchdog_grace_seconds: int
     paths: RunPaths
@@ -514,7 +524,7 @@ def _run_hil_commands(context: _RunContext) -> int:
 
 
 def _run_with_hardware_lock(context: _RunContext) -> int:
-    lock_path = context.root / "artifacts" / "hil" / "hardware.lock"
+    lock_path = context.hardware_lock
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock:
         try:
@@ -542,6 +552,7 @@ def run(stage_name: str, environment: Mapping[str, str]) -> int:
     supervisor = CommandSupervisor(root, paths.log, statuses, heartbeat_seconds)
     context = _RunContext(
         root=root,
+        hardware_lock=hardware_lock_path(root, environment),
         stage=stage,
         watchdog_grace_seconds=watchdog_grace_seconds,
         paths=paths,

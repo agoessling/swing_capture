@@ -4,6 +4,11 @@
 
 - Treat Bazel targets as the canonical build and test interface. Do not add
   shell-script test implementations.
+- Target C++23. Preserve existing working code, but prefer clear C++23
+  facilities when writing new C++ or materially refactoring existing C++.
+- Define first-party host C++ targets through `//tools:strict_cc.bzl`. Its
+  wrappers enforce `-Wall -Wextra -Wpedantic -Werror`; bypass them only for a
+  documented vendor or toolchain boundary.
 - Run `bazel test //...` after software-only changes.
 - Before handing off capture, timing, retention, or encoding changes, also run:
 
@@ -25,9 +30,10 @@
     --test_output=streamed --nocache_test_results
   ```
 
-- Run the five-minute qualification after meaningful changes to camera
-  acquisition, frame ownership, threading, timing, or SDK lifetime. Reserve
-  the 30-minute soak for milestone acceptance.
+- Keep agent-initiated HIL stages to roughly 15 seconds or less so the normal
+  iteration loop stays fast. Run the five-minute qualification or 30-minute
+  soak only when the user explicitly requests that specific longer run; do not
+  infer permission from the type or scope of a change.
 - Do not run two camera jobs concurrently. The optional
   `//tools:run_unattended_hil` runner invokes the same Bazel tests and adds a
   host lock, watchdog, durable evidence, and failure isolation.

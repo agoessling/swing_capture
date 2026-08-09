@@ -1,0 +1,29 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "hardware_lock",
+    srcs = ["hardware_lock.cc"],
+    hdrs = ["hardware_lock.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "hardware_lock_test",
+    size = "small",
+    srcs = ["hardware_lock_test.cc"],
+    deps = [":hardware_lock"],
+)
+
+cc_library(
+    name = "station_config",
+    srcs = ["station_config.cc"],
+    hdrs = ["station_config.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_test(
+    name = "station_config_test",
+    size = "small",
+    srcs = ["station_config_test.cc"],
+    deps = [":station_config"],
+)

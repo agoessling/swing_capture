@@ -4,7 +4,7 @@ try-import %workspace%/.bazelrc.local
 
 build --incompatible_strict_action_env
 build --show_timestamps
-build --cxxopt=-std=c++20
+build --cxxopt=-std=c++23
 
 test --test_output=errors
 # Several small dependency-free test binaries use assert-style checks.

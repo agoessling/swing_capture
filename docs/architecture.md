@@ -38,9 +38,14 @@ windows, and proves capture can continue without mutating the retained frames.
 
 ## Camera configuration and diagnostics
 
+Machine-local station configuration binds the physical `down_the_line` and
+`face_on` roles to camera serial numbers. The hardware tests require an
+explicitly verified mapping and record the role beside every serial in their
+reports; they no longer accept whichever two devices happen to be attached.
+
 The current Daheng HIL uses deterministic free-run settings: 1440x1080
-`BayerRG8`, approximately 227 fps, 4000 us fixed exposure, `ExposureAuto=Off`,
-0 dB fixed gain, and `GainAuto=Off`. Required values are read back from both
+`BayerRG8`, approximately 227 fps, 500 us fixed exposure, `ExposureAuto=Off`,
+24 dB fixed gain, and `GainAuto=Off`. Required values are read back from both
 cameras rather than assumed from successful setter calls.
 
 After acquisition stops, diagnostic work runs away from the camera dequeue
@@ -56,11 +61,72 @@ frame-FDN23010199.png
 ```
 
 Transport readiness and image readiness are separate. The 2026-07-26 smoke
-transported both streams successfully, but classified both images
-`underexposed_or_obscured`, with one view almost entirely black. The camera
-positions, obstructions, lens/iris state, lighting, and exposure need physical
-correction before collecting representative swings. Image classification is
-currently diagnostic evidence, not a transport gate.
+transported both streams successfully, but its dark diagnostic views did not
+establish image readiness. The 2026-08-09 room-lit station-fixture run replaced
+that optical baseline by decoding the same marker cleanly in both views. Image
+classification remains diagnostic evidence rather than a transport gate.
+
+The short station-fixture HIL stops and joins both camera producer threads
+before stopping either Galaxy stream, then analyzes immutable ring snapshots.
+Its LED detector removes a fitted per-frame global illumination change and
+requires a localized response above a surrounding background ring. AprilTag
+presence is evaluated on luminance derived from an offline demosaic, rather
+than interpreting the color Bayer mosaic as grayscale. The same `tag36h11` ID
+must decode in both views; this is a framing/focus/exposure check, not a pose or
+geometric-calibration claim.
+
+Robust batch clock fitting maps camera device ticks to normal host receipt
+times while rejecting queued-delivery outliers. A constant camera/readout/USB
+delivery delay is not observable in those samples. The LED-versus-Feather
+schedule comparison therefore records its one-frame delivery assumption and
+remains diagnostic; station acceptance instead gates the localized pulse
+duration in the command-relative retained window plus the independently
+verified Feather command/device timing.
+
+## Headless setup preview
+
+The setup UI is a separate operating mode of the same future station service,
+not a second camera-owning application:
+
+```text
+Daheng camera ─ owner/acquisition thread ─ 227 fps frame dequeue
+                                             │
+                                             └─ overwrite-latest sampler (up to 5 fps)
+                                                         │
+                                                         └─ latest-only renderer
+                                                                    │
+                                                         compressed 640x480 PNG
+                                                         + on-demand full-size PNG
+                                                                    │
+browser ─ capacity-one paired fetch + atomic swap ─ HTTP API + React/TypeScript UI ┘
+```
+
+Each camera remains owned by exactly one native thread. HTTP handlers consume
+immutable raw or rendered snapshots and never call the Galaxy SDK. Sampling
+copies only an admitted frame and retains at most the latest raw snapshot;
+one dedicated renderer per camera similarly caches only the latest completed
+routine PNG and an on-demand full-resolution PNG. Slow browsers keep one
+two-camera pair in flight, replace at most one pending pair with newer
+sequences, retain the last successful pair on failure, and cannot apply
+backpressure to high-rate acquisition. The two views become visible in one
+atomic UI update after both downloads complete. Routine quality measurement
+still examines the full Bayer payload, while preview rendering reduces the
+Bayer mosaic before demosaic and resize. Full-resolution demosaic and encoding
+run only after an explicit request and are collapsed onto that same
+capacity-one renderer.
+
+The versioned `/api/v1` contract exposes station status, one latest-PNG route
+per configured role, and exposure/gain updates. A settings update is serialized
+through the owning camera thread. Because the current Daheng wrapper only
+configures a stopped stream, the worker stops that camera, applies the full
+deterministic profile with the requested values, verifies read-back, restarts,
+and attempts to restore the prior profile if any step fails.
+
+Routine setup polling uses a compressed fit-within 640x480 image. The explicit
+manual-focus link selects the cached full-sensor render for the same preview
+sequence. This is independent of eventual swing playback: recorded review will
+use encoded media plus per-frame timestamp metadata rather than polling
+individual still images.
 
 ## Retention and memory
 
@@ -130,12 +196,14 @@ directly. Both thresholds are recorded and checked independently.
 ## Audio timing
 
 The first physical audio backend launches `arecord` directly, captures the
-C925e at 32 kHz stereo, and selects channel 0 for the impact detector. It uses
-host read completion minus the first block duration as its initial timestamp,
-then preserves time by sample-count continuity. That is sufficient for early
-trigger and clip-pipeline iteration, but ALSA buffering and device latency are
-not yet measured. A direct ALSA timestamp backend or a physical audio/optical
-calibration HIL is required before claiming absolute strike alignment.
+station-configured stable ALSA card ID and hardware channel count at 32 kHz,
+and selects the configured mono channel for the impact detector. It uses host
+read completion minus the first block
+duration as its initial timestamp, then preserves time by sample-count
+continuity. That is sufficient for early trigger and clip-pipeline iteration,
+but ALSA buffering and device latency are not yet measured. A direct ALSA
+timestamp backend or a physical audio/optical calibration HIL is required
+before claiming absolute strike alignment.
 
 ## UI boundary
 
@@ -151,3 +219,7 @@ fixture clips:
 
 Component fixtures, browser interaction tests, and screenshot comparisons
 will make visual iteration independent of attached cameras.
+
+The current camera-setup UI already follows this boundary. Its injectable fake
+API, checked-in dual-view artwork, component interactions, runtime contract
+validation, and accessibility scan run without the SDK or physical cameras.
