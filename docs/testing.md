@@ -47,10 +47,10 @@ It does not open a camera. The repository adapter is documented in
 The setup-service tests use a fake camera adapter and synthetic Bayer frames.
 They cover overwrite-latest image publication, reset without sequence reuse,
 compressed routine rendering, on-demand full-resolution rendering, monotonic
-PNG/status sequences, measured frame delivery, bounded timeout and invalid-frame failure,
+JPEG/status sequences, measured frame delivery, bounded timeout and invalid-frame failure,
 post-stop command rejection, setting range/increment rejection,
 stop/configure/start serialization, preview invalidation, failed-update
-recovery, HTTP status and PNG headers, malformed requests, and static asset
+recovery, HTTP status and image headers, malformed requests, and static asset
 serving. The web component test covers dual-view rendering, paired polling and
 full-resolution URLs, stale-status clearing, backend error details,
 apply/revert interaction, disconnected/error states, runtime schema rejection,

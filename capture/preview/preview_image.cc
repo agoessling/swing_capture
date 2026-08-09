@@ -1,12 +1,16 @@
 #include "capture/preview/preview_image.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "capture/image/bayer_rg8.h"
@@ -19,6 +23,12 @@ namespace {
 struct SamplingCoordinate {
   double x;
   double y;
+};
+
+struct BayerSamplingAxis {
+  std::uint32_t output_coordinate;
+  std::uint32_t output_extent;
+  std::uint32_t source_extent;
 };
 
 std::uint32_t RoundedScale(std::uint32_t source_extent, std::uint32_t target_extent,
@@ -46,32 +56,49 @@ void ValidateRgbImage(const image::Rgb8Image &source) {
 struct PreparedPreview {
   image::ImageQualityMetrics source_quality;
   image::Rgb8Image full_resolution_rgb;
+  PreviewRenderTimings timings;
 };
+
+std::uint32_t CenteredCoordinateWithParity(BayerSamplingAxis axis) {
+  const std::uint64_t numerator =
+      static_cast<std::uint64_t>(axis.output_coordinate) * axis.source_extent +
+      axis.source_extent / 2U;
+  auto coordinate = static_cast<std::uint32_t>(numerator / axis.output_extent);
+  coordinate = std::min(coordinate, axis.source_extent - 1U);
+  if ((coordinate & 1U) == (axis.output_coordinate & 1U)) {
+    return coordinate;
+  }
+  if (coordinate + 1U < axis.source_extent) {
+    return coordinate + 1U;
+  }
+  return coordinate - 1U;
+}
 
 image::Rgb8Image DemosaicPreview(std::span<const std::byte> bayer, std::uint32_t width,
                                  std::uint32_t height, const PreviewRenderOptions &options) {
   if (options.maximum_width == 0 || options.maximum_height == 0) {
     throw std::invalid_argument("preview maximum dimensions must be nonzero");
   }
-  std::uint32_t reduction =
-      std::min(width / options.maximum_width, height / options.maximum_height);
-  if (reduction <= 1U || width / reduction < 2U || height / reduction < 2U) {
+  const PreviewDimensions output =
+      FitWithin({.width = width, .height = height},
+                {.width = options.maximum_width, .height = options.maximum_height});
+  if ((output.width == width && output.height == height) || output.width < 2U ||
+      output.height < 2U) {
     return image::DemosaicBayerRg8(bayer, width, height);
   }
 
-  const std::uint32_t reduced_width = width / reduction;
-  const std::uint32_t reduced_height = height / reduction;
-  std::vector<std::byte> reduced(static_cast<std::size_t>(reduced_width) * reduced_height);
-  const bool parity_offset_required = (reduction & 1U) == 0U;
-  for (std::uint32_t y = 0; y < reduced_height; ++y) {
-    const std::uint32_t source_y = y * reduction + (parity_offset_required ? y & 1U : 0U);
-    for (std::uint32_t x = 0; x < reduced_width; ++x) {
-      const std::uint32_t source_x = x * reduction + (parity_offset_required ? x & 1U : 0U);
-      reduced[static_cast<std::size_t>(y) * reduced_width + x] =
+  std::vector<std::byte> reduced(static_cast<std::size_t>(output.width) * output.height);
+  for (std::uint32_t y = 0; y < output.height; ++y) {
+    const std::uint32_t source_y = CenteredCoordinateWithParity(
+        {.output_coordinate = y, .output_extent = output.height, .source_extent = height});
+    for (std::uint32_t x = 0; x < output.width; ++x) {
+      const std::uint32_t source_x = CenteredCoordinateWithParity(
+          {.output_coordinate = x, .output_extent = output.width, .source_extent = width});
+      reduced[static_cast<std::size_t>(y) * output.width + x] =
           bayer[static_cast<std::size_t>(source_y) * width + source_x];
     }
   }
-  return image::DemosaicBayerRg8(reduced, reduced_width, reduced_height);
+  return image::DemosaicBayerRg8(reduced, output.width, output.height);
 }
 
 PreparedPreview PreparePreview(const SampledPreviewFrame &frame,
@@ -81,27 +108,67 @@ PreparedPreview PreparePreview(const SampledPreviewFrame &frame,
       .width = frame.metadata.width,
       .height = frame.metadata.height,
   };
+  const auto quality_started_at = std::chrono::steady_clock::now();
+  const image::ImageQualityMetrics quality =
+      image::MeasureRaw8ImageQuality(bayer_view, options.quality_options);
+  const auto quality_completed_at = std::chrono::steady_clock::now();
+  image::Rgb8Image rgb =
+      reduce_for_preview
+          ? DemosaicPreview(bayer_view.pixels, frame.metadata.width, frame.metadata.height, options)
+          : image::DemosaicBayerRg8(bayer_view.pixels, frame.metadata.width, frame.metadata.height);
+  const auto transform_completed_at = std::chrono::steady_clock::now();
   return {
-      .source_quality = image::MeasureRaw8ImageQuality(bayer_view, options.quality_options),
-      .full_resolution_rgb = reduce_for_preview
-                                 ? DemosaicPreview(bayer_view.pixels, frame.metadata.width,
-                                                   frame.metadata.height, options)
-                                 : image::DemosaicBayerRg8(bayer_view.pixels, frame.metadata.width,
-                                                           frame.metadata.height),
+      .source_quality = quality,
+      .full_resolution_rgb = std::move(rgb),
+      .timings =
+          {
+              .quality_analysis = quality_completed_at - quality_started_at,
+              .bayer_transform = transform_completed_at - quality_completed_at,
+          },
   };
 }
 
 RenderedPreviewImage EncodePreview(const SampledPreviewFrame &frame,
                                    const image::ImageQualityMetrics &quality,
-                                   const image::Rgb8Image &rgb) {
+                                   const image::Rgb8Image &rgb, const PreviewRenderOptions &options,
+                                   PreviewRenderTimings timings,
+                                   std::chrono::steady_clock::time_point render_started_at) {
+  const auto encode_started_at = std::chrono::steady_clock::now();
+  std::string media_type;
+  std::string encoded;
+  switch (options.image_format) {
+    case PreviewImageFormat::kPng:
+      media_type = "image/png";
+      encoded = image::EncodePng(rgb);
+      break;
+    case PreviewImageFormat::kJpeg:
+      media_type = "image/jpeg";
+      encoded = image::EncodeJpeg(rgb, options.jpeg_quality);
+      break;
+  }
+  const auto render_completed_at = std::chrono::steady_clock::now();
+  timings.encode = render_completed_at - encode_started_at;
+  timings.total = render_completed_at - render_started_at;
   return {
       .source_metadata = frame.metadata,
       .preview_sequence = frame.preview_sequence,
       .dimensions = {.width = rgb.width, .height = rgb.height},
       .source_quality = quality,
-      .png_bytes = image::EncodePng(rgb),
+      .media_type = std::move(media_type),
+      .encoded_bytes = std::move(encoded),
+      .timings = timings,
+      .render_started_at = render_started_at,
+      .render_completed_at = render_completed_at,
   };
 }
+
+class SoftwarePreviewProcessor final : public PreviewFrameProcessor {
+ public:
+  [[nodiscard]] RenderedPreviewImage Render(const SampledPreviewFrame &frame,
+                                            const PreviewRenderOptions &options) override {
+    return RenderPreview(frame, options);
+  }
+};
 
 std::uint8_t BilinearChannel(const image::Rgb8Image &source, SamplingCoordinate coordinate,
                              std::size_t channel) {
@@ -186,31 +253,46 @@ image::Rgb8Image ResizeToFit(const image::Rgb8Image &source, PreviewDimensions m
 
 RenderedPreviewImage RenderPreview(const SampledPreviewFrame &frame,
                                    const PreviewRenderOptions &options) {
+  const auto render_started_at = std::chrono::steady_clock::now();
   const PreparedPreview prepared = PreparePreview(frame, options, true);
   const PreviewDimensions fitted = FitWithin(
       {.width = prepared.full_resolution_rgb.width, .height = prepared.full_resolution_rgb.height},
       {.width = options.maximum_width, .height = options.maximum_height});
   if (fitted.width == prepared.full_resolution_rgb.width &&
       fitted.height == prepared.full_resolution_rgb.height) {
-    return EncodePreview(frame, prepared.source_quality, prepared.full_resolution_rgb);
+    return EncodePreview(frame, prepared.source_quality, prepared.full_resolution_rgb, options,
+                         prepared.timings, render_started_at);
   }
+  const auto resize_started_at = std::chrono::steady_clock::now();
   const image::Rgb8Image resized =
       ResizeToFit(prepared.full_resolution_rgb,
                   {.width = options.maximum_width, .height = options.maximum_height});
-  return EncodePreview(frame, prepared.source_quality, resized);
+  PreviewRenderTimings timings = prepared.timings;
+  timings.resize = std::chrono::steady_clock::now() - resize_started_at;
+  return EncodePreview(frame, prepared.source_quality, resized, options, timings,
+                       render_started_at);
 }
 
 PreviewRenderSet RenderPreviewSet(const SampledPreviewFrame &frame,
                                   const PreviewRenderOptions &options) {
+  const auto render_started_at = std::chrono::steady_clock::now();
   const PreparedPreview prepared = PreparePreview(frame, options, false);
+  const auto resize_started_at = std::chrono::steady_clock::now();
   const image::Rgb8Image routine =
       ResizeToFit(prepared.full_resolution_rgb,
                   {.width = options.maximum_width, .height = options.maximum_height});
+  PreviewRenderTimings routine_timings = prepared.timings;
+  routine_timings.resize = std::chrono::steady_clock::now() - resize_started_at;
   return {
-      .routine = EncodePreview(frame, prepared.source_quality, routine),
-      .full_resolution =
-          EncodePreview(frame, prepared.source_quality, prepared.full_resolution_rgb),
+      .routine = EncodePreview(frame, prepared.source_quality, routine, options, routine_timings,
+                               render_started_at),
+      .full_resolution = EncodePreview(frame, prepared.source_quality, prepared.full_resolution_rgb,
+                                       options, prepared.timings, render_started_at),
   };
+}
+
+std::unique_ptr<PreviewFrameProcessor> MakeSoftwarePreviewProcessor() {
+  return std::make_unique<SoftwarePreviewProcessor>();
 }
 
 }  // namespace swing_capture::preview

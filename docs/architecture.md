@@ -91,11 +91,11 @@ not a second camera-owning application:
 ```text
 Daheng camera ─ owner/acquisition thread ─ 227 fps frame dequeue
                                              │
-                                             └─ overwrite-latest sampler (up to 5 fps)
+                                             └─ overwrite-latest sampler (about 30 fps)
                                                          │
                                                          └─ latest-only renderer
                                                                     │
-                                                         compressed 640x480 PNG
+                                                         compressed 640x480 JPEG
                                                          + on-demand full-size PNG
                                                                     │
 browser ─ capacity-one paired fetch + atomic swap ─ HTTP API + React/TypeScript UI ┘
@@ -105,24 +105,24 @@ Each camera remains owned by exactly one native thread. HTTP handlers consume
 immutable raw or rendered snapshots and never call the Galaxy SDK. Sampling
 copies only an admitted frame and retains at most the latest raw snapshot;
 one dedicated renderer per camera similarly caches only the latest completed
-routine PNG and an on-demand full-resolution PNG. Slow browsers keep one
+routine JPEG and an on-demand full-resolution PNG. Slow browsers keep one
 two-camera pair in flight, replace at most one pending pair with newer
 sequences, retain the last successful pair on failure, and cannot apply
 backpressure to high-rate acquisition. The two views become visible in one
-atomic UI update after both downloads complete. Routine quality measurement
-still examines the full Bayer payload, while preview rendering reduces the
-Bayer mosaic before demosaic and resize. Full-resolution demosaic and encoding
+atomic UI update after both downloads and browser decodes complete. Routine quality measurement
+still examines the full Bayer payload, while preview rendering samples the
+Bayer mosaic directly to the fitted geometry before demosaic. Full-resolution demosaic and encoding
 run only after an explicit request and are collapsed onto that same
 capacity-one renderer.
 
-The versioned `/api/v1` contract exposes station status, one latest-PNG route
+The versioned `/api/v1` contract exposes station status, one latest-image route
 per configured role, and exposure/gain updates. A settings update is serialized
 through the owning camera thread. Because the current Daheng wrapper only
 configures a stopped stream, the worker stops that camera, applies the full
 deterministic profile with the requested values, verifies read-back, restarts,
 and attempts to restore the prior profile if any step fails.
 
-Routine setup polling uses a compressed fit-within 640x480 image. The explicit
+Routine setup polling uses a compressed fit-within 640x480 JPEG. The explicit
 manual-focus link selects the cached full-sensor render for the same preview
 sequence. This is independent of eventual swing playback: recorded review will
 use encoded media plus per-frame timestamp metadata rather than polling

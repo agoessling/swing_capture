@@ -3,7 +3,12 @@ import { JSDOM, type DOMWindow } from "jsdom";
 import { App } from "./app.js";
 import { HttpStationApi, parseStationStatus, type CameraStatus, type StationApi } from "./api.js";
 import { FakeStationApi, FIXTURE_STATUS } from "./fake_api.js";
-import { type ObjectUrlFactory, PairedPreviewLoader, type PreviewPair } from "./paired_preview.js";
+import {
+  type ObjectUrlFactory,
+  PairedPreviewLoader,
+  type PreviewImageDecoder,
+  type PreviewPair,
+} from "./paired_preview.js";
 
 const dom = new JSDOM('<!doctype html><html lang="en"><body></body></html>', {
   url: "http://station.test/setup/cameras",
@@ -154,11 +159,15 @@ async function testPairedPreviewBackpressure() {
   };
   const pairs: PreviewPair[] = [];
   const errors: Error[] = [];
+  const pendingDecodes: Array<{ url: string; resolve(): void }> = [];
+  const decodeImage: PreviewImageDecoder = (url) =>
+    new Promise((resolve) => pendingDecodes.push({ url, resolve }));
   const loader = new PairedPreviewLoader(
     api,
     (pair) => pairs.push(pair),
     (error) => errors.push(error),
     objectUrls,
+    decodeImage,
   );
 
   loader.enqueue({ down_the_line: 1, face_on: 1 });
@@ -166,6 +175,10 @@ async function testPairedPreviewBackpressure() {
   loader.enqueue({ down_the_line: 2, face_on: 2 });
   loader.enqueue({ down_the_line: 3, face_on: 3 });
   resolvePendingPair(pending.slice(0, 2));
+  await flushAsyncWork();
+  assert.equal(pairs.length, 0, "a pair must not publish before both images decode");
+  assert.equal(pendingDecodes.length, 2);
+  resolvePendingDecodes(pendingDecodes.slice(0, 2));
   await flushAsyncWork();
   assert.deepEqual(
     pending.slice(2).map(({ sequence }) => sequence),
@@ -175,6 +188,8 @@ async function testPairedPreviewBackpressure() {
   assert.equal(pairs.length, 1);
 
   resolvePendingPair(pending.slice(2, 4));
+  await flushAsyncWork();
+  resolvePendingDecodes(pendingDecodes.slice(2, 4));
   await flushAsyncWork();
   assert.deepEqual(
     pairs.map(({ sequences }) => sequences.down_the_line),
@@ -186,10 +201,18 @@ async function testPairedPreviewBackpressure() {
   assert.equal(pending.length, 6);
   resolvePendingPair(pending.slice(4, 6));
   await flushAsyncWork();
+  resolvePendingDecodes(pendingDecodes.slice(4, 6));
+  await flushAsyncWork();
   assert.equal(activeUrls.size, 4, "retired object URLs must be reclaimed on the next swap");
   assert.deepEqual(errors, []);
   loader.stop();
   assert.equal(activeUrls.size, 0, "stopping must reclaim every retained object URL");
+}
+
+function resolvePendingDecodes(pending: Array<{ resolve(): void }>) {
+  for (const decode of pending) {
+    decode.resolve();
+  }
 }
 
 function resolvePendingPair(
@@ -241,8 +264,8 @@ async function testHttpContract() {
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
-    if (url.includes("/preview.png")) {
-      return new Response("png", { headers: { "Content-Type": "image/png" } });
+    if (url.includes("/preview?")) {
+      return new Response("jpeg", { headers: { "Content-Type": "image/jpeg" } });
     }
     if (init?.method === "PATCH") {
       patchCamera = structuredClone(FIXTURE_STATUS.cameras[0]);
@@ -271,15 +294,15 @@ async function testHttpContract() {
   });
   assert.equal(
     api.previewUrl("face_on", 41),
-    "http://station.test/api/v1/cameras/face_on/preview.png?sequence=41",
+    "http://station.test/api/v1/cameras/face_on/preview?sequence=41",
   );
   assert.equal(
     api.fullResolutionPreviewUrl("face_on", 41),
-    "http://station.test/api/v1/cameras/face_on/preview.png?sequence=41&full=1",
+    "http://station.test/api/v1/cameras/face_on/preview?sequence=41&full=1",
   );
   const preview = await api.getPreview("face_on", 41);
-  assert.equal(preview.type, "image/png");
-  assert.equal(await preview.text(), "png");
+  assert.equal(preview.type, "image/jpeg");
+  assert.equal(await preview.text(), "jpeg");
 
   const failingApi = new HttpStationApi("http://station.test", (async () =>
     Response.json(

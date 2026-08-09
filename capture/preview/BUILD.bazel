@@ -1,4 +1,4 @@
-load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
 
 cc_library(
     name = "latest_frame_sampler",
@@ -34,6 +34,18 @@ cc_test(
     deps = [
         ":latest_frame_sampler",
         "//capture/core:camera_source",
+    ],
+)
+
+cc_binary(
+    name = "preview_benchmark",
+    srcs = ["preview_benchmark.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":latest_frame_sampler",
+        ":preview_image",
+        "//capture/core:camera_source",
+        "@nlohmann_json//:json",
     ],
 )
 

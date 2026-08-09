@@ -5,7 +5,10 @@ cc_library(
     srcs = ["bayer_rg8.cc"],
     hdrs = ["bayer_rg8.h"],
     visibility = ["//capture:__subpackages__"],
-    deps = ["@zlib//:zlib"],
+    deps = [
+        "@libjpeg_turbo//:turbojpeg",
+        "@zlib//:zlib",
+    ],
 )
 
 cc_library(

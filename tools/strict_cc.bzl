@@ -34,6 +34,6 @@ def cc_test(name, copts = [], strict_warnings = True, **kwargs):
     """Defines a first-party C++ test with strict warnings by default."""
     _cc_test(
         name = name,
-        copts = _copts(copts, strict_warnings),
+        copts = _copts(["-UNDEBUG"] + copts, strict_warnings),
         **kwargs
     )

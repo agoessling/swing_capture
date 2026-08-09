@@ -237,6 +237,12 @@ void TestCapturePreviewAndSettingsLifecycle() {
   assert(initial.preview_sequence > 0);
   assert(initial.preview_width == 640);
   assert(initial.preview_height == 480);
+  assert(initial.preview_performance.media_type == "image/jpeg");
+  assert(initial.preview_performance.encoded_bytes > 0);
+  assert(initial.preview_performance.source_age_milliseconds >= 0.0);
+  assert(initial.preview_performance.rendered_age_milliseconds >= 0.0);
+  assert(initial.preview_performance.total_milliseconds >=
+         initial.preview_performance.encode_milliseconds);
   const auto initial_routine = worker.LatestPreview(false);
   const auto initial_full_resolution = worker.LatestPreview(true);
   assert(initial_routine.has_value());
@@ -244,8 +250,10 @@ void TestCapturePreviewAndSettingsLifecycle() {
   assert(initial_full_resolution->sequence >= initial_routine->sequence);
   assert(initial_routine->width == 640);
   assert(initial_routine->height == 480);
+  assert(initial_routine->media_type == "image/jpeg");
   assert(initial_full_resolution->width == 800);
   assert(initial_full_resolution->height == 600);
+  assert(initial_full_resolution->media_type == "image/png");
 
   const CameraStatus updated = worker.UpdateSettings(
       CameraSettingsUpdate{.exposure_microseconds = 1770.0, .gain_decibels = 3.5});

@@ -215,11 +215,12 @@ it. Exposure and gain changes last for the running session and are reset to the
 current deterministic defaults when the service restarts. Lens focus remains a
 physical adjustment.
 
-Routine polling receives up to five compressed 640x480 images per second. The
+Routine polling receives up to about 30 compressed 640x480 JPEGs per second. The
 browser fetches both roles as one capacity-one pair, retains the last good pair
-while a slow download finishes, atomically swaps both views, and skips
+while a slow download or browser decode finishes, atomically swaps both views, and skips
 superseded pairs. Full-resolution images are encoded on demand; use each card's
-link only while checking fine focus.
+link only while checking fine focus. `/api/v1/status` exposes source/render age,
+encoded size, and per-stage render timings when diagnosing a delayed update.
 `Ctrl-C` and `SIGTERM`
 stop HTTP acceptance, join both camera workers, stop their streams, and destroy
 the Galaxy SDK before the process exits.

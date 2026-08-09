@@ -35,6 +35,11 @@ struct Rgb8Image {
 // This keeps HIL artifacts viewable without adding an image-codec dependency.
 [[nodiscard]] std::string EncodePng(const Rgb8Image &image);
 
+// Encodes a browser-native baseline JPEG using libjpeg-turbo's SIMD path.
+// Quality must be in [1, 100]. This lossy format is intended for transient
+// setup previews; retained HIL evidence continues to use PNG.
+[[nodiscard]] std::string EncodeJpeg(const Rgb8Image &image, int quality);
+
 }  // namespace swing_capture::image
 
 #endif  // SWING_CAPTURE_CAPTURE_IMAGE_BAYER_RG8_H_

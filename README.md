@@ -109,13 +109,14 @@ bazel run //capture/service:preview_server
 It listens on port 8080 on all interfaces so another computer on the trusted
 station network can open `http://<station-address>:8080/`. The service opens
 both configured cameras exclusively, keeps their acquisition loops at the
-camera's full configured rate, and renders up to five compressed 640x480
-routine PNGs per second on a separate latest-only renderer thread. A
+camera's full configured rate, and renders up to about 30 compressed 640x480
+routine JPEGs per second on a separate latest-only renderer thread. A
 full-resolution focus image is encoded only when its link is requested. Browser
 polling fetches the two routine images as one capacity-one pair, atomically
-swaps both views after both downloads complete, and skips superseded pairs
+swaps both views after both downloads and browser decodes complete, and skips superseded pairs
 without cancelling downloads or forming a queue. It does not control or block
-the capture cadence.
+the capture cadence. The status API includes source/render age, encoded size,
+and per-stage quality/Bayer/resize/encode timings for diagnosing stalls.
 
 Exposure and gain changes are validated against each camera's read-back range,
 then performed on that camera's owner thread as a stop/configure/start cycle.

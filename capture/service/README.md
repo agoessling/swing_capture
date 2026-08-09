@@ -10,10 +10,10 @@ The HTTP API is versioned at `/api/v1`:
 - `GET /api/v1/status` returns both configured camera roles, observed stream
   rates, latest completed-preview sequence, camera setting ranges/read-backs,
   and image-quality guidance.
-- `GET /api/v1/cameras/{role}/preview.png` returns the latest completed,
-  compressed, fit-within 640x480 PNG. `full=1` selects the cached full-sensor
-  render for manual focus. `sequence` is a browser cache buster, not a
-  historical frame request.
+- `GET /api/v1/cameras/{role}/preview` returns the latest completed,
+  compressed, fit-within 640x480 JPEG. `full=1` selects the cached full-sensor
+  PNG for manual focus. `sequence` is a browser cache buster, not a historical
+  frame request. The legacy `.png` route remains available during migration.
 - `PATCH /api/v1/cameras/{role}/settings` accepts numeric `exposure_us` and
   `gain_db` fields and returns the camera's complete read-back status.
 
@@ -21,21 +21,28 @@ The service is intentionally conservative:
 
 - HTTP threads never call the SDK.
 - Raw and rendered preview state is overwrite-latest rather than queued, and
-  demosaic/PNG work runs on a dedicated renderer rather than an SDK owner.
-- Routine previews are bounded at five frames per second. Full-resolution PNG
+  demosaic/encode work runs on a dedicated renderer rather than an SDK owner.
+- Routine previews are bounded at about 30 frames per second. Full-resolution PNG
   encoding runs on demand on the same latest-only renderer and is cached until
   a newer routine preview is visible.
-- Routine rendering preserves full-frame quality analysis but reduces the
-  Bayer mosaic before demosaic and fit-within resize, avoiding full-resolution
-  RGB work for pixels that the setup preview will discard.
+- Routine rendering preserves full-frame quality analysis but samples the
+  Bayer mosaic directly to the fitted output geometry before demosaic, avoiding
+  both full-resolution RGB work and a separate RGB resize pass.
 - Settings are validated before the camera is stopped.
 - A failed update attempts to restore and restart the prior complete profile.
 - Camera acquisition remains full rate. The browser permits only one paired
-  download at a time, atomically swaps both roles, retains the last successful
+  download/decode at a time, atomically swaps both roles, retains the last successful
   pair on failure, and collapses pending work to the newest sequences.
 - Settings are session-local for this milestone.
 - The listener has no authentication or TLS and belongs only on a trusted
   station network.
+
+The normal Bazel configuration is `-O2 -g` with unstripped symbols. A synthetic
+1440x1080 Bayer benchmark is available as
+`bazel run //capture/preview:preview_benchmark`. On the station NUC, the
+software JPEG path measured about 5.3 ms total per routine frame; a bounded
+dual-camera check produced 28--29 preview frames per second, 39--41 KiB per
+image, while both acquisition loops remained near 227 fps.
 
 The current camera defaults are 500 us exposure and 24 dB gain. The API
 reports the exact device read-back, and either setting remains adjustable for

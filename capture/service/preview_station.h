@@ -24,8 +24,8 @@ class PreviewStation final : public StationBackend {
   PreviewStation &operator=(PreviewStation &&) = delete;
 
   [[nodiscard]] std::vector<CameraStatus> CameraStatuses() override;
-  [[nodiscard]] std::optional<PreviewPng> LatestPreview(CameraRole role,
-                                                        bool full_resolution) override;
+  [[nodiscard]] std::optional<PreviewImage> LatestPreview(CameraRole role,
+                                                          bool full_resolution) override;
   [[nodiscard]] CameraStatus UpdateCameraSettings(CameraRole role,
                                                   const CameraSettingsUpdate &settings) override;
 

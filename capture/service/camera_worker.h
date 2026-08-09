@@ -8,6 +8,7 @@
 
 #include "capture/core/camera_source.h"
 #include "capture/daheng/daheng_camera.h"
+#include "capture/preview/preview_image.h"
 #include "capture/service/preview_api.h"
 
 namespace swing_capture::service {
@@ -35,7 +36,8 @@ class PreviewCameraDevice {
 class CameraWorker final {
  public:
   CameraWorker(CameraRole role, std::unique_ptr<PreviewCameraDevice> camera,
-               daheng::DahengConfiguration configuration = {});
+               daheng::DahengConfiguration configuration = {},
+               std::unique_ptr<preview::PreviewFrameProcessor> frame_processor = nullptr);
   ~CameraWorker();
 
   CameraWorker(const CameraWorker &) = delete;
@@ -47,7 +49,7 @@ class CameraWorker final {
   void Stop() noexcept;
 
   [[nodiscard]] CameraStatus Status();
-  [[nodiscard]] std::optional<PreviewPng> LatestPreview(bool full_resolution);
+  [[nodiscard]] std::optional<PreviewImage> LatestPreview(bool full_resolution);
   [[nodiscard]] CameraStatus UpdateSettings(const CameraSettingsUpdate &settings);
 
  private:

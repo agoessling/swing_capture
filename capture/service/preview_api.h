@@ -31,6 +31,18 @@ struct PreviewQualityStatus {
   double gradient_energy = 0.0;
 };
 
+struct PreviewPerformanceStatus {
+  std::string media_type;
+  std::uint64_t encoded_bytes = 0;
+  double source_age_milliseconds = 0.0;
+  double rendered_age_milliseconds = 0.0;
+  double quality_analysis_milliseconds = 0.0;
+  double bayer_transform_milliseconds = 0.0;
+  double resize_milliseconds = 0.0;
+  double encode_milliseconds = 0.0;
+  double total_milliseconds = 0.0;
+};
+
 struct CameraStatus {
   CameraRole role = CameraRole::kDownTheLine;
   std::string serial;
@@ -44,6 +56,7 @@ struct CameraStatus {
   NumericSettingStatus exposure_microseconds;
   NumericSettingStatus gain_decibels;
   PreviewQualityStatus image_quality;
+  PreviewPerformanceStatus preview_performance;
 };
 
 struct CameraSettingsUpdate {
@@ -51,10 +64,11 @@ struct CameraSettingsUpdate {
   double gain_decibels = 0.0;
 };
 
-struct PreviewPng {
+struct PreviewImage {
   std::uint64_t sequence = 0;
   std::uint32_t width = 0;
   std::uint32_t height = 0;
+  std::string media_type;
   std::string bytes;
 };
 
@@ -69,8 +83,8 @@ class StationBackend {
   StationBackend &operator=(StationBackend &&) = delete;
 
   [[nodiscard]] virtual std::vector<CameraStatus> CameraStatuses() = 0;
-  [[nodiscard]] virtual std::optional<PreviewPng> LatestPreview(CameraRole role,
-                                                                bool full_resolution) = 0;
+  [[nodiscard]] virtual std::optional<PreviewImage> LatestPreview(CameraRole role,
+                                                                  bool full_resolution) = 0;
   [[nodiscard]] virtual CameraStatus UpdateCameraSettings(CameraRole role,
                                                           const CameraSettingsUpdate &settings) = 0;
 };

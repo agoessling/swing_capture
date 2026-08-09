@@ -21,7 +21,8 @@ using swing_capture::service::CameraRole;
 using swing_capture::service::CameraSettingsUpdate;
 using swing_capture::service::CameraStatus;
 using swing_capture::service::NumericSettingStatus;
-using swing_capture::service::PreviewPng;
+using swing_capture::service::PreviewImage;
+using swing_capture::service::PreviewPerformanceStatus;
 using swing_capture::service::PreviewQualityStatus;
 using swing_capture::service::StationBackend;
 
@@ -44,6 +45,18 @@ CameraStatus FakeStatus(CameraRole role, std::string serial) {
       .image_quality =
           PreviewQualityStatus{
               .assessment = "nominal", .mean = 112.0, .p99 = 238.0, .gradient_energy = 44.0},
+      .preview_performance =
+          PreviewPerformanceStatus{
+              .media_type = "image/jpeg",
+              .encoded_bytes = 40000,
+              .source_age_milliseconds = 18.0,
+              .rendered_age_milliseconds = 12.0,
+              .quality_analysis_milliseconds = 1.0,
+              .bayer_transform_milliseconds = 3.0,
+              .resize_milliseconds = 0.0,
+              .encode_milliseconds = 1.0,
+              .total_milliseconds = 5.0,
+          },
   };
 }
 
@@ -55,15 +68,16 @@ class FakeBackend final : public StationBackend {
 
   std::vector<CameraStatus> CameraStatuses() override { return cameras_; }
 
-  std::optional<PreviewPng> LatestPreview(CameraRole role, bool full_resolution) override {
+  std::optional<PreviewImage> LatestPreview(CameraRole role, bool full_resolution) override {
     last_full_resolution_ = full_resolution;
     if (!preview_available_) {
       return std::nullopt;
     }
-    return PreviewPng{
+    return PreviewImage{
         .sequence = role == CameraRole::kDownTheLine ? 42U : 43U,
         .width = full_resolution ? 4U : 2U,
         .height = full_resolution ? 2U : 1U,
+        .media_type = "image/png",
         .bytes = std::string("\x89PNG\r\n\x1a\n", 8),
     };
   }
@@ -110,7 +124,7 @@ class TestServer final {
   std::thread thread_;
 };
 
-void TestStatusAndPngRoutes() {
+void TestStatusAndPreviewRoutes() {
   FakeBackend backend;
   TestServer server(backend);
   httplib::Client client("127.0.0.1", server.port());
@@ -125,8 +139,10 @@ void TestStatusAndPngRoutes() {
   assert(parsed.at("cameras").size() == 2);
   assert(parsed.at("cameras").at(0).at("role") == "down_the_line");
   assert(parsed.at("cameras").at(0).at("error") == "");
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("media_type") == "image/jpeg");
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("total_ms") == 5.0);
 
-  const auto png = client.Get("/api/v1/cameras/down_the_line/preview.png?sequence=41");
+  const auto png = client.Get("/api/v1/cameras/down_the_line/preview?sequence=41");
   assert(png);
   assert(png->status == 200);
   assert(png->get_header_value("Content-Type").starts_with("image/png"));
@@ -134,14 +150,14 @@ void TestStatusAndPngRoutes() {
   assert(png->get_header_value("X-Preview-Sequence") == "42");
   assert(png->body == std::string("\x89PNG\r\n\x1a\n", 8));
 
-  const auto full = client.Get("/api/v1/cameras/down_the_line/preview.png?sequence=42&full=1");
+  const auto full = client.Get("/api/v1/cameras/down_the_line/preview?sequence=42&full=1");
   assert(full);
   assert(full->status == 200);
   assert(full->get_header_value("X-Preview-Sequence") == "42");
   assert(backend.last_full_resolution_);
 
   backend.preview_available_ = false;
-  const auto unavailable = client.Get("/api/v1/cameras/face_on/preview.png");
+  const auto unavailable = client.Get("/api/v1/cameras/face_on/preview");
   assert(unavailable);
   assert(unavailable->status == 503);
 }
@@ -195,7 +211,7 @@ void TestStaticAssets() {
 }  // namespace
 
 int main() {
-  TestStatusAndPngRoutes();
+  TestStatusAndPreviewRoutes();
   TestSettingsRouteValidationAndReadback();
   TestStaticAssets();
   return 0;

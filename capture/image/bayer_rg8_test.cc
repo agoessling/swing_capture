@@ -122,6 +122,26 @@ void PngCompressesUniformImages() {
   Expect(png.size() < image.pixels.size() / 4U, "uniform PNG should be compressed");
 }
 
+void JpegEncodesBrowserNativeImageAndValidatesQuality() {
+  const swing_capture::image::Rgb8Image image = {
+      .width = 128,
+      .height = 96,
+      .pixels = std::vector<std::uint8_t>(128U * 96U * 3U, 42U),
+  };
+  const std::string jpeg = swing_capture::image::EncodeJpeg(image, 85);
+  Expect(jpeg.starts_with(std::string("\xff\xd8", 2)), "JPEG start-of-image marker");
+  Expect(jpeg.ends_with(std::string("\xff\xd9", 2)), "JPEG end-of-image marker");
+  Expect(jpeg.size() < image.pixels.size() / 4U, "uniform JPEG should be compressed");
+
+  bool rejected = false;
+  try {
+    static_cast<void>(swing_capture::image::EncodeJpeg(image, 0));
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  Expect(rejected, "out-of-range JPEG quality should be rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -130,5 +150,6 @@ int main() {
   RgbToLuminanceUsesDeterministicRec601Rounding();
   RgbToLuminanceRejectsInvalidGeometryAndPayload();
   PngCompressesUniformImages();
+  JpegEncodesBrowserNativeImageAndValidatesQuality();
   return failures == 0 ? 0 : 1;
 }

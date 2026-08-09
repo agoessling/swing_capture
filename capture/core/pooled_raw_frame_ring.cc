@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <span>
@@ -186,8 +187,9 @@ void PooledRawFrameHandle::AddReference() noexcept {
   if (state_ == nullptr) {
     return;
   }
-  const bool added = TryAddBlockReference(*state_, block_index_);
-  assert(added);
+  if (!TryAddBlockReference(*state_, block_index_)) [[unlikely]] {
+    std::terminate();
+  }
 }
 
 void PooledRawFrameHandle::ReleaseReference() noexcept {
@@ -272,9 +274,10 @@ PooledRawFramePushResult PooledRawFrameRing::TryPush(const FrameView &frame) noe
   if (block_index != PooledRawFrameRingState::kUnusedBlock) {
     CopyFrameIntoBlock(*state_, block_index, frame);
 
-    const std::uint64_t previous =
-        state_->publication_sequence.fetch_add(1, std::memory_order_acq_rel);
-    assert((previous & 1U) == 0);
+    if ((state_->publication_sequence.fetch_add(1, std::memory_order_acq_rel) & 1U) != 0U)
+        [[unlikely]] {
+      std::terminate();
+    }
 
     const std::size_t target_slot = state_->next_active_slot.load(std::memory_order_relaxed);
     const std::size_t replaced_block =
@@ -297,9 +300,10 @@ PooledRawFramePushResult PooledRawFrameRing::TryPush(const FrameView &frame) noe
   // overwritten, but only if the active ring owns its sole reference. The
   // odd publication sequence prevents a new snapshot from observing the
   // temporarily removed slot.
-  const std::uint64_t previous =
-      state_->publication_sequence.fetch_add(1, std::memory_order_acq_rel);
-  assert((previous & 1U) == 0);
+  if ((state_->publication_sequence.fetch_add(1, std::memory_order_acq_rel) & 1U) != 0U)
+      [[unlikely]] {
+    std::terminate();
+  }
 
   const std::size_t target_slot = state_->next_active_slot.load(std::memory_order_relaxed);
   const std::size_t reusable_block = state_->active_slots[target_slot].exchange(

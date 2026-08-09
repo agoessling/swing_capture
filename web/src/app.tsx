@@ -7,7 +7,7 @@ export interface AppProps {
   pollIntervalMs?: number;
 }
 
-export function App({ api, pollIntervalMs = 200 }: AppProps) {
+export function App({ api, pollIntervalMs = 33 }: AppProps) {
   const [status, setStatus] = useState<StationStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [previewPair, setPreviewPair] = useState<PreviewPair | null>(null);
@@ -137,8 +137,8 @@ export function App({ api, pollIntervalMs = 200 }: AppProps) {
       </main>
 
       <footer>
-        Live preview is intentionally low rate. Capture transport continues at the measured stream
-        rate shown on each card.
+        Setup previews use a latest-only low-latency path. Capture transport continues at the
+        measured stream rate shown on each card.
       </footer>
     </div>
   );

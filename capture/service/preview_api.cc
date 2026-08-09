@@ -47,6 +47,18 @@ Json CameraStatusJson(const CameraStatus &status) {
            {"p99", status.image_quality.p99},
            {"gradient_energy", status.image_quality.gradient_energy},
        }},
+      {"preview_performance",
+       {
+           {"media_type", status.preview_performance.media_type},
+           {"encoded_bytes", status.preview_performance.encoded_bytes},
+           {"source_age_ms", status.preview_performance.source_age_milliseconds},
+           {"rendered_age_ms", status.preview_performance.rendered_age_milliseconds},
+           {"quality_analysis_ms", status.preview_performance.quality_analysis_milliseconds},
+           {"bayer_transform_ms", status.preview_performance.bayer_transform_milliseconds},
+           {"resize_ms", status.preview_performance.resize_milliseconds},
+           {"encode_ms", status.preview_performance.encode_milliseconds},
+           {"total_ms", status.preview_performance.total_milliseconds},
+       }},
   };
 }
 
@@ -113,13 +125,13 @@ void HandlePreview(StationBackend &backend, const httplib::Request &request,
   try {
     const bool full_resolution =
         request.has_param("full") && request.get_param_value("full") == "1";
-    const std::optional<PreviewPng> preview = backend.LatestPreview(*role, full_resolution);
+    const std::optional<PreviewImage> preview = backend.LatestPreview(*role, full_resolution);
     if (!preview.has_value()) {
       SetError(response, 503, "preview is not available yet");
       return;
     }
     response.status = 200;
-    response.set_content(preview->bytes, "image/png");
+    response.set_content(preview->bytes, preview->media_type);
     response.set_header("Cache-Control", "no-store");
     response.set_header("X-Preview-Sequence", std::to_string(preview->sequence));
   } catch (const std::invalid_argument &error) {
@@ -188,6 +200,10 @@ void RegisterPreviewRoutes(httplib::Server &server, StationBackend &backend,
   });
 
   server.Get(R"(/api/v1/cameras/(down_the_line|face_on)/preview\.png)",
+             [&backend](const httplib::Request &request, httplib::Response &response) {
+               HandlePreview(backend, request, response);
+             });
+  server.Get(R"(/api/v1/cameras/(down_the_line|face_on)/preview)",
              [&backend](const httplib::Request &request, httplib::Response &response) {
                HandlePreview(backend, request, response);
              });

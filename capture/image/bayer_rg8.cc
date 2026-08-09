@@ -1,5 +1,6 @@
 #include "capture/image/bayer_rg8.h"
 
+#include <turbojpeg.h>
 #include <zconf.h>
 #include <zlib.h>
 
@@ -7,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -28,6 +30,14 @@ struct BayerDimensions {
 struct PixelCoordinate {
   std::uint32_t x;
   std::uint32_t y;
+};
+
+struct TurboJpegDestroy {
+  void operator()(void *handle) const noexcept { static_cast<void>(tjDestroy(handle)); }
+};
+
+struct TurboJpegFree {
+  void operator()(unsigned char *buffer) const noexcept { tjFree(buffer); }
 };
 
 Color BayerColor(PixelCoordinate coordinate) {
@@ -272,6 +282,40 @@ std::string EncodePng(const Rgb8Image &image) {
   AppendPngChunk(png, "IDAT", zlib_stream);
   AppendPngChunk(png, "IEND", {});
   return png;
+}
+
+std::string EncodeJpeg(const Rgb8Image &image, int quality) {
+  ValidateRgbImage(image);
+  if (quality < 1 || quality > 100) {
+    throw std::invalid_argument("JPEG quality must be in [1, 100]");
+  }
+  if (image.width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+      image.height > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("JPEG dimensions exceed the codec limit");
+  }
+
+  const std::unique_ptr<void, TurboJpegDestroy> compressor(tjInitCompress());
+  if (compressor == nullptr) {
+    throw std::runtime_error("libjpeg-turbo failed to create a compressor");
+  }
+
+  unsigned char *raw_buffer = nullptr;
+  auto encoded_size = 0UL;
+  const int result =
+      tjCompress2(compressor.get(), image.pixels.data(), static_cast<int>(image.width), 0,
+                  static_cast<int>(image.height), TJPF_RGB, &raw_buffer, &encoded_size, TJSAMP_420,
+                  quality, TJFLAG_FASTDCT);
+  const std::unique_ptr<unsigned char, TurboJpegFree> encoded(raw_buffer);
+  if (result != 0) {
+    throw std::runtime_error(std::string("libjpeg-turbo failed to encode preview: ") +
+                             tjGetErrorStr2(compressor.get()));
+  }
+  if (encoded_size > std::numeric_limits<std::size_t>::max()) {
+    throw std::length_error("JPEG output exceeds size_t");
+  }
+  // libjpeg-turbo owns a byte buffer whose element type predates std::byte.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  return {reinterpret_cast<const char *>(encoded.get()), static_cast<std::size_t>(encoded_size)};
 }
 
 }  // namespace swing_capture::image

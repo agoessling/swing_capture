@@ -17,6 +17,18 @@ export interface ImageQuality {
   gradient_energy: number;
 }
 
+export interface PreviewPerformance {
+  media_type: string;
+  encoded_bytes: number;
+  source_age_ms: number;
+  rendered_age_ms: number;
+  quality_analysis_ms: number;
+  bayer_transform_ms: number;
+  resize_ms: number;
+  encode_ms: number;
+  total_ms: number;
+}
+
 export interface CameraStatus {
   role: CameraRole;
   serial: string;
@@ -30,6 +42,7 @@ export interface CameraStatus {
   exposure_us: NumericSetting;
   gain_db: NumericSetting;
   image_quality: ImageQuality;
+  preview_performance: PreviewPerformance;
 }
 
 export interface StationStatus {
@@ -71,13 +84,13 @@ export class HttpStationApi implements StationApi {
 
   async getPreview(role: CameraRole, sequence: number): Promise<Blob> {
     const response = await this.#fetcher(this.previewUrl(role, sequence), {
-      headers: { Accept: "image/png" },
+      headers: { Accept: "image/jpeg, image/png" },
     });
     if (!response.ok) {
       throw await stationRequestError(response);
     }
     const preview = await response.blob();
-    if (preview.type !== "image/png") {
+    if (preview.type !== "image/jpeg" && preview.type !== "image/png") {
       throw new Error(`Station preview returned ${preview.type || "an unknown content type"}`);
     }
     return preview;
@@ -99,7 +112,7 @@ export class HttpStationApi implements StationApi {
   }
 
   previewUrl(role: CameraRole, sequence: number): string {
-    return `${this.#baseUrl}/api/v1/cameras/${role}/preview.png?sequence=${sequence}`;
+    return `${this.#baseUrl}/api/v1/cameras/${role}/preview?sequence=${sequence}`;
   }
 
   fullResolutionPreviewUrl(role: CameraRole, sequence: number): string {
@@ -165,6 +178,7 @@ export function parseCameraStatus(value: unknown): CameraStatus {
     exposure_us: parseNumericSetting(object.exposure_us, "exposure_us"),
     gain_db: parseNumericSetting(object.gain_db, "gain_db"),
     image_quality: parseImageQuality(object.image_quality),
+    preview_performance: parsePreviewPerformance(object.preview_performance),
   };
 }
 
@@ -205,6 +219,40 @@ function parseImageQuality(value: unknown): ImageQuality {
     p99: asFiniteNumber(object.p99, "image_quality.p99"),
     gradient_energy: asFiniteNumber(object.gradient_energy, "image_quality.gradient_energy"),
   };
+}
+
+function parsePreviewPerformance(value: unknown): PreviewPerformance {
+  const object = asObject(value, "preview_performance");
+  const performance = {
+    media_type: asString(object.media_type, "preview_performance.media_type"),
+    encoded_bytes: asFiniteNumber(object.encoded_bytes, "preview_performance.encoded_bytes"),
+    source_age_ms: asFiniteNumber(object.source_age_ms, "preview_performance.source_age_ms"),
+    rendered_age_ms: asFiniteNumber(object.rendered_age_ms, "preview_performance.rendered_age_ms"),
+    quality_analysis_ms: asFiniteNumber(
+      object.quality_analysis_ms,
+      "preview_performance.quality_analysis_ms",
+    ),
+    bayer_transform_ms: asFiniteNumber(
+      object.bayer_transform_ms,
+      "preview_performance.bayer_transform_ms",
+    ),
+    resize_ms: asFiniteNumber(object.resize_ms, "preview_performance.resize_ms"),
+    encode_ms: asFiniteNumber(object.encode_ms, "preview_performance.encode_ms"),
+    total_ms: asFiniteNumber(object.total_ms, "preview_performance.total_ms"),
+  };
+  if (
+    performance.encoded_bytes < 0 ||
+    performance.source_age_ms < 0 ||
+    performance.rendered_age_ms < 0 ||
+    performance.quality_analysis_ms < 0 ||
+    performance.bayer_transform_ms < 0 ||
+    performance.resize_ms < 0 ||
+    performance.encode_ms < 0 ||
+    performance.total_ms < 0
+  ) {
+    throw new Error("Preview performance values must be nonnegative");
+  }
+  return performance;
 }
 
 function asObject(value: unknown, label: string): Record<string, unknown> {

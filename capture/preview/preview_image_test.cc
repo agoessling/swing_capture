@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -117,9 +118,31 @@ void RenderingPreservesMetadataAndMeasuresFullBayerInput() {
   assert(std::abs(rendered.source_quality.mean - expected_quality.mean) < 1e-12);
   assert(std::abs(rendered.source_quality.gradient_energy - expected_quality.gradient_energy) <
          1e-12);
-  assert(rendered.png_bytes.starts_with(std::string("\x89PNG\r\n\x1a\n", 8)));
-  assert(rendered.png_bytes.find("IHDR") != std::string::npos);
-  assert(rendered.png_bytes.find("IEND") != std::string::npos);
+  assert(rendered.media_type == "image/png");
+  assert(rendered.encoded_bytes.starts_with(std::string("\x89PNG\r\n\x1a\n", 8)));
+  assert(rendered.encoded_bytes.find("IHDR") != std::string::npos);
+  assert(rendered.encoded_bytes.find("IEND") != std::string::npos);
+  assert(rendered.timings.quality_analysis >= std::chrono::steady_clock::duration::zero());
+  assert(rendered.timings.bayer_transform >= std::chrono::steady_clock::duration::zero());
+  assert(rendered.timings.resize >= std::chrono::steady_clock::duration::zero());
+  assert(rendered.timings.encode >= std::chrono::steady_clock::duration::zero());
+  assert(rendered.timings.total >= rendered.timings.quality_analysis);
+  assert(rendered.timings.total >= rendered.timings.bayer_transform);
+  assert(rendered.timings.total >= rendered.timings.resize);
+  assert(rendered.timings.total >= rendered.timings.encode);
+  assert(rendered.render_started_at <= rendered.render_completed_at);
+
+  const auto jpeg =
+      RenderPreview(frame, {
+                               .maximum_width = 4,
+                               .maximum_height = 4,
+                               .image_format = swing_capture::preview::PreviewImageFormat::kJpeg,
+                               .jpeg_quality = 85,
+                               .quality_options = {},
+                           });
+  assert(jpeg.media_type == "image/jpeg");
+  assert(jpeg.encoded_bytes.starts_with(std::string("\xff\xd8", 2)));
+  assert(jpeg.encoded_bytes.ends_with(std::string("\xff\xd9", 2)));
 }
 
 void RenderingRejectsInvalidBayerPayload() {

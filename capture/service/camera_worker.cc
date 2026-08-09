@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ratio>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
@@ -31,7 +32,7 @@ namespace swing_capture::service {
 namespace {
 
 constexpr std::chrono::milliseconds kCaptureTimeout(50);
-constexpr std::chrono::milliseconds kPreviewInterval(200);
+constexpr std::chrono::milliseconds kPreviewInterval(33);
 constexpr std::chrono::seconds kSettingsWaitTimeout(5);
 constexpr std::chrono::seconds kFullResolutionWaitTimeout(3);
 constexpr std::size_t kMaximumConsecutiveTimeouts = 3;
@@ -141,6 +142,10 @@ std::string PublishErrorName(preview::PreviewFramePublishResult result) {
   return "camera delivered an invalid preview frame";
 }
 
+double Milliseconds(std::chrono::steady_clock::duration duration) {
+  return std::chrono::duration<double, std::milli>(duration).count();
+}
+
 }  // namespace
 
 struct CameraWorker::Impl {
@@ -150,10 +155,13 @@ struct CameraWorker::Impl {
   };
 
   Impl(CameraRole camera_role, std::unique_ptr<PreviewCameraDevice> camera_device,
-       daheng::DahengConfiguration initial_configuration)
+       daheng::DahengConfiguration initial_configuration,
+       std::unique_ptr<preview::PreviewFrameProcessor> preview_frame_processor)
       : role(camera_role),
         camera(std::move(camera_device)),
         configuration(initial_configuration),
+        frame_processor(preview_frame_processor == nullptr ? preview::MakeSoftwarePreviewProcessor()
+                                                           : std::move(preview_frame_processor)),
         sampler(
             {.minimum_interval = kPreviewInterval, .maximum_payload_bytes = kMaximumBayerPayload}) {
     if (camera == nullptr) {
@@ -436,9 +444,11 @@ struct CameraWorker::Impl {
     }
 
     auto next = std::make_shared<preview::RenderedPreviewImage>(
-        preview::RenderPreview(*latest, {.maximum_width = kMaximumPreviewWidth,
-                                         .maximum_height = kMaximumPreviewHeight,
-                                         .quality_options = {}}));
+        frame_processor->Render(*latest, {.maximum_width = kMaximumPreviewWidth,
+                                          .maximum_height = kMaximumPreviewHeight,
+                                          .image_format = preview::PreviewImageFormat::kJpeg,
+                                          .jpeg_quality = 85,
+                                          .quality_options = {}}));
     const std::scoped_lock lock(render_mutex);
     if (generation == preview_generation &&
         (rendered_routine == nullptr ||
@@ -465,9 +475,10 @@ struct CameraWorker::Impl {
     }
 
     auto next = std::make_shared<preview::RenderedPreviewImage>(
-        preview::RenderPreview(*latest, {.maximum_width = latest->metadata.width,
-                                         .maximum_height = latest->metadata.height,
-                                         .quality_options = {}}));
+        frame_processor->Render(*latest, {.maximum_width = latest->metadata.width,
+                                          .maximum_height = latest->metadata.height,
+                                          .image_format = preview::PreviewImageFormat::kPng,
+                                          .quality_options = {}}));
     {
       const std::scoped_lock lock(render_mutex);
       if (generation == preview_generation &&
@@ -504,6 +515,7 @@ struct CameraWorker::Impl {
         .exposure_microseconds = ExposureStatus(current_diagnostics),
         .gain_decibels = GainStatus(current_diagnostics),
         .image_quality = {},
+        .preview_performance = {},
     };
     std::shared_ptr<const preview::RenderedPreviewImage> current_preview;
     {
@@ -515,11 +527,25 @@ struct CameraWorker::Impl {
       status.preview_width = current_preview->dimensions.width;
       status.preview_height = current_preview->dimensions.height;
       status.image_quality = QualityStatus(current_preview->source_quality);
+      const auto now = std::chrono::steady_clock::now();
+      status.preview_performance = {
+          .media_type = current_preview->media_type,
+          .encoded_bytes = current_preview->encoded_bytes.size(),
+          .source_age_milliseconds =
+              std::max(0.0, Milliseconds(now - current_preview->source_metadata.host_received_at)),
+          .rendered_age_milliseconds =
+              std::max(0.0, Milliseconds(now - current_preview->render_completed_at)),
+          .quality_analysis_milliseconds = Milliseconds(current_preview->timings.quality_analysis),
+          .bayer_transform_milliseconds = Milliseconds(current_preview->timings.bayer_transform),
+          .resize_milliseconds = Milliseconds(current_preview->timings.resize),
+          .encode_milliseconds = Milliseconds(current_preview->timings.encode),
+          .total_milliseconds = Milliseconds(current_preview->timings.total),
+      };
     }
     return status;
   }
 
-  std::optional<PreviewPng> LatestPreview(bool full_resolution) {
+  std::optional<PreviewImage> LatestPreview(bool full_resolution) {
     std::shared_ptr<const preview::RenderedPreviewImage> current;
     if (!full_resolution) {
       const std::scoped_lock lock(render_mutex);
@@ -559,11 +585,12 @@ struct CameraWorker::Impl {
     if (current == nullptr) {
       return std::nullopt;
     }
-    return PreviewPng{
+    return PreviewImage{
         .sequence = current->preview_sequence,
         .width = current->dimensions.width,
         .height = current->dimensions.height,
-        .bytes = current->png_bytes,
+        .media_type = current->media_type,
+        .bytes = current->encoded_bytes,
     };
   }
 
@@ -677,6 +704,7 @@ struct CameraWorker::Impl {
   std::unique_ptr<PreviewCameraDevice> camera;
   CameraIdentity identity;
   daheng::DahengConfiguration configuration;
+  std::unique_ptr<preview::PreviewFrameProcessor> frame_processor;
   preview::LatestFrameSampler sampler;
 
   std::mutex state_mutex;
@@ -708,8 +736,10 @@ struct CameraWorker::Impl {
 };
 
 CameraWorker::CameraWorker(CameraRole role, std::unique_ptr<PreviewCameraDevice> camera,
-                           daheng::DahengConfiguration configuration)
-    : impl_(std::make_unique<Impl>(role, std::move(camera), configuration)) {}
+                           daheng::DahengConfiguration configuration,
+                           std::unique_ptr<preview::PreviewFrameProcessor> frame_processor)
+    : impl_(std::make_unique<Impl>(role, std::move(camera), configuration,
+                                   std::move(frame_processor))) {}
 
 CameraWorker::~CameraWorker() { Stop(); }
 
@@ -719,7 +749,7 @@ void CameraWorker::Stop() noexcept { impl_->Stop(); }
 
 CameraStatus CameraWorker::Status() { return impl_->Status(); }
 
-std::optional<PreviewPng> CameraWorker::LatestPreview(bool full_resolution) {
+std::optional<PreviewImage> CameraWorker::LatestPreview(bool full_resolution) {
   return impl_->LatestPreview(full_resolution);
 }
 

@@ -62,6 +62,7 @@ CameraStatus DisconnectedStatus(CameraRole role, const std::string &serial,
                         .maximum = 24.0,
                         .increment = 0.1},
       .image_quality = {.assessment = "unavailable"},
+      .preview_performance = {},
   };
 }
 
@@ -137,7 +138,7 @@ std::vector<CameraStatus> PreviewStation::CameraStatuses() {
   return statuses;
 }
 
-std::optional<PreviewPng> PreviewStation::LatestPreview(CameraRole role, bool full_resolution) {
+std::optional<PreviewImage> PreviewStation::LatestPreview(CameraRole role, bool full_resolution) {
   Impl::CameraSlot &slot = impl_->Slot(role);
   return slot.worker == nullptr ? std::nullopt : slot.worker->LatestPreview(full_resolution);
 }
