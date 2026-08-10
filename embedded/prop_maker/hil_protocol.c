@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "embedded/prop_maker/swing_sequence.h"
+
 typedef struct token {
   const char *begin;
   size_t length;
@@ -177,6 +179,35 @@ static swing_hil_parser_event parse_tone(parse_context context) {
   return event;
 }
 
+static swing_hil_parser_event parse_calibrate(parse_context context) {
+  if (context.token_count != 3U) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_ARGUMENT_COUNT});
+  }
+  return command_event(
+      (command_details){.request_id = context.request_id, .kind = SWING_HIL_COMMAND_CALIBRATE});
+}
+
+static swing_hil_parser_event parse_swing(parse_context context) {
+  if (context.token_count != 4U) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_ARGUMENT_COUNT});
+  }
+  swing_hil_swing_command command = {0};
+  if (!parse_u32(context.tokens[3], &command.brightness)) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_MALFORMED});
+  }
+  if (!swing_hil_swing_brightness_is_candidate(command.brightness)) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_OUT_OF_RANGE});
+  }
+  swing_hil_parser_event event = command_event(
+      (command_details){.request_id = context.request_id, .kind = SWING_HIL_COMMAND_SWING});
+  event.command.parameters.swing = command;
+  return event;
+}
+
 static swing_hil_parser_event parse_line(const char *line, size_t length) {
   if (length > 0U && line[length - 1U] == '\r') {
     --length;
@@ -228,6 +259,12 @@ static swing_hil_parser_event parse_line(const char *line, size_t length) {
   }
   if (token_equals(tokens[2], "TONE")) {
     return parse_tone(context);
+  }
+  if (token_equals(tokens[2], "CALIBRATE")) {
+    return parse_calibrate(context);
+  }
+  if (token_equals(tokens[2], "SWING")) {
+    return parse_swing(context);
   }
 
   return error_event(

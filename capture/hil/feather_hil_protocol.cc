@@ -10,6 +10,8 @@
 #include <type_traits>
 #include <vector>
 
+#include "embedded/prop_maker/swing_sequence.h"
+
 namespace swing_capture::hil {
 namespace {
 
@@ -185,6 +187,20 @@ std::string BuildFeatherToneCommand(std::uint32_t request_id, std::uint64_t lead
   return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " TONE " +
          std::to_string(lead_microseconds) + " " + std::to_string(duration_microseconds) + " " +
          std::to_string(frequency_hz) + " " + std::to_string(level_permille) + "\n";
+}
+
+std::string BuildFeatherCalibrationCommand(std::uint32_t request_id) {
+  ValidateRequestId(request_id);
+  return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " CALIBRATE\n";
+}
+
+std::string BuildFeatherSwingCommand(std::uint32_t request_id, std::uint32_t brightness) {
+  ValidateRequestId(request_id);
+  if (!swing_hil_swing_brightness_is_candidate(brightness)) {
+    throw std::invalid_argument("swing brightness is not an advertised calibration candidate");
+  }
+  return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " SWING " +
+         std::to_string(brightness) + "\n";
 }
 
 }  // namespace swing_capture::hil

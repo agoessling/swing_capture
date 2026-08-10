@@ -10,9 +10,15 @@ ts_config(
 )
 
 ts_config(
+    name = "tsconfig_user",
+    src = "tsconfig.user.json",
+    deps = [":tsconfig_base"],
+)
+
+ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
-    deps = [":tsconfig_base"],
+    deps = [":tsconfig_user"],
     visibility = ["//visibility:public"],
 )
 
@@ -29,11 +35,12 @@ exports_files([
     "basedpyright.json",
     "biome.json",
     "tsconfig.json",
+    "tsconfig.user.json",
 ])
 
 alias(
     name = "format",
-    actual = "@bazel_devtools//tools:format",
+    actual = "//tools/bazel_devtools:format",
 )
 
 alias(

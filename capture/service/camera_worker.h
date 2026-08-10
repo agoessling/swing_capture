@@ -2,16 +2,21 @@
 #define SWING_CAPTURE_CAPTURE_SERVICE_CAMERA_WORKER_H_
 
 #include <chrono>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 
 #include "capture/core/camera_source.h"
 #include "capture/daheng/daheng_camera.h"
+#include "capture/preview/latest_frame_sampler.h"
 #include "capture/preview/preview_image.h"
 #include "capture/service/preview_api.h"
 
 namespace swing_capture::service {
+
+using CapturedFrameSink = std::function<void(const FrameView &)>;
 
 class PreviewCameraDevice {
  public:
@@ -37,7 +42,8 @@ class CameraWorker final {
  public:
   CameraWorker(CameraRole role, std::unique_ptr<PreviewCameraDevice> camera,
                daheng::DahengConfiguration configuration = {},
-               std::unique_ptr<preview::PreviewFrameProcessor> frame_processor = nullptr);
+               std::unique_ptr<preview::PreviewFrameProcessor> frame_processor = nullptr,
+               CapturedFrameSink captured_frame_sink = {});
   ~CameraWorker();
 
   CameraWorker(const CameraWorker &) = delete;
@@ -49,6 +55,14 @@ class CameraWorker final {
   void Stop() noexcept;
 
   [[nodiscard]] CameraStatus Status();
+  [[nodiscard]] std::uint64_t TimestampTicksPerSecond();
+  // Immutable full-resolution Bayer sample used by explicitly enabled local
+  // HIL calibration. It reuses the preview sampler's bounded latest-only
+  // publication slot and does not add another camera SDK consumer. Calibration
+  // may retain a separately capped set of returned immutable snapshots.
+  [[nodiscard]] std::shared_ptr<const preview::SampledPreviewFrame> LatestSampledFrame();
+  void SetLatestFrameSamplingInterval(std::chrono::steady_clock::duration minimum_interval);
+  [[nodiscard]] std::chrono::steady_clock::duration LatestFrameSamplingInterval() const;
   [[nodiscard]] std::optional<PreviewImage> LatestPreview(bool full_resolution);
   [[nodiscard]] CameraStatus UpdateSettings(const CameraSettingsUpdate &settings);
 

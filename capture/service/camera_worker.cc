@@ -156,12 +156,14 @@ struct CameraWorker::Impl {
 
   Impl(CameraRole camera_role, std::unique_ptr<PreviewCameraDevice> camera_device,
        daheng::DahengConfiguration initial_configuration,
-       std::unique_ptr<preview::PreviewFrameProcessor> preview_frame_processor)
+       std::unique_ptr<preview::PreviewFrameProcessor> preview_frame_processor,
+       CapturedFrameSink frame_sink)
       : role(camera_role),
         camera(std::move(camera_device)),
         configuration(initial_configuration),
         frame_processor(preview_frame_processor == nullptr ? preview::MakeSoftwarePreviewProcessor()
                                                            : std::move(preview_frame_processor)),
+        captured_frame_sink(std::move(frame_sink)),
         sampler(
             {.minimum_interval = kPreviewInterval, .maximum_payload_bytes = kMaximumBayerPayload}) {
     if (camera == nullptr) {
@@ -359,13 +361,16 @@ struct CameraWorker::Impl {
   }
 
   void PublishFrame(const FrameView &frame) {
+    if (captured_frame_sink) {
+      captured_frame_sink(frame);
+    }
     const preview::PreviewFramePublishResult result = sampler.TryPublish(frame);
     if (result != preview::PreviewFramePublishResult::kPublished &&
         result != preview::PreviewFramePublishResult::kRateLimited) {
       throw std::runtime_error(PublishErrorName(result));
     }
     if (result == preview::PreviewFramePublishResult::kPublished) {
-      RequestRender();
+      RequestRoutineRender(frame.metadata.host_received_at);
     }
 
     const std::scoped_lock lock(state_mutex);
@@ -379,12 +384,21 @@ struct CameraWorker::Impl {
     }
   }
 
-  void RequestRender() {
+  void RequestRoutineRender(std::chrono::steady_clock::time_point frame_time) {
+    bool notify = false;
     {
       const std::scoped_lock lock(render_wait_mutex);
-      render_requested = true;
+      if (!has_requested_routine_render ||
+          frame_time - last_routine_render_requested_at >= kPreviewInterval) {
+        render_requested = true;
+        has_requested_routine_render = true;
+        last_routine_render_requested_at = frame_time;
+        notify = true;
+      }
     }
-    render_condition.notify_one();
+    if (notify) {
+      render_condition.notify_one();
+    }
   }
 
   void RequestFullResolutionRender() {
@@ -545,6 +559,11 @@ struct CameraWorker::Impl {
     return status;
   }
 
+  std::uint64_t TimestampTicksPerSecond() {
+    const std::scoped_lock lock(state_mutex);
+    return diagnostics.timestamp_ticks_per_second;
+  }
+
   std::optional<PreviewImage> LatestPreview(bool full_resolution) {
     std::shared_ptr<const preview::RenderedPreviewImage> current;
     if (!full_resolution) {
@@ -671,6 +690,8 @@ struct CameraWorker::Impl {
       const std::scoped_lock lock(render_wait_mutex);
       render_requested = false;
       full_resolution_render_requested = false;
+      has_requested_routine_render = false;
+      last_routine_render_requested_at = {};
     }
   }
 
@@ -705,6 +726,7 @@ struct CameraWorker::Impl {
   CameraIdentity identity;
   daheng::DahengConfiguration configuration;
   std::unique_ptr<preview::PreviewFrameProcessor> frame_processor;
+  CapturedFrameSink captured_frame_sink;
   preview::LatestFrameSampler sampler;
 
   std::mutex state_mutex;
@@ -724,6 +746,8 @@ struct CameraWorker::Impl {
   std::condition_variable_any render_condition;
   bool render_requested = false;
   bool full_resolution_render_requested = false;
+  bool has_requested_routine_render = false;
+  std::chrono::steady_clock::time_point last_routine_render_requested_at;
   std::atomic<bool> renderer_failed = false;
 
   std::mutex command_mutex;
@@ -737,9 +761,10 @@ struct CameraWorker::Impl {
 
 CameraWorker::CameraWorker(CameraRole role, std::unique_ptr<PreviewCameraDevice> camera,
                            daheng::DahengConfiguration configuration,
-                           std::unique_ptr<preview::PreviewFrameProcessor> frame_processor)
+                           std::unique_ptr<preview::PreviewFrameProcessor> frame_processor,
+                           CapturedFrameSink captured_frame_sink)
     : impl_(std::make_unique<Impl>(role, std::move(camera), configuration,
-                                   std::move(frame_processor))) {}
+                                   std::move(frame_processor), std::move(captured_frame_sink))) {}
 
 CameraWorker::~CameraWorker() { Stop(); }
 
@@ -748,6 +773,21 @@ void CameraWorker::Start() { impl_->Start(); }
 void CameraWorker::Stop() noexcept { impl_->Stop(); }
 
 CameraStatus CameraWorker::Status() { return impl_->Status(); }
+
+std::uint64_t CameraWorker::TimestampTicksPerSecond() { return impl_->TimestampTicksPerSecond(); }
+
+std::shared_ptr<const preview::SampledPreviewFrame> CameraWorker::LatestSampledFrame() {
+  return impl_->sampler.Latest();
+}
+
+void CameraWorker::SetLatestFrameSamplingInterval(
+    std::chrono::steady_clock::duration minimum_interval) {
+  impl_->sampler.SetMinimumInterval(minimum_interval);
+}
+
+std::chrono::steady_clock::duration CameraWorker::LatestFrameSamplingInterval() const {
+  return impl_->sampler.minimum_interval();
+}
 
 std::optional<PreviewImage> CameraWorker::LatestPreview(bool full_resolution) {
   return impl_->LatestPreview(full_resolution);

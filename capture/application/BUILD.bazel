@@ -1,0 +1,114 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "camera_clip_buffer",
+    srcs = ["camera_clip_buffer.cc"],
+    hdrs = ["camera_clip_buffer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//capture/core:camera_source",
+        "//capture/core:pooled_raw_frame_ring",
+    ],
+)
+
+cc_test(
+    name = "camera_clip_buffer_test",
+    size = "small",
+    srcs = ["camera_clip_buffer_test.cc"],
+    deps = [
+        ":camera_clip_buffer",
+        "//capture/core:camera_source",
+    ],
+)
+
+cc_library(
+    name = "audio_impact_monitor",
+    srcs = ["audio_impact_monitor.cc"],
+    hdrs = ["audio_impact_monitor.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//capture/audio:audio_capture_session",
+        "//capture/trigger:impact_detector",
+    ],
+)
+
+cc_test(
+    name = "audio_impact_monitor_test",
+    size = "small",
+    srcs = ["audio_impact_monitor_test.cc"],
+    deps = [
+        ":audio_impact_monitor",
+        "//capture/audio:audio_capture_session",
+        "//capture/trigger:impact_detector",
+    ],
+)
+
+cc_library(
+    name = "capture_controller",
+    srcs = ["capture_controller.cc"],
+    hdrs = ["capture_controller.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":audio_impact_monitor",
+        ":camera_clip_buffer",
+        "//capture/audio:audio_capture_session",
+        "//capture/core:pooled_raw_frame_ring",
+        "//capture/trigger:impact_detector",
+    ],
+)
+
+cc_test(
+    name = "capture_controller_test",
+    size = "small",
+    srcs = ["capture_controller_test.cc"],
+    deps = [
+        ":capture_controller",
+        ":camera_clip_buffer",
+        "//capture/audio:audio_capture_session",
+        "//capture/core:camera_source",
+    ],
+)
+
+cc_library(
+    name = "clip_session_publisher",
+    srcs = ["clip_session_publisher.cc"],
+    hdrs = ["clip_session_publisher.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":capture_controller",
+        "//capture/clip:clip_window_planner",
+        "//capture/core:camera_source",
+        "//capture/core:device_clock_mapper",
+        "//capture/encoding:clip_session",
+        "//capture/trigger:impact_detector",
+    ],
+)
+
+cc_test(
+    name = "clip_session_publisher_test",
+    size = "small",
+    srcs = ["clip_session_publisher_test.cc"],
+    deps = [
+        ":camera_clip_buffer",
+        ":capture_controller",
+        ":clip_session_publisher",
+        "//capture/core:camera_source",
+        "//capture/encoding:clip_session",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "session_catalog",
+    srcs = ["session_catalog.cc"],
+    hdrs = ["session_catalog.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "session_catalog_test",
+    size = "small",
+    srcs = ["session_catalog_test.cc"],
+    deps = [":session_catalog"],
+)

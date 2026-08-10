@@ -8,9 +8,9 @@
       "template_version": "0.1.0"
     },
     ".bazel_devtools/biome.json": {
-      "base": "{\n  \"$schema\": \"https://biomejs.dev/schemas/2.5.6/schema.json\",\n  \"files\": {\n    \"includes\": [\"**\", \"!**/bazel-*\", \"!**/node_modules\"]\n  },\n  \"formatter\": {\n    \"enabled\": true,\n    \"formatWithErrors\": false,\n    \"indentStyle\": \"space\",\n    \"lineEnding\": \"lf\",\n    \"lineWidth\": 100\n  },\n  \"linter\": {\n    \"enabled\": true,\n    \"rules\": {\n      \"recommended\": true\n    }\n  },\n  \"javascript\": {\n    \"formatter\": {\n      \"jsxQuoteStyle\": \"double\",\n      \"quoteStyle\": \"double\",\n      \"semicolons\": \"always\"\n    }\n  }\n}\n",
+      "base": "{\n  \"$schema\": \"https://biomejs.dev/schemas/2.5.6/schema.json\",\n  \"files\": {\n    \"includes\": [\"**\", \"!**/bazel-*\", \"!**/node_modules\"]\n  },\n  \"formatter\": {\n    \"enabled\": true,\n    \"formatWithErrors\": false,\n    \"indentStyle\": \"space\",\n    \"lineEnding\": \"lf\",\n    \"lineWidth\": 100\n  },\n  \"linter\": {\n    \"enabled\": true,\n    \"rules\": {\n      \"preset\": \"recommended\"\n    }\n  },\n  \"javascript\": {\n    \"formatter\": {\n      \"jsxQuoteStyle\": \"double\",\n      \"quoteStyle\": \"double\",\n      \"semicolons\": \"always\"\n    }\n  }\n}\n",
       "block_id": null,
-      "digest": "7dc56fe2a29c254651c15af7519d6799d25b2d7575270ac7fbbb68a6e80d3873",
+      "digest": "b58c56f5c8a914a6219aae47e1134886f26e750f87ed4b11f7808602e1569aef",
       "ownership": "managed_file",
       "template_version": "0.1.0"
     },
@@ -22,9 +22,9 @@
       "template_version": "0.1.0"
     },
     ".bazel_devtools/tsconfig.json": {
-      "base": "{\n  \"compilerOptions\": {\n    \"allowJs\": false,\n    \"esModuleInterop\": true,\n    \"exactOptionalPropertyTypes\": true,\n    \"forceConsistentCasingInFileNames\": true,\n    \"isolatedModules\": true,\n    \"jsx\": \"react-jsx\",\n    \"lib\": [\"DOM\", \"DOM.Iterable\", \"ES2023\"],\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"noEmit\": true,\n    \"noFallthroughCasesInSwitch\": true,\n    \"noImplicitOverride\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"noUnusedLocals\": true,\n    \"noUnusedParameters\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"verbatimModuleSyntax\": true\n  }\n}\n",
+      "base": "{\n  \"compilerOptions\": {\n    \"exactOptionalPropertyTypes\": true,\n    \"forceConsistentCasingInFileNames\": true,\n    \"noFallthroughCasesInSwitch\": true,\n    \"noImplicitOverride\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"noUnusedLocals\": true,\n    \"noUnusedParameters\": true,\n    \"strict\": true\n  }\n}\n",
       "block_id": null,
-      "digest": "9c384c2b8888ccbf066b989bdd3af9cc476cfa90938ad1eea5c56251d2efb9df",
+      "digest": "e69d9f6691cedd2c713c2933370ea80cedebd235db91cdf6a15e97681451d0aa",
       "ownership": "managed_file",
       "template_version": "0.1.0"
     },
@@ -78,9 +78,9 @@
       "template_version": "0.1.0"
     },
     "BUILD.bazel": {
-      "base": "load(\"@aspect_rules_ts//ts:defs.bzl\", \"ts_config\")\n\nts_config(\n    name = \"tsconfig_base\",\n    src = \".bazel_devtools/tsconfig.json\",\n    visibility = [\"//visibility:public\"],\n)\n\nts_config(\n    name = \"tsconfig\",\n    src = \"tsconfig.json\",\n    deps = [\":tsconfig_base\"],\n    visibility = [\"//visibility:public\"],\n)\n\nexports_files([\n    \".bazel_devtools/basedpyright.json\",\n    \".bazel_devtools/biome.json\",\n    \".bazel_devtools/ruff.toml\",\n    \".bazel_devtools/tsconfig.json\",\n    \".clang-format\",\n    \".clang-tidy\",\n    \".github/workflows/bazel-devtools.yml\",\n    \".pre-commit-config.yaml\",\n    \".ruff.toml\",\n    \"basedpyright.json\",\n    \"biome.json\",\n    \"tsconfig.json\",\n])\n\nalias(\n    name = \"format\",\n    actual = \"@bazel_devtools//tools:format\",\n)\n\nalias(\n    name = \"ide-sync\",\n    actual = \"@bazel_devtools//tools:ide_sync\",\n)\n\nalias(\n    name = \"install-hooks\",\n    actual = \"@bazel_devtools//tools:install-hooks\",\n)\n\nalias(\n    name = \"pre-commit\",\n    actual = \"@bazel_devtools//tools:pre-commit\",\n)\n",
+      "base": "load(\"@aspect_rules_ts//ts:defs.bzl\", \"ts_config\")\n\nts_config(\n    name = \"tsconfig_base\",\n    src = \".bazel_devtools/tsconfig.json\",\n    visibility = [\"//visibility:public\"],\n)\n\nts_config(\n    name = \"tsconfig\",\n    src = \"tsconfig.user.json\",\n    deps = [\":tsconfig_base\"],\n    visibility = [\"//visibility:public\"],\n)\n\nexports_files([\n    \".bazel_devtools/basedpyright.json\",\n    \".bazel_devtools/biome.json\",\n    \".bazel_devtools/ruff.toml\",\n    \".bazel_devtools/tsconfig.json\",\n    \".clang-format\",\n    \".clang-tidy\",\n    \".github/workflows/bazel-devtools.yml\",\n    \".pre-commit-config.yaml\",\n    \".ruff.toml\",\n    \"basedpyright.json\",\n    \"biome.json\",\n    \"tsconfig.json\",\n    \"tsconfig.user.json\",\n])\n\nalias(\n    name = \"format\",\n    actual = \"//tools/bazel_devtools:format\",\n)\n\nalias(\n    name = \"ide-sync\",\n    actual = \"@bazel_devtools//tools:ide_sync\",\n)\n\nalias(\n    name = \"install-hooks\",\n    actual = \"@bazel_devtools//tools:install-hooks\",\n)\n\nalias(\n    name = \"pre-commit\",\n    actual = \"@bazel_devtools//tools:pre-commit\",\n)\n",
       "block_id": "root-aliases",
-      "digest": "86f45a2726414095ba54a4aafa98d2f1f559ef1e8156c9baf48515e51697c590",
+      "digest": "382a766d8e8bccfc64b7142022fa893d60a5c3388c9a1ab82e65528b5ec9c691",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     },
@@ -99,9 +99,9 @@
       "template_version": "0.1.0"
     },
     "tools/bazel_devtools/BUILD.bazel": {
-      "base": "load(\"@bazel_devtools//tools:defs.bzl\", \"bazel_devtools_formatters\", \"tool_binary\")\n\npackage(default_visibility = [\"//visibility:public\"])\n\ntool_binary(\n    name = \"clang_format\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-format\",\n)\n\ntool_binary(\n    name = \"clang_tidy\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-tidy\",\n)\n\nalias(\n    name = \"biome\",\n    actual = \"@bazel_devtools//tools:biome\",\n)\n\nalias(\n    name = \"biome_cwd\",\n    actual = \"@bazel_devtools//tools:biome_cwd\",\n)\n\nbazel_devtools_formatters(\n    name = \"formatters\",\n    languages = [\n        \"python\",\n        \"cpp\",\n        \"typescript\",\n    ],\n    clang_format = \":clang_format\",\n)\n",
+      "base": "load(\n    \"@bazel_devtools//tools:defs.bzl\",\n    \"bazel_devtools_format_driver\",\n    \"bazel_devtools_formatters\",\n    \"tool_binary\",\n)\n\npackage(default_visibility = [\"//visibility:public\"])\n\ntool_binary(\n    name = \"clang_format\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-format\",\n)\n\ntool_binary(\n    name = \"clang_tidy\",\n    src = \"@bazel_devtools_llvm_toolchain_llvm//:bin/clang-tidy\",\n)\n\nalias(\n    name = \"biome\",\n    actual = \"@bazel_devtools//tools:biome\",\n)\n\nalias(\n    name = \"biome_cwd\",\n    actual = \"@bazel_devtools//tools:biome_cwd\",\n)\n\nbazel_devtools_formatters(\n    name = \"formatters\",\n    languages = [\n        \"python\",\n        \"cpp\",\n        \"typescript\",\n    ],\n    clang_format = \":clang_format\",\n)\n\nbazel_devtools_format_driver(\n    name = \"format\",\n    languages = [\n        \"python\",\n        \"cpp\",\n        \"typescript\",\n    ],\n    biome = \":biome\",\n)\n",
       "block_id": "tools",
-      "digest": "58ffac9a09890a99685b58eb11961fe7443e5832b58f25946e296dd0963ded45",
+      "digest": "be352dbecdda09272940c64ae08bd522cbdfdc098275ccf4342c702f24cba2ef",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     },
@@ -110,6 +110,13 @@
       "block_id": "aspects",
       "digest": "713bb09995bba466f3cea5ed02e1f99bdd2edc1307c1047a7ca84008a631479a",
       "ownership": "managed_block",
+      "template_version": "0.1.0"
+    },
+    "tools/bazel_devtools/format_driver.py": {
+      "base": "\"\"\"Run the Bazel-owned formatter with this repository's selected tool data.\"\"\"\n\nfrom tools.format_targets import main\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n",
+      "block_id": null,
+      "digest": "81ded6b762e50ea892ca2b1a0517df7ef4742b860b2a95f1c749004812780369",
+      "ownership": "managed_file",
       "template_version": "0.1.0"
     }
   },

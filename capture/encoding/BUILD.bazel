@@ -1,0 +1,65 @@
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
+
+cc_library(
+    name = "clip_session",
+    srcs = [
+        "clip_session.cc",
+        "vaapi_vp9_encoder.cc",
+        "vp8_webm_encoder.cc",
+        "webm_inspection.cc",
+    ],
+    hdrs = ["clip_session.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [
+        "//capture/core:camera_source",
+        "//capture/image:bayer_rg8",
+        "//capture/optical:white_impact_acceptance",
+        "//capture/preview:preview_image",
+        "@libva_headers//:headers",
+        "@libvpx//:vpx",
+        "@libwebm//:webm",
+        "@nlohmann_json//:json",
+    ],
+    linkopts = ["-ldl"],
+)
+
+cc_test(
+    name = "clip_session_test",
+    size = "small",
+    srcs = ["clip_session_test.cc"],
+    deps = [
+        ":clip_session",
+        "//capture/core:camera_source",
+        "@libwebm//:webm",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "vaapi_vp9_encoder_hil_test",
+    size = "small",
+    srcs = ["vaapi_vp9_encoder_hil_test.cc"],
+    tags = [
+        "exclusive",
+        "local",
+        "manual",
+    ],
+    deps = [
+        ":clip_session",
+        "//capture/core:camera_source",
+    ],
+)
+
+cc_binary(
+    name = "clip_encoding_benchmark",
+    srcs = ["clip_encoding_benchmark.cc"],
+    # libvpx's platform-specific implementation archives have circular symbol
+    # references. Bazel's shared-library link keeps the benchmark consistent
+    # with cc_test and avoids making this diagnostic target own vendor ordering.
+    linkstatic = False,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":clip_session",
+        "//capture/core:camera_source",
+    ],
+)

@@ -137,6 +137,7 @@ def rp2040_firmware(
         board_config,
         srcs,
         deps = [],
+        linkopts = [],
         tags = [],
         visibility = None,
         **kwargs):
@@ -147,6 +148,13 @@ def rp2040_firmware(
         name = elf_name,
         srcs = srcs,
         deps = deps,
+        # USB stdio advertises the reset interface and BOS descriptor. Require
+        # their weakly discovered callbacks so optimized archive/section GC
+        # cannot silently emit descriptors without the matching driver.
+        linkopts = linkopts + [
+            "-Wl,--require-defined=usbd_app_driver_get_cb",
+            "-Wl,--require-defined=tud_descriptor_bos_cb",
+        ],
         tags = firmware_tags,
         target_compatible_with = ["@pico-sdk//bazel/constraint:rp2040"],
         visibility = ["//visibility:private"],

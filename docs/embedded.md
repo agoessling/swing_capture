@@ -101,12 +101,21 @@ the host. The serial device can briefly disappear and re-enumerate during the
 reset.
 
 The HIL image initializes every output inactive. An accepted LED request pulses
-the onboard GPIO13 LED. An accepted tone request briefly raises GPIO23 and
-therefore powers the MAX98357 speaker amplifier, the external NeoPixel rail,
-and the servo rail together; it then drives a bounded I2S tone on GPIO16--18
-before returning the shared power rail and I2S pins low. Nothing should be
-connected to the external powered rails unless that temporary power-up is
-known to be safe.
+the onboard GPIO13 LED, independently of the synthetic-swing fixture. An
+accepted tone request briefly raises GPIO23 and therefore powers the MAX98357
+speaker amplifier, the external NeoPixel rail, and the servo rail together; it
+then drives a bounded I2S tone on GPIO16--18 before returning the shared power
+rail and I2S pins low.
+
+Synthetic-swing calibration and playback instead drive the external
+screw-terminal NeoPixel data line on GPIO21. Calibration raises GPIO23, sweeps
+the negotiated white levels, latches the fixture pixel off, and holds the rail
+for one immediately following swing. The swing consumes that prepared state,
+keeps the rail powered through its RGB/white/audio/RGB timeline, then turns the
+pixel off, quiesces I2S, and lowers GPIO23. A command error or the bounded
+preparation timeout performs the same ordered shutdown. Nothing should be
+connected to the external powered rails unless this temporary shared power-up
+is known to be safe.
 
 The complete commands, negotiated bounds, response records, timing semantics,
 and recovery behavior are documented in

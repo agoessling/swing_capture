@@ -4,6 +4,78 @@ cc_library(
     name = "feather_hil_protocol",
     srcs = ["feather_hil_protocol.cc"],
     hdrs = ["feather_hil_protocol.h"],
+    deps = ["//embedded/prop_maker:swing_sequence"],
+)
+
+cc_library(
+    name = "application_audio_stimulus",
+    hdrs = ["application_audio_stimulus.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_test(
+    name = "application_audio_stimulus_test",
+    size = "small",
+    srcs = ["application_audio_stimulus_test.cc"],
+    deps = [
+        ":application_audio_stimulus",
+        ":feather_hil_protocol",
+        "//capture/trigger:impact_detector",
+    ],
+)
+
+cc_library(
+    name = "session_artifact_validator",
+    srcs = ["session_artifact_validator.cc"],
+    hdrs = ["session_artifact_validator.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [
+        "//capture/encoding:clip_session",
+        "//capture/optical:white_impact_acceptance",
+        "//embedded/prop_maker:swing_sequence",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "session_artifact_validator_test",
+    size = "small",
+    srcs = ["session_artifact_validator_test.cc"],
+    deps = [
+        ":session_artifact_validator",
+        "//capture/core:camera_source",
+        "//capture/encoding:clip_session",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "application_flow_hil_test",
+    size = "medium",
+    srcs = ["application_flow_hil_test.cc"],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-audio",
+        "requires-daheng-camera",
+        "requires-daheng-sdk",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":feather_hil_controller",
+        ":feather_hil_serial",
+        ":session_artifact_validator",
+        "//capture/service:preview_api",
+        "//capture/service:preview_station",
+        "//station:hardware_lock",
+        "//station:station_config",
+        "@cpp-httplib//:httplib",
+        "@nlohmann_json//:json",
+    ],
 )
 
 cc_test(
@@ -17,6 +89,7 @@ cc_library(
     name = "feather_hil_serial",
     srcs = ["feather_hil_serial.cc"],
     hdrs = ["feather_hil_serial.h"],
+    visibility = ["//capture:__subpackages__"],
     deps = [":feather_hil_protocol"],
 )
 
@@ -34,9 +107,11 @@ cc_library(
     name = "feather_hil_controller",
     srcs = ["feather_hil_controller.cc"],
     hdrs = ["feather_hil_controller.h"],
+    visibility = ["//capture:__subpackages__"],
     deps = [
         ":feather_hil_protocol",
         ":feather_hil_serial",
+        "//embedded/prop_maker:swing_sequence",
     ],
 )
 

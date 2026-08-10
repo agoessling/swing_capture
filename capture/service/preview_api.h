@@ -72,6 +72,60 @@ struct PreviewImage {
   std::string bytes;
 };
 
+struct CaptureTriggerStatus {
+  std::string source;
+  std::int64_t strike_host_monotonic_nanoseconds = 0;
+  std::int64_t confirmation_host_monotonic_nanoseconds = 0;
+  std::uint32_t sample_rate_hz = 0;
+  double peak_amplitude = 0.0;
+  double noise_floor = 0.0;
+  double threshold = 0.0;
+};
+
+struct HilLastRunStatus {
+  std::optional<std::string> session_id;
+  std::string stage = "idle";
+  std::string error;
+  std::optional<std::uint8_t> selected_brightness;
+};
+
+struct HilControlStatus {
+  bool enabled = false;
+  bool busy = false;
+  std::string stage = "idle";
+  std::string error;
+  std::optional<std::uint8_t> selected_brightness;
+  std::optional<HilLastRunStatus> last_run;
+};
+
+struct CaptureApplicationStatus {
+  std::string state = "setup";
+  bool armed = false;
+  std::optional<std::string> active_session_id;
+  std::optional<CaptureTriggerStatus> last_trigger;
+  std::string error;
+  bool audio_running = false;
+  bool audio_ready = false;
+  std::uint64_t audio_blocks = 0;
+  std::uint64_t audio_samples = 0;
+  std::uint64_t detected_impacts = 0;
+  double audio_noise_floor = 0.0;
+  double audio_detection_threshold = 0.0;
+  HilControlStatus hil;
+};
+
+struct SessionSummaryStatus {
+  std::string session_id;
+  std::string state = "ready";
+  std::string created_at_utc;
+  std::string error;
+};
+
+struct SessionAsset {
+  std::filesystem::path path;
+  std::string media_type;
+};
+
 class StationBackend {
  public:
   StationBackend() = default;
@@ -87,6 +141,15 @@ class StationBackend {
                                                                   bool full_resolution) = 0;
   [[nodiscard]] virtual CameraStatus UpdateCameraSettings(CameraRole role,
                                                           const CameraSettingsUpdate &settings) = 0;
+  [[nodiscard]] virtual CaptureApplicationStatus CaptureStatus() = 0;
+  [[nodiscard]] virtual CaptureApplicationStatus SetCaptureArmed(bool armed) = 0;
+  [[nodiscard]] virtual SessionSummaryStatus CaptureManually() = 0;
+  [[nodiscard]] virtual CaptureApplicationStatus RunSyntheticSwingHil() = 0;
+  [[nodiscard]] virtual std::vector<SessionSummaryStatus> Sessions() = 0;
+  [[nodiscard]] virtual std::optional<SessionAsset> SessionManifest(
+      std::string_view session_id) = 0;
+  [[nodiscard]] virtual std::optional<SessionAsset> SessionMedia(std::string_view session_id,
+                                                                 CameraRole role) = 0;
 };
 
 [[nodiscard]] std::string_view CameraRoleName(CameraRole role) noexcept;

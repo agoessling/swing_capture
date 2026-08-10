@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define SWING_HIL_PROTOCOL_PREFIX "SC-HIL/1"
-#define SWING_HIL_FIRMWARE_VERSION "prop-maker-hil-1"
+#define SWING_HIL_FIRMWARE_VERSION "prop-maker-hil-5"
 #define SWING_HIL_MAX_LINE_BYTES 160U
 
 #define SWING_HIL_MAX_LEAD_US 2000000U
@@ -28,6 +28,8 @@ typedef enum swing_hil_command_kind {
   SWING_HIL_COMMAND_QUERY = 0,
   SWING_HIL_COMMAND_LED,
   SWING_HIL_COMMAND_TONE,
+  SWING_HIL_COMMAND_CALIBRATE,
+  SWING_HIL_COMMAND_SWING,
 } swing_hil_command_kind;
 
 typedef struct swing_hil_led_command {
@@ -42,12 +44,17 @@ typedef struct swing_hil_tone_command {
   uint32_t level_permille;
 } swing_hil_tone_command;
 
+typedef struct swing_hil_swing_command {
+  uint32_t brightness;
+} swing_hil_swing_command;
+
 typedef struct swing_hil_command {
   uint32_t request_id;
   swing_hil_command_kind kind;
   union {
     swing_hil_led_command led;
     swing_hil_tone_command tone;
+    swing_hil_swing_command swing;
   } parameters;
 } swing_hil_command;
 

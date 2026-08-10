@@ -12,7 +12,7 @@ non-Bazel packages are:
 
 ```bash
 sudo apt update
-sudo apt install alsa-utils build-essential git python3 usbutils
+sudo apt install alsa-utils build-essential git intel-media-va-driver libva2 python3 usbutils vainfo
 ```
 
 Install Bazelisk as `bazel` using its upstream release or package for the host.
@@ -77,6 +77,20 @@ they do not, add the account to `audio` and log out and back in:
 ```bash
 sudo usermod -aG audio "$USER"
 ```
+
+Production clip encoding uses Intel VA-API through `/dev/dri/renderD128`.
+Ensure that the capture account belongs to `render`, then log out and back in:
+
+```bash
+sudo usermod -aG render "$USER"
+id
+vainfo --display drm --device /dev/dri/renderD128
+```
+
+The station requires the Intel iHD driver, `VAProfileVP9Profile0`, and
+`VAEntrypointEncSliceLP`. Bazel supplies checksum-pinned libva headers for the
+C++ ABI, while `libva.so.2`, `libva-drm.so.2`, the driver, and render-node
+permission are deliberate host runtime dependencies.
 
 Reconnect the USB devices after installing the rules. Confirm the persistent
 Daheng USB buffer setting and its boot service:
@@ -188,15 +202,78 @@ operation are documented in
 [`testing.md`](testing.md); Feather recovery details are in
 [`embedded.md`](embedded.md).
 
-## Run the setup preview
+## Run the production application
 
-After the doctor and camera smoke checks succeed, start the setup UI in a
+After the doctor and camera smoke checks succeed, start the application in a
 persistent terminal such as tmux:
 
 ```bash
 tmux new-session -s swing-preview
 bazel run //capture/service:preview_server
 ```
+
+The first production slice exposes two modes in one headless service:
+
+- **Camera setup** shows paired live previews and controls framing, exposure,
+  and gain.
+- **Review** arms the audio trigger and presents persistent recorded sessions
+  with synchronized dual-view playback, scrubbing, speed selection, and exact
+  frame stepping.
+
+Synthetic-swing HIL is disabled by default, and its button is absent from the
+UI. Enable that physical-device diagnostic only for an attended station check:
+
+```bash
+bazel run //capture/service:preview_server -- --enable-hil-controls
+```
+
+The flag enables the button and authorizes an empty-object
+`POST /api/v1/hil/synthetic-swing` request. One request automatically samples
+an OFF baseline and the external screw-terminal fixture NeoPixel's white
+brightness candidates `1,2,3,4,6,8,12,16` in both views, selects one level visible without
+clipping in either camera, arms capture, and runs the Feather sequence. Expect
+1.2 seconds of stepped pre-impact RGB states, a 20 ms white marker accompanied
+by a 10 ms 2 kHz speaker tone, and 0.5 seconds of stepped post-impact states.
+The UI reports calibration, stimulus, capture, encoding, and ready/error
+progress, then opens the published review session.
+
+The session manifest retains, for each configured camera role, compact white
+impact evidence, the optical white-impact frame index, and the signed
+audio-trigger-estimate offset. The pre- and post-impact colors are human visual
+cues for playback and frame stepping rather than exact machine-qualified
+states. The offset measures these observed
+markers but is not calibrated true-impact timing; it still includes camera,
+ALSA, amplifier, speaker, and acoustic delays. One synthetic action consumes
+one arm and finishes Ready unarmed. Explicitly re-arm before the next normal
+swing; starting another synthetic operation performs its own one-shot arm.
+
+Arming is one-shot. The first accepted audio trigger starts post-roll and
+encoding, then the application reaches Ready unarmed. Explicitly re-arm before
+the next swing. The UI's audio-trigger estimate frame is the retained camera
+frame nearest the current microphone timestamp estimate. It is not calibrated
+ball-contact timing: ALSA buffering, microphone/device latency, and fixed
+camera transport latency have not yet been measured end to end.
+
+By default, published sessions are stored under the repository's
+`artifacts/sessions/` directory. A complete production session contains a
+manifest and one video-only, all-keyframe VP9/WebM file per camera role. The
+server catalogs compatible complete
+sessions at startup and refreshes the catalog after each atomic publication,
+so they remain available after a restart. Browsers receive the WebMs with HTTP
+byte-range support for seeking and exact frame stepping.
+
+For production, select a durable writable volume explicitly:
+
+```bash
+bazel run //capture/service:preview_server -- \
+  --sessions-root /srv/swing-capture/sessions
+```
+
+Do not treat the ignored default directory, a Bazel output tree, or a
+disposable checkout as the only copy of important swings. Back up recordings
+that must be retained and monitor filesystem capacity. This slice does not
+provide backup, retention policy, quota enforcement, or automatic free-space
+recovery; a full filesystem can prevent a new session from being published.
 
 From another computer on the same trusted network, open:
 
@@ -205,9 +282,10 @@ http://<capture-host-address>:8080/
 ```
 
 The service binds to `0.0.0.0` by default. Use `--bind 127.0.0.1` when access
-should be local-only, or `--port <port>` to select another port. This initial
-service has no authentication or TLS and must not be exposed directly to an
-untrusted network.
+should be local-only, or `--port <port>` to select another port. The service
+has no authentication or TLS. Every client that can reach it can view sessions
+and operate capture controls, so expose it only on a trusted station network;
+never publish it directly to an untrusted network or the public Internet.
 
 The service reads the same station path as HIL from
 `SWING_CAPTURE_STATION_CONFIG`; `--station-config <absolute-path>` overrides
@@ -215,15 +293,15 @@ it. Exposure and gain changes last for the running session and are reset to the
 current deterministic defaults when the service restarts. Lens focus remains a
 physical adjustment.
 
-Routine polling receives up to about 30 compressed 640x480 JPEGs per second. The
-browser fetches both roles as one capacity-one pair, retains the last good pair
-while a slow download or browser decode finishes, atomically swaps both views, and skips
-superseded pairs. Full-resolution images are encoded on demand; use each card's
-link only while checking fine focus. `/api/v1/status` exposes source/render age,
-encoded size, and per-stage render timings when diagnosing a delayed update.
-`Ctrl-C` and `SIGTERM`
-stop HTTP acceptance, join both camera workers, stop their streams, and destroy
-the Galaxy SDK before the process exits.
+Routine polling receives up to about 30 compressed 640x480 JPEGs per second.
+The browser fetches both roles as one capacity-one pair, retains the last good
+pair while a slow download or browser decode finishes, atomically swaps both
+views, and skips superseded pairs. Full-resolution images are encoded on
+demand; use each card's link only while checking fine focus. `/api/v1/status`
+exposes source/render age, encoded size, and per-stage render timings when
+diagnosing a delayed update. `Ctrl-C` and `SIGTERM` stop HTTP acceptance, join
+both camera workers, stop their streams, and destroy the Galaxy SDK before the
+process exits.
 
 Only one process may own the cameras. Exit the preview service before running
 a direct Bazel camera HIL target. The preview service and

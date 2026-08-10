@@ -74,33 +74,6 @@ std::uint32_t CenteredCoordinateWithParity(BayerSamplingAxis axis) {
   return coordinate - 1U;
 }
 
-image::Rgb8Image DemosaicPreview(std::span<const std::byte> bayer, std::uint32_t width,
-                                 std::uint32_t height, const PreviewRenderOptions &options) {
-  if (options.maximum_width == 0 || options.maximum_height == 0) {
-    throw std::invalid_argument("preview maximum dimensions must be nonzero");
-  }
-  const PreviewDimensions output =
-      FitWithin({.width = width, .height = height},
-                {.width = options.maximum_width, .height = options.maximum_height});
-  if ((output.width == width && output.height == height) || output.width < 2U ||
-      output.height < 2U) {
-    return image::DemosaicBayerRg8(bayer, width, height);
-  }
-
-  std::vector<std::byte> reduced(static_cast<std::size_t>(output.width) * output.height);
-  for (std::uint32_t y = 0; y < output.height; ++y) {
-    const std::uint32_t source_y = CenteredCoordinateWithParity(
-        {.output_coordinate = y, .output_extent = output.height, .source_extent = height});
-    for (std::uint32_t x = 0; x < output.width; ++x) {
-      const std::uint32_t source_x = CenteredCoordinateWithParity(
-          {.output_coordinate = x, .output_extent = output.width, .source_extent = width});
-      reduced[static_cast<std::size_t>(y) * output.width + x] =
-          bayer[static_cast<std::size_t>(source_y) * width + source_x];
-    }
-  }
-  return image::DemosaicBayerRg8(reduced, output.width, output.height);
-}
-
 PreparedPreview PreparePreview(const SampledPreviewFrame &frame,
                                const PreviewRenderOptions &options, bool reduce_for_preview) {
   const image::Raw8ImageView bayer_view = {
@@ -114,7 +87,9 @@ PreparedPreview PreparePreview(const SampledPreviewFrame &frame,
   const auto quality_completed_at = std::chrono::steady_clock::now();
   image::Rgb8Image rgb =
       reduce_for_preview
-          ? DemosaicPreview(bayer_view.pixels, frame.metadata.width, frame.metadata.height, options)
+          ? DemosaicBayerRg8ToFit(
+                bayer_view.pixels, {.width = frame.metadata.width, .height = frame.metadata.height},
+                {.width = options.maximum_width, .height = options.maximum_height})
           : image::DemosaicBayerRg8(bayer_view.pixels, frame.metadata.width, frame.metadata.height);
   const auto transform_completed_at = std::chrono::steady_clock::now();
   return {
@@ -212,6 +187,32 @@ PreviewDimensions FitWithin(PreviewDimensions source, PreviewDimensions maximum)
       .width = RoundedScale(source.width, maximum.height, source.height),
       .height = maximum.height,
   };
+}
+
+image::Rgb8Image DemosaicBayerRg8ToFit(std::span<const std::byte> bayer, PreviewDimensions source,
+                                       PreviewDimensions maximum) {
+  const PreviewDimensions output = FitWithin(source, maximum);
+  if (source.height > std::numeric_limits<std::size_t>::max() / source.width ||
+      bayer.size() != static_cast<std::size_t>(source.width) * source.height) {
+    throw std::invalid_argument("preview Bayer payload does not match its dimensions");
+  }
+  if ((output.width == source.width && output.height == source.height) || output.width < 2U ||
+      output.height < 2U) {
+    return image::DemosaicBayerRg8(bayer, source.width, source.height);
+  }
+
+  std::vector<std::byte> reduced(static_cast<std::size_t>(output.width) * output.height);
+  for (std::uint32_t y = 0; y < output.height; ++y) {
+    const std::uint32_t source_y = CenteredCoordinateWithParity(
+        {.output_coordinate = y, .output_extent = output.height, .source_extent = source.height});
+    for (std::uint32_t x = 0; x < output.width; ++x) {
+      const std::uint32_t source_x = CenteredCoordinateWithParity(
+          {.output_coordinate = x, .output_extent = output.width, .source_extent = source.width});
+      reduced[static_cast<std::size_t>(y) * output.width + x] =
+          bayer[static_cast<std::size_t>(source_y) * source.width + source_x];
+    }
+  }
+  return image::DemosaicBayerRg8(reduced, output.width, output.height);
 }
 
 image::Rgb8Image ResizeToFit(const image::Rgb8Image &source, PreviewDimensions maximum) {

@@ -15,13 +15,14 @@ TypeScript/UI tests:
 | Storage and timing | `//capture/core:camera_source_test`, `//capture/core:raw_frame_ring_test`, `//capture/core:pooled_raw_frame_ring_test`, `//capture/core:device_clock_mapper_test` |
 | Session and clip selection | `//capture/session:capture_session_coordinator_test`, `//capture/clip:clip_window_planner_test` |
 | HIL protocol and evidence | `//capture/hil:feather_hil_protocol_test`, `//capture/hil:feather_hil_serial_test`, `//capture/hil:feather_hil_controller_test`, `//capture/hil:hil_metrics_test`, `//embedded/prop_maker:hil_protocol_test` |
+| Application capture and publication | `//capture/application:camera_clip_buffer_test`, `//capture/application:audio_impact_monitor_test`, `//capture/application:capture_controller_test`, `//capture/application:clip_session_publisher_test`, `//capture/application:session_catalog_test`, `//capture/encoding:clip_session_test`, `//capture/hil:application_audio_stimulus_test`, `//capture/hil:session_artifact_validator_test` |
 | Optical and images | `//capture/optical:april_tag_test`, `//capture/optical:frame_selection_test`, `//capture/optical:led_pulse_test`, `//capture/optical:led_schedule_association_test`, `//capture/image:bayer_rg8_test`, `//capture/image:image_quality_test` |
 | Synthetic end to end | `//capture/pipeline:capture_pipeline_integration_test` |
 | SDK packaging | `//capture/daheng:daheng_sdk_runtime_test`, `//third_party/daheng:extract_sdk_test` |
 | Station configuration | `//station:station_config_test` |
 | Setup preview core | `//capture/preview:camera_settings_test`, `//capture/preview:latest_frame_sampler_test`, `//capture/preview:preview_image_test` |
-| Setup service | `//capture/service:camera_worker_test`, `//capture/service:preview_api_test` |
-| Setup web UI | `//web:typescript_typecheck_test`, `//web:component_test` |
+| Setup service | `//capture/service:camera_worker_test`, `//capture/service:preview_api_test`, `//capture/service:synthetic_swing_hil_operation_test`, `//capture/service:synthetic_swing_hil_timeline_test`, `//capture/service:synthetic_swing_station_workflow_test` |
+| Setup and review web UI | `//web:typescript_typecheck_test`, `//web:component_test`, `//web:review_component_test`, `//web:browser_test` |
 | Host tooling | `//tools:station_doctor_test`, `//tools:unattended_hil_test` |
 
 The end-to-end fixture synthesizes two cameras with unrelated device clocks
@@ -44,18 +45,32 @@ surface, and tests that the GenTL producer is available through Bazel runfiles.
 It does not open a camera. The repository adapter is documented in
 [`third_party/daheng/README.md`](../third_party/daheng/README.md).
 
-The setup-service tests use a fake camera adapter and synthetic Bayer frames.
-They cover overwrite-latest image publication, reset without sequence reuse,
+The service tests use a fake camera adapter and synthetic Bayer frames. They
+cover overwrite-latest image publication, reset without sequence reuse,
 compressed routine rendering, on-demand full-resolution rendering, monotonic
-JPEG/status sequences, measured frame delivery, bounded timeout and invalid-frame failure,
-post-stop command rejection, setting range/increment rejection,
-stop/configure/start serialization, preview invalidation, failed-update
-recovery, HTTP status and image headers, malformed requests, and static asset
-serving. The web component test covers dual-view rendering, paired polling and
-full-resolution URLs, stale-status clearing, backend error details,
-apply/revert interaction, disconnected/error states, runtime schema rejection,
-capacity-one slow-client backpressure, atomic pair publication, bounded object
-URL retention and cleanup, and an axe accessibility scan. No setup test opens
+JPEG/status sequences, measured frame delivery, bounded timeout and
+invalid-frame failure, post-stop command rejection, setting
+range/increment rejection, stop/configure/start serialization, preview
+invalidation, failed-update recovery, capture/session HTTP contracts, session
+catalog restart discovery, WebM byte ranges, request content/origin checks,
+security headers, malformed requests, and static asset serving.
+
+The synthetic-swing service tests cover the explicitly gated API, serialized
+lifecycle and recovery, typed Feather timing receipts, automatic shared
+brightness selection across two camera sweeps, white-impact qualification,
+manifest evidence, and one-shot ready/unarmed completion. Pre- and post-impact
+colors are human review cues and are not exact programmatic gates. No default
+test opens the cameras, microphone, or Feather.
+
+The component tests cover dual-view setup rendering, capacity-one paired
+polling, apply/revert behavior, disconnected/error states, one-shot capture
+transitions, the opt-in synthetic-swing button and progress/error states,
+per-role optical/audio evidence labels, synchronized review controls, runtime
+schema rejection, and axe accessibility scans. The checksum-pinned Chromium
+test decodes real all-intra VP8 fixtures, seeks, steps an exact source frame,
+exercises synchronized playback and drift correction, navigates between setup
+and review, runs the synthetic workflow against a deterministic fake API, and
+retains a fixed 1440x1000 screenshot. No default service or browser test opens
 physical hardware.
 
 AddressSanitizer and UndefinedBehaviorSanitizer variants run with:
@@ -78,6 +93,18 @@ bazel test //capture/daheng:dual_camera_qualify_hil_test \
 bazel test //capture/daheng:dual_camera_soak_hil_test \
   --test_output=streamed --nocache_test_results
 ```
+
+The shortest direct production-encoder check opens only the render node, not
+the cameras, microphone, or Feather:
+
+```bash
+bazel test //capture/encoding:vaapi_vp9_encoder_hil_test \
+  --test_output=streamed --nocache_test_results
+```
+
+It requires the Intel iHD driver and `render`-group access, encodes a small
+synthetic Bayer clip through direct VA-API, and parses the result to prove VP9,
+geometry, timestamps, frame count, and an all-keyframe stream.
 
 The camera tests require `SWING_CAPTURE_STATION_CONFIG` to name a valid local
 station file whose down-the-line and face-on roles have been physically
@@ -258,6 +285,132 @@ hamming 0 and decision margins 81.6/84.9. The audio check measured exactly 2
 kHz, 17.7 dB SNR, and no clipping. The complete artifact is preserved under
 `artifacts/hil/station_fixture/20260809T085952-supported-frame-final-pass/`.
 
+### Synthetic-swing application-flow HIL
+
+The shortest physical application check is a separate explicit target:
+
+```bash
+bazel test //capture/hil:application_flow_hil_test \
+  --test_output=streamed --nocache_test_results
+```
+
+It is tagged `manual`, `local`, and `exclusive`, uses the shared hardware lock,
+and has an internal 15-second workflow deadline. Stop the hosted preview service
+before running it. The test starts the production station backend with HIL
+controls explicitly enabled on an ephemeral loopback port, verifies both
+configured camera roles, and starts the one-at-a-time operation through
+`POST /api/v1/hil/synthetic-swing` with an empty JSON object. The ordinary
+application and UI keep this endpoint disabled unless the server is started
+with `--enable-hil-controls`.
+
+The operation first establishes an OFF baseline, raises the shared GPIO23
+fixture rail, and presents the white candidates
+`1,2,3,4,6,8,12,16` for 70 ms each on the external screw-terminal
+NeoPixel driven by GPIO21. Preview samples
+from both roles must locate the response and produce one common level that is
+visible without clipping in either camera. Once the station reports armed, the
+Feather runs 60 scaled RGB states at 20 ms each (1.2 seconds), a 20 ms white
+impact marker with a simultaneous 10 ms 2 kHz speaker tone, and 25 more 20 ms
+states (0.5 seconds). The existing adaptive microphone detector—not the manual
+capture endpoint—must accept exactly one tone trigger and drive post-roll,
+dual-view encoding, and atomic publication.
+
+Capture is one-shot: publication transitions to `ready` with capture disarmed
+and ALSA stopped, while retaining the source-ready flag, counters, adaptive
+audio evidence, and accepted trigger for inspection. The HIL validates that
+state, downloads the session, then explicitly posts `armed:false` and requires
+the application to normalize from `ready` back to `setup`. A following normal
+swing requires an explicit re-arm; another synthetic request performs its own
+one-shot arm.
+
+The HIL downloads the manifest and both production all-keyframe VP9/WebM assets back through
+the HTTP API, checks browser byte-range behavior, parses the WebM structure,
+and independently validates role/serial identity, frame continuity, device and
+impact-relative timestamps, impact-frame selection, frame rate, dimensions,
+frame/keyframe counts, and file sizes. Synthetic `hil_evidence` additionally
+must contain the selected brightness and exact sequence constants. For each
+camera role it qualifies the white-impact observation, requires its encoded
+frame index, and checks the signed offset from that optical frame to the
+audio-trigger estimate. The surrounding stepped colors are retained as a human
+playback and frame-stepping cue, not checked as exact programmatic states. The
+validator also requires the signed mapped-time correction and
+residual uncertainty learned from the calibration sweep, bounds the provisional
+audio offset, and checks that the two camera offsets agree. It fetches a
+full-resolution PNG from each
+still-running camera before disarming. Bazel undeclared outputs retain the
+incrementally written `application-flow-report.json`, the production
+`station-sessions/` directory, the independently fetched `http-session/`
+directory, and `diagnostic-down_the_line.png` and
+`diagnostic-face_on.png`.
+
+The 2026-08-09 impact-only run passed at the production camera profile of
+500 us and 24 dB. The shared selector chose brightness 1. Down-the-line had
+four stable, matching white frames with 5.08% maximum saturation and 1.71%
+maximum bloom; face-on had three with 3.91% saturation and 1.79% bloom. Both
+matching fractions were 1.0. The clips retained 433 and 434 contiguous frames
+at approximately 226.87 fps, and the complete operation took 14.75 seconds.
+Pinned Chromium subsequently passed against the downloaded physical session.
+Evidence is preserved under
+`artifacts/hil/application-flow/20260809T182443Z-impact-only-pass/`.
+
+A following profiling run retained 433 contiguous frames from each camera at
+approximately 226.87 fps and passed the same physical application HIL. Audio
+confirmation to the pre-manifest profile snapshot was 9.517 seconds. Its major
+stages were 502.4 ms of required post-roll, 226.7 ms stopping ALSA, 7.6 ms of
+prepublication optical analysis, and 8.778 seconds of sequential dual-view
+media encoding. Down-the-line encoding took 4.371 seconds and face-on took
+4.406 seconds. Across both views, VP8 consumed 5.159 seconds, fitted Bayer
+demosaic 3.001 seconds, and RGB-to-I420 conversion 564 ms; muxing,
+finalization, and verification were comparatively negligible.
+
+Pinned Chromium then decoded the two physical WebMs and presented both impact
+frames 127.9 ms after receiving the manifest response, or 140.2 ms after its
+manifest request began. The artifact-only replay cannot reconstruct the live
+server response timestamp, so it deliberately leaves the combined
+audio-confirmation-to-browser bound unavailable; the deployed server supplies
+that timestamp on live responses. The report, physical media and images,
+browser screenshot, and structured browser timing are preserved under
+`artifacts/hil/application-flow/20260809T200712Z-pipeline-profile-pass/`.
+
+The following production revision replaced sequential software VP8 with two
+concurrent direct VA-API VP9 encodes. A fresh physical HIL retained 433
+contiguous frames per camera at approximately 226.87 fps and passed the media,
+range, optical, audio, and session checks. Hardware media encoding took 3.005
+seconds total, down from 8.778 seconds for the preceding software baseline.
+The profile snapshot was 3.735 seconds after audio confirmation: 512.2 ms was
+the required post-roll wait, 216.3 ms was ALSA shutdown, 8.8 ms was optical
+analysis, and image conversion plus media publication dominated the remainder.
+For the two concurrent views, fitted Bayer demosaic took 1.528/1.535 seconds,
+RGB-to-NV12 conversion 314/309 ms, and VA-API codec submission/readback
+1.099/1.117 seconds. The complete physical HIL took 10.47 seconds.
+
+Pinned Chromium replayed the exact hardware-produced VP9 files and passed
+decode, seeking, exact stepping, synchronized playback, and evidence rendering.
+The report, media, full camera images, browser screenshot, and structured
+profiles are preserved under
+`artifacts/hil/application-flow/20260809T211742Z-vaapi-vp9-pass/`.
+
+After a physical run, the pinned-Chromium bridge can replay the exact preserved
+manifest and WebMs without touching hardware:
+
+```bash
+bazel test //web:browser_test \
+  --test_output=streamed --nocache_test_results \
+  --test_env=SWING_CAPTURE_REQUIRE_HIL_ARTIFACT=1 \
+  --test_env=SWING_CAPTURE_HIL_SESSION_DIR=/absolute/path/to/http-session
+```
+
+This is an artifact-based browser test: it serves the production bundle and a
+read-only facade over the supplied directory. It does not launch or validate a
+live production station server. The browser must decode both clips, seek and
+step exactly, and retain `hil-review-session.png` at a fixed viewport.
+
+The per-camera audio offset remains provisional: the current `arecord` model
+contains ALSA, pipe, scheduling, amplifier, speaker, and acoustic latency, and
+the cameras add uncalibrated exposure/readout/transport delay. It measures the
+relationship between the two observed markers but is not calibrated true
+club/ball impact timing.
+
 ### Station doctor
 
 `//tools:station_doctor` is a read-only host/configuration workflow. It
@@ -323,10 +476,12 @@ Every HIL artifact should contain:
 - runner exit state, timestamps, log path, and timeout state.
 
 The current audio artifact includes format, selected device/channel, amplitude,
-clipping, impact counts, and its provisional timestamp model. Later audio
-evidence should add measured device/buffer latency, noise-floor distributions,
-candidate impacts, and detected strike timestamps. Future UI artifacts should
-include browser screenshots at fixed viewport sizes and accessibility results.
+clipping, impact counts, adaptive noise/threshold values, and its provisional
+timestamp model. Later audio evidence should add measured device/buffer
+latency, noise-floor distributions, candidate impacts, and calibrated strike
+timestamps. UI evidence now includes fixed-viewport browser screenshots and
+automated accessibility results; it is not yet a golden-image visual regression
+comparison.
 
 ## Human-only acceptance points
 

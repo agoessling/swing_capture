@@ -6,7 +6,7 @@ module(
 bazel_dep(name = "bazel_devtools", version = "0.1.0")
 git_override(
     module_name = "bazel_devtools",
-    commit = "5088418de97e369d2f5ed46d00f58e5021906608",
+    commit = "700a7768b0ca76a5ca11dabc9202eeeccbc31ea9",
     remote = "https://github.com/agoessling/bazel_devtools.git",
 )
 
@@ -18,11 +18,26 @@ bazel_dep(name = "aspect_rules_esbuild", version = "0.27.0")
 bazel_dep(name = "bazel_lib", version = "3.7.0")
 bazel_dep(name = "cpp-httplib", version = "0.46.0")
 bazel_dep(name = "libjpeg_turbo", version = "3.1.3.bcr.6")
+bazel_dep(name = "libvpx", version = "1.16.0.bcr.beta.1")
+bazel_dep(name = "libwebm", version = "1.0.0.32")
 bazel_dep(name = "nlohmann_json", version = "3.12.0.bcr.1")
 bazel_dep(name = "rules_cc", version = "0.2.22")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")
+bazel_dep(name = "rules_playwright", version = "0.5.3")
 bazel_dep(name = "rules_python", version = "2.2.0")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.6")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "libva_headers",
+    build_file = "//third_party/libva:libva_headers.BUILD.bazel",
+    integrity = "sha256-sQrOsw6T3fE7IDDrcAeVdLpDe+mzt2BlyvKKcsB+I+c=",
+    patch_strip = 1,
+    patches = ["//third_party/libva:libva_version.patch"],
+    strip_prefix = "libva-2.23.0",
+    urls = ["https://github.com/intel/libva/archive/refs/tags/2.23.0.tar.gz"],
+)
 
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "22.22.0")
@@ -42,6 +57,16 @@ npm.npm_translate_lock(
     pnpm_lock = "//web:pnpm-lock.yaml",
 )
 use_repo(npm, "npm")
+
+playwright = use_extension("@rules_playwright//playwright:extensions.bzl", "playwright")
+playwright.repo(
+    name = "playwright",
+    browsers_json = "//web:playwright-browsers.json",
+    integrity_path_map = {
+        "builds/chromium/1169/chromium-headless-shell-linux.zip": "sha256-kuxxKkmkUet0toKa5Lx+4vNkINKEnCRdu7NxCLQd6SA=",
+    },
+)
+use_repo(playwright, "playwright")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.defaults(python_version = "3.11.14")

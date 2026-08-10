@@ -1,0 +1,4 @@
+exports_files([
+    "libva_headers.BUILD.bazel",
+    "libva_version.patch",
+])

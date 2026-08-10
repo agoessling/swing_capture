@@ -30,8 +30,9 @@
 #define PICO_DEFAULT_SPI_TX_PIN 15
 #define PICO_DEFAULT_SPI_RX_PIN 8
 
-// Prop-Maker peripherals. External power remains off until firmware drives
-// GPIO23 high.
+// Prop-Maker peripherals. GPIO21 is the screw-terminal NeoPixel data signal.
+// GPIO23 switches the shared external NeoPixel, speaker-amplifier, and servo
+// power rail, which remains off until firmware explicitly drives it high.
 #define PROP_MAKER_BOOT_BUTTON_PIN 7
 #define PROP_MAKER_I2S_DATA_PIN 16
 #define PROP_MAKER_I2S_BIT_CLOCK_PIN 17
@@ -39,6 +40,7 @@
 #define PROP_MAKER_EXTERNAL_BUTTON_PIN 19
 #define PROP_MAKER_SERVO_PIN 20
 #define PROP_MAKER_EXTERNAL_NEOPIXEL_PIN 21
+#define PROP_MAKER_FIXTURE_NEOPIXEL_COLOR_ORDER "rgb"
 #define PROP_MAKER_ACCELEROMETER_INTERRUPT_PIN 22
 #define PROP_MAKER_EXTERNAL_POWER_PIN 23
 

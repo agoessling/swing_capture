@@ -260,6 +260,31 @@ void SnapshotIsSafeDuringSingleProducerCapture() {
   producer.join();
 }
 
+void ResetReusesPreallocatedStorageAsAnEmptyRing() {
+  PooledRawFrameRing ring({
+      .active_frame_capacity = 3,
+      .reserve_frame_blocks = 0,
+      .maximum_payload_bytes = 4,
+  });
+  const std::size_t allocated_bytes = ring.allocated_bytes();
+  Push(ring, 1);
+  Push(ring, 2);
+  Push(ring, 3);
+  assert(ring.size() == 3);
+
+  ring.Reset();
+  assert(ring.size() == 0);
+  assert(ring.Freeze().empty());
+  assert(ring.allocated_bytes() == allocated_bytes);
+
+  Push(ring, 10);
+  Push(ring, 11);
+  const auto reused = ring.Freeze();
+  assert(reused.size() == 2);
+  assert(reused.at(0).metadata().frame_id == 10);
+  assert(reused.at(1).metadata().frame_id == 11);
+}
+
 }  // namespace
 
 int main() {
@@ -272,5 +297,6 @@ int main() {
   HandleKeepsPoolStorageAlive();
   RejectsInvalidAndOverflowingDimensions();
   SnapshotIsSafeDuringSingleProducerCapture();
+  ResetReusesPreallocatedStorageAsAnEmptyRing();
   return 0;
 }

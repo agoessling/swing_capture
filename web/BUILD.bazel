@@ -3,6 +3,7 @@ load("@aspect_rules_js//js:defs.bzl", "js_test")
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//web:@playwright/test/package_json.bzl", playwright_bin = "bin")
 
 npm_link_all_packages(name = "node_modules")
 
@@ -20,9 +21,14 @@ ts_config(
 APP_SRCS = [
     "src/api.ts",
     "src/app.tsx",
+    "src/application.tsx",
     "src/assets.d.ts",
     "src/fake_api.ts",
+    "src/fake_review_api.ts",
     "src/paired_preview.ts",
+    "src/review_api.ts",
+    "src/review_app.tsx",
+    "src/review_player.tsx",
 ]
 
 NPM_APP_DEPS = [
@@ -35,6 +41,7 @@ NPM_APP_DEPS = [
 
 NPM_TEST_DEPS = NPM_APP_DEPS + [
     ":node_modules/@testing-library/react",
+    ":node_modules/@playwright/test",
     ":node_modules/@types/jsdom",
     ":node_modules/axe-core",
     ":node_modules/jsdom",
@@ -46,6 +53,9 @@ ts_project(
         "src/app.test.tsx",
         "src/demo.tsx",
         "src/main.tsx",
+        "src/review_app.test.tsx",
+        "src/review.e2e.spec.ts",
+        "playwright.config.ts",
     ],
     deps = NPM_TEST_DEPS,
     no_emit = True,
@@ -114,13 +124,65 @@ js_test(
     entry_point = ":component_test.js",
 )
 
+esbuild(
+    name = "review_component_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/review_app.test.tsx"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/review_app.test.tsx",
+    external = [
+        "@testing-library/react",
+        "axe-core",
+        "jsdom",
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "review_component_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "review_component_test",
+    size = "small",
+    data = NPM_TEST_DEPS,
+    entry_point = ":review_component_test.js",
+)
+
 copy_to_directory(
     name = "static_app",
     srcs = [
         ":app_bundle",
         "index.html",
-    ] + glob(["fixtures/**"]),
+    ],
     visibility = ["//visibility:public"],
+)
+
+playwright_bin.playwright_test(
+    name = "browser_test",
+    args = [
+        "test",
+        "--config",
+        "web/playwright.config.ts",
+    ],
+    data = [
+        ":fixture_demo",
+        ":static_app",
+        "playwright.config.ts",
+        "src/review.e2e.spec.ts",
+        ":node_modules/@playwright/test",
+        "@playwright//:chromium-headless-shell",
+    ],
+    env = {
+        "PLAYWRIGHT_BROWSERS_PATH": "$(rootpath @playwright//:chromium-headless-shell)/../",
+        "SWING_CAPTURE_FIXTURE_APP": "$(rootpath :fixture_demo)",
+        "SWING_CAPTURE_STATIC_APP": "$(rootpath :static_app)",
+    },
+    size = "small",
 )
 
 copy_to_directory(

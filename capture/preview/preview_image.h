@@ -2,8 +2,10 @@
 #define SWING_CAPTURE_CAPTURE_PREVIEW_PREVIEW_IMAGE_H_
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "capture/core/camera_source.h"
@@ -81,6 +83,13 @@ class PreviewFrameProcessor {
 // Returns the largest non-upscaled dimensions that fit within the requested
 // bounds while preserving the source aspect ratio to the nearest whole pixel.
 [[nodiscard]] PreviewDimensions FitWithin(PreviewDimensions source, PreviewDimensions maximum);
+
+// Reduces BayerRG8 before demosaic while preserving each sample's Bayer color
+// parity. This is the efficient software path for fitted preview and clip
+// media; it validates the complete source payload and never upscales.
+[[nodiscard]] image::Rgb8Image DemosaicBayerRg8ToFit(std::span<const std::byte> bayer,
+                                                     PreviewDimensions source,
+                                                     PreviewDimensions maximum);
 
 // Pure RGB resize used after demosaic. Bilinear sampling makes this suitable
 // for setup previews while the full-resolution Bayer input remains available

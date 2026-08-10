@@ -1,7 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./app.js";
+import { Application, viewFromHash } from "./application.js";
 import { HttpStationApi } from "./api.js";
+import { HttpReviewApi } from "./review_api.js";
 import "./styles.css";
 
 const root = document.getElementById("root");
@@ -11,6 +12,10 @@ if (root === null) {
 
 createRoot(root).render(
   <StrictMode>
-    <App api={new HttpStationApi()} />
+    <Application
+      initialView={viewFromHash(window.location.hash)}
+      reviewApi={new HttpReviewApi()}
+      stationApi={new HttpStationApi()}
+    />
   </StrictMode>,
 );

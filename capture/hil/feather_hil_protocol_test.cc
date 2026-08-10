@@ -8,8 +8,10 @@
 
 namespace {
 
+using swing_capture::hil::BuildFeatherCalibrationCommand;
 using swing_capture::hil::BuildFeatherLedCommand;
 using swing_capture::hil::BuildFeatherQueryCommand;
+using swing_capture::hil::BuildFeatherSwingCommand;
 using swing_capture::hil::BuildFeatherToneCommand;
 using swing_capture::hil::FeatherResponseKind;
 using swing_capture::hil::ParseFeatherResponse;
@@ -26,21 +28,23 @@ bool Rejects(const std::function<void()> &operation) {
 
 void TestParsesExactFirmwareTranscripts() {
   constexpr std::string_view kQuery =
-      "SC-HIL/1 101 OK QUERY firmware=prop-maker-hil-1 protocol=1 "
-      "capabilities=query,led,tone lead_max_us=2000000 led_duration_min_us=100 "
+      "SC-HIL/1 101 OK QUERY firmware=prop-maker-hil-5 protocol=1 "
+      "capabilities=query,led,tone,calibrate,swing lead_max_us=2000000 led_duration_min_us=100 "
       "led_duration_max_us=1000000 tone_lead_min_us=20000 tone_duration_min_us=1000 "
       "tone_duration_max_us=250000 tone_frequency_min_hz=100 "
       "tone_frequency_max_hz=10000 tone_level_min_permille=1 "
-      "tone_level_max_permille=125 device_us=900000\r\n";
+      "tone_level_max_permille=125 fixture_neopixel_gpio=21 "
+      "fixture_neopixel_color_order=rgb device_us=900000\r\n";
   const auto info = ParseFeatherResponse(kQuery);
   assert(info.kind == FeatherResponseKind::kOk);
   assert(info.request_id == 101);
-  assert(info.fields.at("firmware") == "prop-maker-hil-1");
-  assert(info.fields.at("capabilities") == "query,led,tone");
+  assert(info.fields.at("firmware") == "prop-maker-hil-5");
+  assert(info.fields.at("capabilities") == "query,led,tone,calibrate,swing");
+  assert(info.fields.at("fixture_neopixel_color_order") == "rgb");
   assert(info.wire_line == kQuery);
 
   const auto boot =
-      ParseFeatherResponse("SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-1 device_us=42\n");
+      ParseFeatherResponse("SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-5 device_us=42\n");
   assert(boot.kind == FeatherResponseKind::kEvent);
   assert(boot.subject == "BOOT");
   assert(boot.state.empty());
@@ -71,6 +75,17 @@ void TestParsesExactFirmwareTranscripts() {
       "requested_us=20000 sample_rate_hz=32000 sample_count=640\n");
   assert(tone_done.state == "DONE");
 
+  const auto calibration_step = ParseFeatherResponse(
+      "SC-HIL/1 104 EVENT CALIBRATE STEP index=0 brightness=1 scheduled_us=100 "
+      "device_us=102 lateness_us=2\n");
+  assert(calibration_step.subject == "CALIBRATE");
+  assert(calibration_step.state == "STEP");
+  const auto swing_phase = ParseFeatherResponse(
+      "SC-HIL/1 105 EVENT SWING PHASE phase=pre scheduled_us=100 device_us=101 "
+      "lateness_us=1 max_step_lateness_us=1 step_us=20000 step_count=60\n");
+  assert(swing_phase.subject == "SWING");
+  assert(swing_phase.state == "PHASE");
+
   const auto error = ParseFeatherResponse("SC-HIL/1 104 ERR out_of_range device_us=2200000\n");
   assert(error.kind == FeatherResponseKind::kError);
   assert(error.subject == "out_of_range");
@@ -84,6 +99,10 @@ void TestBuildsOnlyFirmwareAcceptedCommands() {
   assert(BuildFeatherLedCommand(2, 100000, 44053) == "SC-HIL/1 2 LED 100000 44053\n");
   assert(BuildFeatherToneCommand(3, 100000, 20000, 2000, 125) ==
          "SC-HIL/1 3 TONE 100000 20000 2000 125\n");
+  assert(BuildFeatherCalibrationCommand(4) == "SC-HIL/1 4 CALIBRATE\n");
+  assert(BuildFeatherSwingCommand(5, 1) == "SC-HIL/1 5 SWING 1\n");
+  assert(BuildFeatherSwingCommand(5, 12) == "SC-HIL/1 5 SWING 12\n");
+  assert(BuildFeatherSwingCommand(5, 16) == "SC-HIL/1 5 SWING 16\n");
 
   assert(Rejects([] { static_cast<void>(BuildFeatherQueryCommand(0)); }));
   assert(Rejects([] { static_cast<void>(BuildFeatherLedCommand(1, 2'000'001, 44'053)); }));
@@ -102,6 +121,8 @@ void TestBuildsOnlyFirmwareAcceptedCommands() {
   assert(Rejects([] { static_cast<void>(BuildFeatherToneCommand(1, 20'000, 20'000, 2'000, 0)); }));
   assert(
       Rejects([] { static_cast<void>(BuildFeatherToneCommand(1, 20'000, 20'000, 2'000, 126)); }));
+  assert(Rejects([] { static_cast<void>(BuildFeatherCalibrationCommand(0)); }));
+  assert(Rejects([] { static_cast<void>(BuildFeatherSwingCommand(1, 24)); }));
 }
 
 void TestRejectsMalformedResponses() {
@@ -118,7 +139,7 @@ void TestRejectsMalformedResponses() {
            "SC-HIL/1 0 OK QUERY protocol=1",
            "SC-HIL/1 0 ACK LED accepted_us=1",
            "SC-HIL/1 0 EVENT LED START device_us=1",
-           "SC-HIL/1 1 EVENT BOOT firmware=prop-maker-hil-1 device_us=1",
+           "SC-HIL/1 1 EVENT BOOT firmware=prop-maker-hil-5 device_us=1",
        }) {
     assert(Rejects([response] { static_cast<void>(ParseFeatherResponse(response)); }));
   }

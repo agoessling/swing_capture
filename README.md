@@ -8,20 +8,45 @@ Design and validation details live in
 For provisioning a fresh Linux capture host, follow
 [`docs/headless_setup.md`](docs/headless_setup.md).
 
-## Current milestone
+## Current application
 
-The current milestone proves simultaneous full-resolution capture from two
-Daheng `MER2-160-227U3C` cameras through the Galaxy Linux SDK. The capture
-path now includes independently fitted device clocks, preallocated
-freeze/continue frame rings, audio impact detection, strike-relative clip
-planning, persistent machine-local device/role selection, and machine-readable
-HIL evidence. A synthetic end-to-end test drives those pieces from an audio
-impact through a retained dual-view clip while capture continues.
+The first headless application continuously acquires full-resolution frames
+from two Daheng `MER2-160-227U3C` cameras through the Galaxy Linux SDK. Its
+React/TypeScript station UI combines camera setup with one-shot swing capture
+and dual-view review. Arming starts a continuous ALSA monitor that applies the
+adaptive impact detector through trigger acceptance and post-roll. An accepted
+audio impact freezes one generation of each preallocated camera buffer and
+rotates acquisition onto the other generation, so both cameras keep running
+while the completed clip is encoded.
 
-A headless setup service now streams responsive, bounded-rate compressed
-640x480 previews from the two full-speed acquisition loops, renders an explicit
-full-resolution focus view on demand, and serves a React/TypeScript camera setup
-UI. Clip encoding and the review application remain future milestones.
+The production publisher demosaics and fits Bayer frames to at most 640x480,
+converts them to NV12, and encodes both views concurrently with the Intel GPU's
+VA-API VP9 low-power encoder. Every encoded frame is a keyframe so browser
+seeking and exact source-frame stepping remain deterministic. The WebMs are
+video-only: microphone samples are used for trigger detection and are not
+encoded. A deterministic software VP8 backend remains for hermetic fixtures
+and encoder-independent tests. The publisher writes exact source-frame timing
+metadata and both media files into a private directory, then atomically
+publishes the complete session. The persistent on-disk catalog is cached in
+memory at startup and refreshed after publication; the HTTP media routes
+support byte ranges for browser seeking.
+
+Capture is deliberately one-shot: ALSA monitoring stops after the rings rotate;
+after publication the application enters `ready`, releases the four raw rings,
+and requires an explicit re-arm for the next swing. The audio-derived trigger
+time is an uncalibrated estimate; ALSA/device latency and the physical sound
+path are not yet characterized well enough to call it the exact ball-impact
+time.
+
+An explicitly enabled synthetic-swing HIL mode exercises that same production
+capture path without asking for a real swing. It automatically evaluates the
+external screw-terminal fixture NeoPixel brightness candidates
+`1,2,3,4,6,8,12,16` in both camera previews, arms one capture, and runs
+the Feather's deterministic optical and audio sequence. The resulting session
+keeps the per-camera optical white-impact check and the signed offset from that
+frame to the audio-trigger estimate as durable evidence. The surrounding
+colors are human playback cues rather than programmatic acceptance gates. The
+offset is measured evidence, not calibrated true-impact timing.
 
 ## Build
 
@@ -34,8 +59,10 @@ bazel test //...
 
 This runs the hardware-independent C++, Python, and TypeScript/UI suite. It
 covers the station doctor, SDK extractor, unattended HIL runner, synthetic
-capture pipeline, setup-preview service, station configuration, HIL protocol
-and analysis components, and Daheng runtime packaging. Bazel
+capture pipeline, setup-preview service, one-shot capture controller, session
+publisher and catalog, software fixture encoder, React review application,
+Playwright browser workflow, station configuration, HIL protocol and analysis
+components, and Daheng runtime packaging. Bazel
 downloads checksum-pinned CPython 3.11.14 for every Python target, so those
 targets do not use the host Python runtime. The Daheng repository bootstrap
 does require a broadly compatible host `python3` to unpack the vendor's
@@ -71,6 +98,13 @@ the repository does not install the Galaxy SDK or its kernel modules
 system-wide. If udev does not update an already connected device, reconnect
 the camera once.
 
+Production clip encoding also requires the Intel iHD VA-API runtime, access to
+`/dev/dri/renderD128` through the `render` group, and VP9 low-power encode
+support. Bazel pins the libva headers used to compile the direct API boundary;
+the render node, `libva.so.2`, `libva-drm.so.2`, and GPU driver are host runtime
+dependencies. The exact provisioning and `vainfo` check are in
+[`docs/headless_setup.md`](docs/headless_setup.md).
+
 The hardware probe first reports whether Linux can see and open each Daheng USB
 device. It then prints camera identity, negotiated capture settings, frame
 counts, payload failures, frame-ID gaps, device timestamp span, host elapsed
@@ -98,7 +132,7 @@ node, and the stable Feather serial link. See
 [`docs/headless_setup.md`](docs/headless_setup.md) for the file format and setup
 sequence.
 
-## Headless camera setup UI
+## Headless station UI
 
 Run the camera setup service from the repository root:
 
@@ -113,18 +147,41 @@ camera's full configured rate, and renders up to about 30 compressed 640x480
 routine JPEGs per second on a separate latest-only renderer thread. A
 full-resolution focus image is encoded only when its link is requested. Browser
 polling fetches the two routine images as one capacity-one pair, atomically
-swaps both views after both downloads and browser decodes complete, and skips superseded pairs
-without cancelling downloads or forming a queue. It does not control or block
-the capture cadence. The status API includes source/render age, encoded size,
-and per-stage quality/Bayer/resize/encode timings for diagnosing stalls.
+swaps both views after both downloads and browser decodes complete, and skips
+superseded pairs without cancelling downloads or forming a queue. It does not
+control or block the capture cadence. The status API includes source/render
+age, encoded size, and per-stage quality/Bayer/resize/encode timings for
+diagnosing stalls. The physical application-flow HIL also requests a
+full-resolution preview from each still-running camera after clip publication,
+qualifying the setup-preview copy path as part of the production station
+workflow.
 
 Exposure and gain changes are validated against each camera's read-back range,
 then performed on that camera's owner thread as a stop/configure/start cycle.
-They are session-local in this milestone. Stop the preview service before
-running a direct camera HIL target. The service and unattended HIL runner share
-`artifacts/hil/hardware.lock`, which prevents those two entry points from
-opening the cameras concurrently. Installed services can set
-`SWING_CAPTURE_HARDWARE_LOCK` to a provisioned runtime path; the unattended
+They are session-local. The same UI can arm the microphone-triggered capture,
+show capture state, discover sessions stored under `artifacts/sessions/` by
+default, and review a completed session. Pass `--sessions-root` to choose a
+different persistent catalog root. Arming allocates two 448-frame,
+full-resolution raw rings per camera: approximately 2.596 GiB of payload across
+the four rings, before SDK, preview, encoder, and other process memory.
+
+Synthetic-swing HIL controls are disabled and absent from the UI by default.
+Start the service with the explicit `--enable-hil-controls` option to expose
+the button and `POST /api/v1/hil/synthetic-swing` endpoint:
+
+```bash
+bazel run //capture/service:preview_server -- --enable-hil-controls
+```
+
+One click owns calibration, arming, stimulus, post-roll, encoding, and session
+publication. Capture finishes `ready` and unarmed; explicitly re-arm before a
+normal next swing, or start another synthetic run to let that operation perform
+its own one-shot arm.
+
+Stop the service before running a direct camera HIL target. The service and
+unattended HIL runner share `artifacts/hil/hardware.lock`, which prevents those
+two entry points from opening the cameras concurrently. Installed services can
+set `SWING_CAPTURE_HARDWARE_LOCK` to a provisioned runtime path; the unattended
 runner must receive the same value.
 
 ## Prop-Maker firmware
@@ -146,11 +203,15 @@ USB serial. The initial factory image may require entering BOOTSEL manually:
 hold **BOOT**, tap **RESET**, release **BOOT**, and rerun the flash target.
 Firmware built by this repository enables picotool's USB reset interface, so
 later flashes can normally reboot and program the board without button presses.
-The separate HIL image implements the negotiated `SC-HIL/1` LED/tone protocol;
+The separate HIL image implements the negotiated `SC-HIL/1` fixture protocol;
 it is programmed only through the explicit
-`//embedded/prop_maker:flash_hil` target. A tone temporarily enables GPIO23,
-which powers the speaker amplifier and the external NeoPixel and servo rails
-together, so review the exact flash disclosure in the embedded guide first.
+`//embedded/prop_maker:flash_hil` target. Its synthetic-swing mode drives the
+external screw-terminal NeoPixel on GPIO21. Calibration raises the shared
+GPIO23 power rail and keeps it prepared through the immediately following
+swing; that rail powers the speaker amplifier, external NeoPixel, and servo
+terminal together. Every completion, failure, or preparation timeout turns the
+fixture pixel off, quiesces I2S, and lowers the rail. Review the exact flash
+disclosure in the embedded guide first.
 See [`docs/embedded.md`](docs/embedded.md) for the complete workflow and board
 configuration evidence.
 
@@ -268,6 +329,49 @@ of the Feather LED package. Camera receipt times are also compared with the
 Feather schedule, but that comparison is an explicit non-gating diagnostic:
 fixed camera/readout/USB delivery latency has not been calibrated, so absolute
 camera-to-Feather edge association is not claimed.
+
+The shortest complete application check exercises the explicitly enabled
+synthetic-swing operation through the production station backend, real
+microphone trigger, one-shot ring rotation, software dual-view encoding,
+atomic publication, catalog and HTTP byte-range serving, and the
+post-publication setup-preview path:
+
+```bash
+bazel test //capture/hil:application_flow_hil_test \
+  --test_output=streamed --nocache_test_results
+```
+
+It has an internal 15-second workflow deadline. Through
+`POST /api/v1/hil/synthetic-swing`, it first sweeps eight shared brightness
+candidates for both views, then runs 1.2 seconds of stepped pre-impact color, a
+20 ms white impact marker with a simultaneous 10 ms 2 kHz tone, and 0.5 seconds
+of stepped follow-through color. The application must finish `ready` and
+unarmed after exactly one accepted audio trigger. Automated acceptance checks
+the white marker in both cameras, the audio trigger, retained-frame continuity,
+encoded media, HTTP byte ranges, and the camera-to-Feather timestamp correction.
+The surrounding colors are deliberately a human playback cue for watching and
+frame stepping; their exact hues are not machine-qualified. The report,
+published and independently downloaded session trees, and one full-resolution
+diagnostic image per camera are preserved. The audio offset is useful measured
+optical/audio evidence, but ALSA, camera, amplifier, and acoustic latency are
+not calibrated, so it is not a true-impact timing claim.
+
+Published sessions also retain a versioned pipeline profile from audio
+confirmation through capture freeze, analysis, per-view image conversion and
+codec/WebM encoding, and the last pre-manifest snapshot. The review page combines
+that backend profile with manifest-fetch and decoded-impact-frame presentation
+timing, making post-impact latency regressions visible in both physical HIL
+reports and normal recorded sessions.
+
+The 2026-08-09 VA-API production run passed at the normal 500 us exposure and
+24 dB gain. Both VP9 clips retained 433 contiguous all-keyframe frames at
+approximately 226.87 fps. Concurrent hardware media encoding took 3.005
+seconds, and the profile snapshot was captured 3.735 seconds after audio
+confirmation. Pinned Chromium then passed dual decode, exact stepping,
+synchronized playback, and evidence rendering against the physical files. The
+complete HIL operation took 10.47 seconds; its report, media, camera images,
+and browser evidence are retained under
+`artifacts/hil/application-flow/20260809T211742Z-vaapi-vp9-pass/`.
 
 For unattended operation,
 `bazel run //tools:run_unattended_hil -- smoke|qualify|soak` invokes the

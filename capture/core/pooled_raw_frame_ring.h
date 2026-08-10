@@ -94,6 +94,11 @@ class PooledRawFrameRing final {
   [[nodiscard]] PooledRawFramePushResult TryPush(const FrameView &frame) noexcept;
   [[nodiscard]] PooledRawFrameSnapshot Freeze() const;
 
+  // Clears every active slot without releasing the preallocated storage.
+  // The caller must first retire the ring from its producer and release every
+  // snapshot. The empty ring can then be reused as a standby generation.
+  void Reset();
+
   [[nodiscard]] std::size_t size() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
   [[nodiscard]] std::size_t reserve_block_count() const noexcept;

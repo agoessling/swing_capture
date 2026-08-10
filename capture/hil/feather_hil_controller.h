@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "capture/hil/feather_hil_serial.h"
 
@@ -29,6 +30,23 @@ struct FeatherDeviceInfo {
   std::uint32_t tone_maximum_frequency_hz = 0;
   std::uint32_t tone_minimum_level_permille = 0;
   std::uint32_t tone_maximum_level_permille = 0;
+  std::uint32_t swing_start_lead_microseconds = 0;
+  std::uint32_t swing_step_microseconds = 0;
+  std::uint32_t swing_pre_steps = 0;
+  std::uint32_t swing_white_microseconds = 0;
+  std::uint32_t swing_post_steps = 0;
+  std::uint32_t swing_tone_duration_microseconds = 0;
+  std::uint32_t swing_tone_frequency_hz = 0;
+  std::uint32_t swing_tone_level_permille = 0;
+  std::uint32_t swing_maximum_lateness_microseconds = 0;
+  std::uint32_t swing_maximum_impact_delta_microseconds = 0;
+  std::uint32_t swing_color_reference_brightness = 0;
+  std::uint32_t calibration_step_microseconds = 0;
+  std::vector<std::uint32_t> calibration_candidates;
+  std::uint32_t fixture_neopixel_gpio = 0;
+  std::string fixture_neopixel_color_order;
+  std::uint32_t shared_power_gpio = 0;
+  std::uint64_t prepare_timeout_microseconds = 0;
   std::uint64_t device_microseconds = 0;
   std::chrono::steady_clock::time_point host_query_write_started;
   std::chrono::steady_clock::time_point host_query_sent;
@@ -62,12 +80,114 @@ struct FeatherStimulusReceipt {
   FeatherResponse done;
 };
 
+struct FeatherCalibrationStep {
+  std::uint32_t index = 0;
+  std::uint32_t brightness = 0;
+  std::uint64_t scheduled_device_microseconds = 0;
+  std::uint64_t device_microseconds = 0;
+  std::uint64_t lateness_microseconds = 0;
+  std::chrono::steady_clock::time_point host_received;
+  FeatherResponse response;
+};
+
+struct FeatherCalibrationReceipt {
+  std::uint32_t request_id = 0;
+  std::uint64_t accepted_device_microseconds = 0;
+  std::uint64_t start_scheduled_device_microseconds = 0;
+  std::uint64_t start_device_microseconds = 0;
+  std::uint64_t end_device_microseconds = 0;
+  std::uint64_t elapsed_device_microseconds = 0;
+  std::uint64_t maximum_step_lateness_microseconds = 0;
+  std::uint32_t start_lead_microseconds = 0;
+  std::uint32_t step_microseconds = 0;
+  std::uint32_t requested_duration_microseconds = 0;
+  std::uint32_t fixture_neopixel_gpio = 0;
+  std::uint32_t shared_power_gpio = 0;
+  std::uint64_t prepare_timeout_microseconds = 0;
+  std::uint64_t power_on_device_microseconds = 0;
+  std::uint64_t prepared_until_device_microseconds = 0;
+  bool pixel_off = false;
+  bool i2s_inactive = false;
+  bool rail_powered = false;
+  bool prepared = false;
+  std::vector<std::uint32_t> candidates;
+  std::vector<FeatherCalibrationStep> steps;
+  std::chrono::steady_clock::time_point host_command_write_started;
+  std::chrono::steady_clock::time_point host_command_sent;
+  std::chrono::steady_clock::time_point host_acknowledgement_received;
+  std::chrono::steady_clock::time_point host_done_received;
+  FeatherResponse acknowledgement;
+  FeatherResponse done;
+};
+
+struct FeatherSwingPhase {
+  std::string phase;
+  std::uint64_t scheduled_device_microseconds = 0;
+  std::uint64_t device_microseconds = 0;
+  std::uint64_t lateness_microseconds = 0;
+  std::uint64_t maximum_step_lateness_microseconds = 0;
+  std::uint32_t step_microseconds = 0;
+  std::uint32_t step_count = 0;
+  std::chrono::steady_clock::time_point host_received;
+  FeatherResponse response;
+};
+
+struct FeatherSwingImpact {
+  std::uint64_t scheduled_device_microseconds = 0;
+  std::uint64_t device_microseconds = 0;
+  std::uint64_t lateness_microseconds = 0;
+  std::uint64_t white_command_device_microseconds = 0;
+  std::uint64_t tone_command_device_microseconds = 0;
+  std::uint64_t command_delta_microseconds = 0;
+  std::uint64_t white_end_device_microseconds = 0;
+  std::uint64_t tone_end_device_microseconds = 0;
+  std::uint32_t brightness = 0;
+  std::chrono::steady_clock::time_point host_received;
+  FeatherResponse response;
+};
+
+struct FeatherSwingReceipt {
+  std::uint32_t request_id = 0;
+  std::uint32_t brightness = 0;
+  std::uint64_t accepted_device_microseconds = 0;
+  std::uint64_t sequence_start_scheduled_device_microseconds = 0;
+  std::uint64_t impact_scheduled_device_microseconds = 0;
+  std::uint64_t post_scheduled_device_microseconds = 0;
+  std::uint64_t end_scheduled_device_microseconds = 0;
+  std::uint64_t end_device_microseconds = 0;
+  std::uint64_t elapsed_device_microseconds = 0;
+  std::uint32_t tone_sample_rate_hz = 0;
+  std::uint32_t tone_sample_count = 0;
+  std::uint32_t fixture_neopixel_gpio = 0;
+  std::uint32_t shared_power_gpio = 0;
+  bool prepared_at_acknowledgement = false;
+  bool rail_powered_at_acknowledgement = false;
+  bool outputs_inactive_at_completion = false;
+  bool prepared_at_completion = false;
+  bool pixel_off_at_completion = false;
+  bool i2s_inactive_at_completion = false;
+  bool rail_powered_at_completion = false;
+  FeatherSwingPhase pre;
+  FeatherSwingImpact impact;
+  FeatherSwingPhase post;
+  std::chrono::steady_clock::time_point host_command_write_started;
+  std::chrono::steady_clock::time_point host_command_sent;
+  std::chrono::steady_clock::time_point host_acknowledgement_received;
+  std::chrono::steady_clock::time_point host_done_received;
+  FeatherResponse acknowledgement;
+  FeatherResponse done;
+};
+
 enum class FeatherHilTransactionStage {
   kQueryWrite,
   kQueryResponse,
   kStimulusWrite,
   kAcknowledgement,
   kStart,
+  kCalibrationStep,
+  kPrePhase,
+  kImpact,
+  kPostPhase,
   kDone,
 };
 
@@ -84,6 +204,8 @@ struct FeatherHilFailureEvidence {
   std::string command_wire;
   std::optional<FeatherDeviceInfo> device_info;
   std::optional<FeatherStimulusReceipt> stimulus_receipt;
+  std::optional<FeatherCalibrationReceipt> calibration_receipt;
+  std::optional<FeatherSwingReceipt> swing_receipt;
   std::optional<FeatherResponse> offending_response;
 };
 
@@ -111,6 +233,8 @@ class FeatherHilController final {
                                                 std::chrono::microseconds duration,
                                                 std::uint32_t frequency_hz,
                                                 std::uint32_t level_permille);
+  [[nodiscard]] FeatherCalibrationReceipt CalibrateSwingBrightness();
+  [[nodiscard]] FeatherSwingReceipt RunSyntheticSwing(std::uint32_t brightness);
 
  private:
   struct StimulusCommand {
@@ -126,6 +250,8 @@ class FeatherHilController final {
                                         bool permit_initial_boot);
   [[nodiscard]] FeatherStimulusReceipt RunStimulus(std::uint32_t request_id,
                                                    const StimulusCommand &command);
+  [[nodiscard]] FeatherCalibrationReceipt RunCalibration(std::uint32_t request_id);
+  [[nodiscard]] FeatherSwingReceipt RunSwing(std::uint32_t request_id, std::uint32_t brightness);
   [[nodiscard]] std::uint32_t NextRequestId();
   [[nodiscard]] const FeatherDeviceInfo &RequireNegotiated() const;
 

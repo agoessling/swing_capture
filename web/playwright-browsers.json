@@ -1,0 +1,11 @@
+{
+  "comment": "Pinned subset of playwright-core 1.52.0 browsers.json",
+  "browsers": [
+    {
+      "name": "chromium-headless-shell",
+      "revision": "1169",
+      "installByDefault": true,
+      "browserVersion": "136.0.7103.25"
+    }
+  ]
+}

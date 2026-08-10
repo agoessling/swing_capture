@@ -2,7 +2,9 @@
 
 #include <httplib.h>
 
+#include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <exception>
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -62,6 +64,86 @@ Json CameraStatusJson(const CameraStatus &status) {
   };
 }
 
+Json CaptureTriggerJson(const CaptureTriggerStatus &trigger) {
+  return {
+      {"source", trigger.source},
+      {"strike_host_monotonic_ns", std::to_string(trigger.strike_host_monotonic_nanoseconds)},
+      {"confirmation_host_monotonic_ns",
+       std::to_string(trigger.confirmation_host_monotonic_nanoseconds)},
+      {"sample_rate_hz", trigger.sample_rate_hz},
+      {"peak_amplitude", trigger.peak_amplitude},
+      {"noise_floor", trigger.noise_floor},
+      {"threshold", trigger.threshold},
+  };
+}
+
+Json HilControlJson(const HilControlStatus &hil) {
+  Json last_run = nullptr;
+  if (hil.last_run.has_value()) {
+    last_run = {
+        {"session_id", hil.last_run->session_id.value_or("")},
+        {"stage", hil.last_run->stage},
+        {"error", hil.last_run->error},
+        {"selected_brightness", hil.last_run->selected_brightness.value_or(0)},
+    };
+    if (!hil.last_run->session_id.has_value()) {
+      last_run["session_id"] = nullptr;
+    }
+    if (!hil.last_run->selected_brightness.has_value()) {
+      last_run["selected_brightness"] = nullptr;
+    }
+  }
+  Json value = {
+      {"enabled", hil.enabled},
+      {"busy", hil.busy},
+      {"stage", hil.stage},
+      {"error", hil.error},
+      {"selected_brightness", hil.selected_brightness.value_or(0)},
+      {"last_run", std::move(last_run)},
+  };
+  if (!hil.selected_brightness.has_value()) {
+    value["selected_brightness"] = nullptr;
+  }
+  return value;
+}
+
+Json CaptureStatusJson(const CaptureApplicationStatus &status) {
+  Json value = {
+      {"schema_version", 2},
+      {"state", status.state},
+      {"armed", status.armed},
+      {"active_session_id", status.active_session_id.value_or("")},
+      {"error", status.error},
+      {"audio",
+       {
+           {"running", status.audio_running},
+           {"ready", status.audio_ready},
+           {"completed_blocks", status.audio_blocks},
+           {"completed_samples", status.audio_samples},
+           {"detected_impacts", status.detected_impacts},
+           {"noise_floor", status.audio_noise_floor},
+           {"detection_threshold", status.audio_detection_threshold},
+       }},
+      {"hil", HilControlJson(status.hil)},
+  };
+  if (!status.active_session_id.has_value()) {
+    value["active_session_id"] = nullptr;
+  }
+  value["last_trigger"] = status.last_trigger.has_value()
+                              ? CaptureTriggerJson(status.last_trigger.value())
+                              : Json(nullptr);
+  return value;
+}
+
+Json SessionSummaryJson(const SessionSummaryStatus &session) {
+  return {
+      {"session_id", session.session_id},
+      {"state", session.state},
+      {"created_at_utc", session.created_at_utc},
+      {"error", session.error},
+  };
+}
+
 void SetJson(httplib::Response &response, const Json &value, int status = 200) {
   response.status = status;
   response.set_content(value.dump(), "application/json");
@@ -70,6 +152,25 @@ void SetJson(httplib::Response &response, const Json &value, int status = 200) {
 
 void SetError(httplib::Response &response, int status, std::string_view message) {
   SetJson(response, {{"error", message}}, status);
+}
+
+bool RequireJsonRequest(const httplib::Request &request, httplib::Response &response) {
+  if (!request.get_header_value("Content-Type").starts_with("application/json")) {
+    SetError(response, 415, "request Content-Type must be application/json");
+    return false;
+  }
+  if (request.has_header("Origin")) {
+    const std::string origin = request.get_header_value("Origin");
+    const std::size_t authority_start = origin.find("://");
+    const std::string_view authority = authority_start == std::string::npos
+                                           ? std::string_view{}
+                                           : std::string_view(origin).substr(authority_start + 3);
+    if (authority.empty() || authority != request.get_header_value("Host")) {
+      SetError(response, 403, "cross-origin mutation is not allowed");
+      return false;
+    }
+  }
+  return true;
 }
 
 CameraSettingsUpdate ParseSettings(std::string_view body) {
@@ -87,6 +188,15 @@ CameraSettingsUpdate ParseSettings(std::string_view body) {
     throw std::invalid_argument("camera settings must be finite");
   }
   return update;
+}
+
+bool ParseArmed(std::string_view body) {
+  const Json parsed = Json::parse(body);
+  if (!parsed.is_object() || parsed.size() != 1 || !parsed.contains("armed") ||
+      !parsed.at("armed").is_boolean()) {
+    throw std::invalid_argument("capture arm request must contain only boolean armed");
+  }
+  return parsed.at("armed").get<bool>();
 }
 
 std::optional<CameraRole> RoleFromRequest(const httplib::Request &request) {
@@ -148,6 +258,9 @@ void HandleSettings(StationBackend &backend, const httplib::Request &request,
     SetError(response, 404, "unknown camera role");
     return;
   }
+  if (!RequireJsonRequest(request, response)) {
+    return;
+  }
   try {
     const CameraSettingsUpdate settings = ParseSettings(request.body);
     SetJson(response, CameraStatusJson(backend.UpdateCameraSettings(*role, settings)));
@@ -157,6 +270,125 @@ void HandleSettings(StationBackend &backend, const httplib::Request &request,
     SetError(response, 400, error.what());
   } catch (const std::logic_error &error) {
     SetError(response, 409, error.what());
+  } catch (const std::exception &error) {
+    SetError(response, 503, error.what());
+  }
+}
+
+void HandleCaptureStatus(StationBackend &backend, httplib::Response &response) {
+  try {
+    SetJson(response, CaptureStatusJson(backend.CaptureStatus()));
+  } catch (const std::exception &error) {
+    SetError(response, 503, error.what());
+  }
+}
+
+void HandleCaptureArm(StationBackend &backend, const httplib::Request &request,
+                      httplib::Response &response) {
+  if (!RequireJsonRequest(request, response)) {
+    return;
+  }
+  try {
+    SetJson(response, CaptureStatusJson(backend.SetCaptureArmed(ParseArmed(request.body))));
+  } catch (const Json::exception &error) {
+    SetError(response, 400, error.what());
+  } catch (const std::invalid_argument &error) {
+    SetError(response, 400, error.what());
+  } catch (const std::logic_error &error) {
+    SetError(response, 409, error.what());
+  } catch (const std::exception &error) {
+    SetError(response, 503, error.what());
+  }
+}
+
+void HandleManualCapture(StationBackend &backend, const httplib::Request &request,
+                         httplib::Response &response) {
+  if (!RequireJsonRequest(request, response)) {
+    return;
+  }
+  try {
+    SetJson(response, SessionSummaryJson(backend.CaptureManually()), 202);
+  } catch (const std::logic_error &error) {
+    SetError(response, 409, error.what());
+  } catch (const std::exception &error) {
+    SetError(response, 503, error.what());
+  }
+}
+
+void HandleSyntheticSwingHil(StationBackend &backend, const httplib::Request &request,
+                             httplib::Response &response) {
+  if (!RequireJsonRequest(request, response)) {
+    return;
+  }
+  try {
+    const Json parsed = Json::parse(request.body);
+    if (!parsed.is_object() || !parsed.empty()) {
+      throw std::invalid_argument("synthetic swing request body must be an empty object");
+    }
+    SetJson(response, CaptureStatusJson(backend.RunSyntheticSwingHil()), 202);
+  } catch (const Json::exception &error) {
+    SetError(response, 400, error.what());
+  } catch (const std::invalid_argument &error) {
+    SetError(response, 400, error.what());
+  } catch (const std::logic_error &error) {
+    SetError(response, 409, error.what());
+  } catch (const std::exception &error) {
+    SetError(response, 503, error.what());
+  }
+}
+
+void HandleSessions(StationBackend &backend, httplib::Response &response) {
+  try {
+    Json sessions = Json::array();
+    for (const SessionSummaryStatus &session : backend.Sessions()) {
+      sessions.push_back(SessionSummaryJson(session));
+    }
+    SetJson(response, {{"schema_version", 1}, {"sessions", std::move(sessions)}});
+  } catch (const std::exception &error) {
+    SetError(response, 503, error.what());
+  }
+}
+
+void ServeSessionAsset(const std::optional<SessionAsset> &asset, httplib::Response &response) {
+  if (!asset.has_value()) {
+    SetError(response, 404, "session asset not found");
+    return;
+  }
+  if (!std::filesystem::is_regular_file(asset->path)) {
+    SetError(response, 503, "published session asset is unavailable");
+    return;
+  }
+  response.set_file_content(asset->path.string(), asset->media_type);
+  const auto served_at = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  response.set_header("X-Swing-Capture-Server-Monotonic-Ns", std::to_string(served_at));
+  response.set_header("Accept-Ranges", "bytes");
+  response.set_header("Cache-Control", "private, max-age=31536000, immutable");
+}
+
+void HandleSessionManifest(StationBackend &backend, const httplib::Request &request,
+                           httplib::Response &response) {
+  try {
+    ServeSessionAsset(backend.SessionManifest(request.matches[1].str()), response);
+  } catch (const std::invalid_argument &error) {
+    SetError(response, 400, error.what());
+  } catch (const std::exception &error) {
+    SetError(response, 503, error.what());
+  }
+}
+
+void HandleSessionMedia(StationBackend &backend, const httplib::Request &request,
+                        httplib::Response &response) {
+  const std::optional<CameraRole> role = ParseCameraRole(request.matches[2].str());
+  if (!role.has_value()) {
+    SetError(response, 404, "unknown camera role");
+    return;
+  }
+  try {
+    ServeSessionAsset(backend.SessionMedia(request.matches[1].str(), role.value()), response);
+  } catch (const std::invalid_argument &error) {
+    SetError(response, 400, error.what());
   } catch (const std::exception &error) {
     SetError(response, 503, error.what());
   }
@@ -195,6 +427,15 @@ std::optional<CameraRole> ParseCameraRole(std::string_view value) noexcept {
 
 void RegisterPreviewRoutes(httplib::Server &server, StationBackend &backend,
                            const std::optional<std::filesystem::path> &static_root) {
+  server.set_payload_max_length(4096);
+  server.set_default_headers({
+      {"Content-Security-Policy",
+       "default-src 'self'; img-src 'self' blob:; media-src 'self'; style-src 'self' "
+       "'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"},
+      {"Referrer-Policy", "no-referrer"},
+      {"X-Content-Type-Options", "nosniff"},
+      {"X-Frame-Options", "DENY"},
+  });
   server.Get("/api/v1/status", [&backend](const httplib::Request &, httplib::Response &response) {
     HandleStatus(backend, response);
   });
@@ -212,6 +453,34 @@ void RegisterPreviewRoutes(httplib::Server &server, StationBackend &backend,
                [&backend](const httplib::Request &request, httplib::Response &response) {
                  HandleSettings(backend, request, response);
                });
+
+  server.Get("/api/v1/capture/status",
+             [&backend](const httplib::Request &, httplib::Response &response) {
+               HandleCaptureStatus(backend, response);
+             });
+  server.Post("/api/v1/capture/arm",
+              [&backend](const httplib::Request &request, httplib::Response &response) {
+                HandleCaptureArm(backend, request, response);
+              });
+  server.Post("/api/v1/capture/manual",
+              [&backend](const httplib::Request &request, httplib::Response &response) {
+                HandleManualCapture(backend, request, response);
+              });
+  server.Post("/api/v1/hil/synthetic-swing",
+              [&backend](const httplib::Request &request, httplib::Response &response) {
+                HandleSyntheticSwingHil(backend, request, response);
+              });
+  server.Get("/api/v1/sessions", [&backend](const httplib::Request &, httplib::Response &response) {
+    HandleSessions(backend, response);
+  });
+  server.Get(R"(/api/v1/sessions/([A-Za-z0-9_.-]+)/manifest)",
+             [&backend](const httplib::Request &request, httplib::Response &response) {
+               HandleSessionManifest(backend, request, response);
+             });
+  server.Get(R"(/api/v1/sessions/([A-Za-z0-9_.-]+)/(down_the_line|face_on)\.webm)",
+             [&backend](const httplib::Request &request, httplib::Response &response) {
+               HandleSessionMedia(backend, request, response);
+             });
 
   if (static_root.has_value()) {
     MountStaticFiles(server, *static_root);

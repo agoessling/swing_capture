@@ -52,17 +52,23 @@ class LatestFrameSampler final {
   [[nodiscard]] PreviewFramePublishResult TryPublish(const FrameView &frame);
   [[nodiscard]] std::shared_ptr<const SampledPreviewFrame> Latest() const;
 
+  // Changes the cadence of this same bounded latest-only copy path. The
+  // change is serialized with publication; it neither queues frames nor
+  // invalidates immutable snapshots already held by readers.
+  void SetMinimumInterval(std::chrono::steady_clock::duration minimum_interval);
+
   // Invalidates the retained frame and cadence deadline. Publication sequence
   // numbers remain monotonic so browser cache keys are never reused after a
   // camera reconfiguration.
   void Reset();
 
-  [[nodiscard]] std::chrono::steady_clock::duration minimum_interval() const noexcept;
+  [[nodiscard]] std::chrono::steady_clock::duration minimum_interval() const;
   [[nodiscard]] std::size_t maximum_payload_bytes() const noexcept;
 
  private:
-  const LatestFrameSamplerConfig config_;
+  const std::size_t maximum_payload_bytes_;
   mutable std::mutex mutex_;
+  std::chrono::steady_clock::duration minimum_interval_;
   bool has_published_frame_ = false;
   std::chrono::steady_clock::time_point last_published_at_;
   std::uint64_t next_preview_sequence_ = 1;

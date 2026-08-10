@@ -1,8 +1,10 @@
 #ifndef SWING_CAPTURE_CAPTURE_SERVICE_PREVIEW_STATION_H_
 #define SWING_CAPTURE_CAPTURE_SERVICE_PREVIEW_STATION_H_
 
+#include <filesystem>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include "capture/service/preview_api.h"
@@ -15,7 +17,8 @@ namespace swing_capture::service {
 // can still identify the affected station role.
 class PreviewStation final : public StationBackend {
  public:
-  explicit PreviewStation(const station::StationConfig &config);
+  PreviewStation(const station::StationConfig &config, std::filesystem::path session_output_root,
+                 bool enable_hil_controls = false);
   ~PreviewStation() override;
 
   PreviewStation(const PreviewStation &) = delete;
@@ -28,6 +31,14 @@ class PreviewStation final : public StationBackend {
                                                           bool full_resolution) override;
   [[nodiscard]] CameraStatus UpdateCameraSettings(CameraRole role,
                                                   const CameraSettingsUpdate &settings) override;
+  [[nodiscard]] CaptureApplicationStatus CaptureStatus() override;
+  [[nodiscard]] CaptureApplicationStatus SetCaptureArmed(bool armed) override;
+  [[nodiscard]] SessionSummaryStatus CaptureManually() override;
+  [[nodiscard]] CaptureApplicationStatus RunSyntheticSwingHil() override;
+  [[nodiscard]] std::vector<SessionSummaryStatus> Sessions() override;
+  [[nodiscard]] std::optional<SessionAsset> SessionManifest(std::string_view session_id) override;
+  [[nodiscard]] std::optional<SessionAsset> SessionMedia(std::string_view session_id,
+                                                         CameraRole role) override;
 
  private:
   struct Impl;

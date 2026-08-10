@@ -27,6 +27,7 @@
     "https://bcr.bazel.build/modules/aspect_bazel_lib/1.31.2/MODULE.bazel": "7bee702b4862612f29333590f4b658a5832d433d6f8e4395f090e8f4e85d442f",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/1.38.0/MODULE.bazel": "6307fec451ba9962c1c969eb516ebfe1e46528f7fa92e1c9ac8646bef4cdaa3f",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/1.42.2/MODULE.bazel": "2e0d8ab25c57a14f56ace1c8e881b69050417ff91b2fb7718dc00d201f3c3478",
+    "https://bcr.bazel.build/modules/aspect_bazel_lib/2.11.0/MODULE.bazel": "cb1ba9f9999ed0bc08600c221f532c1ddd8d217686b32ba7d45b0713b5131452",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.14.0/MODULE.bazel": "2b31ffcc9bdc8295b2167e07a757dbbc9ac8906e7028e5170a3708cecaac119f",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.19.2/MODULE.bazel": "30dfabbfae0139b1f0036e01c201dd4c0167da3017f0b7ef3820d78e07622989",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.19.3/MODULE.bazel": "253d739ba126f62a5767d832765b12b59e9f8d2bc88cc1572f4a73e46eb298ca",
@@ -68,6 +69,7 @@
     "https://bcr.bazel.build/modules/bazel_features/1.30.0/MODULE.bazel": "a14b62d05969a293b80257e72e597c2da7f717e1e69fa8b339703ed6731bec87",
     "https://bcr.bazel.build/modules/bazel_features/1.33.0/MODULE.bazel": "8b8dc9d2a4c88609409c3191165bccec0e4cb044cd7a72ccbe826583303459f6",
     "https://bcr.bazel.build/modules/bazel_features/1.34.0/MODULE.bazel": "e8475ad7c8965542e0c7aac8af68eb48c4af904be3d614b6aa6274c092c2ea1e",
+    "https://bcr.bazel.build/modules/bazel_features/1.35.0/MODULE.bazel": "3d9393e5317df8afcfc509458591874ea734fa68ecbdd64fbd6c2c0cbe399526",
     "https://bcr.bazel.build/modules/bazel_features/1.38.0/MODULE.bazel": "f9b8a9c890ebd216b4049fd12a31d3c2602e3403c7af636b04fbbd7453edc9c9",
     "https://bcr.bazel.build/modules/bazel_features/1.39.0/MODULE.bazel": "28739425c1fc283c91931619749c832b555e60bcd1010b40d8441ce0a5cf726d",
     "https://bcr.bazel.build/modules/bazel_features/1.4.1/MODULE.bazel": "e45b6bb2350aff3e442ae1111c555e27eac1d915e77775f6fdc4b351b758b5d7",
@@ -142,6 +144,11 @@
     "https://bcr.bazel.build/modules/libpfm/4.11.0.bcr.1/MODULE.bazel": "e5362dadc90aab6724c83a2cc1e67cbed9c89a05d97fb1f90053c8deb1e445c8",
     "https://bcr.bazel.build/modules/libpfm/4.11.0.bcr.1/source.json": "0646414d9037f8aad148781dd760bec90b0b25ac12fda5e03f8aadbd6b9c61e6",
     "https://bcr.bazel.build/modules/libpfm/4.11.0/MODULE.bazel": "45061ff025b301940f1e30d2c16bea596c25b176c8b6b3087e92615adbd52902",
+    "https://bcr.bazel.build/modules/libvpx/1.16.0.bcr.beta.1/MODULE.bazel": "842ee879b71a78c8537cff6d9aa70032bf843e2cf88d97ac7311062e216ac69b",
+    "https://bcr.bazel.build/modules/libvpx/1.16.0.bcr.beta.1/source.json": "d9e96a8b6567d8502c601a871ebe79488107804fbf7f15a3564e51cd886fd91f",
+    "https://bcr.bazel.build/modules/libwebm/1.0.0.32/MODULE.bazel": "ac211dccd542be5e62c21a674abae8fb306c01ce8c8b298a909cf773c6e9d458",
+    "https://bcr.bazel.build/modules/libwebm/1.0.0.32/source.json": "8903e55719f8ac7d5b348d0c2ead8220458eea3a1ebef353cf584dcb686989e6",
+    "https://bcr.bazel.build/modules/nasm/2.16.03.bcr.2/MODULE.bazel": "e2d9297bf5825453d9172b9e96490f5a36c2eeb6e2340e31c058346fc2c60675",
     "https://bcr.bazel.build/modules/nasm/2.16.03.bcr.3/MODULE.bazel": "c2a14e98f8aee6546486d34b5e9d02f53afe1a29ec138260338f15a8ba07cd46",
     "https://bcr.bazel.build/modules/nasm/2.16.03.bcr.3/source.json": "8746f686e1483817317c40558d6e4aef49e76502607d88082050e15dc6847204",
     "https://bcr.bazel.build/modules/nlohmann_json/3.12.0.bcr.1/MODULE.bazel": "a1c8bb07b5b91d971727c635f449d05623ac9608f6fe4f5f04254ea12f08e349",
@@ -274,14 +281,20 @@
     "https://bcr.bazel.build/modules/rules_multitool/0.11.0/MODULE.bazel": "8d9dda78d2398e136300d3ef4fbcc89ede7c32c158d8c016fa7d032df41c4aaf",
     "https://bcr.bazel.build/modules/rules_multitool/1.0.0/MODULE.bazel": "7f75dc8378368a10dcedcff6cbfee8254fff10748a219a6cb8de94fde4b6a574",
     "https://bcr.bazel.build/modules/rules_multitool/1.0.0/source.json": "5b92dc9b267b024bb2174bdf5d8e32821abb53fd84545e00699c4e35826a1c78",
+    "https://bcr.bazel.build/modules/rules_nasm/0.5.0/MODULE.bazel": "312d812cc31f764686c6288faa27fbf3289cfd89c208b1df3558e0957ed905b7",
+    "https://bcr.bazel.build/modules/rules_nasm/0.5.0/source.json": "e284054a7f17de741fea3fcb017fe37b670a425591a112d3d0987b5cc935d1d4",
     "https://bcr.bazel.build/modules/rules_nodejs/5.8.2/MODULE.bazel": "6bc03c8f37f69401b888023bf511cb6ee4781433b0cb56236b2e55a21e3a026a",
     "https://bcr.bazel.build/modules/rules_nodejs/6.2.0/MODULE.bazel": "ec27907f55eb34705adb4e8257952162a2d4c3ed0f0b3b4c3c1aad1fac7be35e",
     "https://bcr.bazel.build/modules/rules_nodejs/6.5.0/MODULE.bazel": "546d0cf79f36f9f6e080816045f97234b071c205f4542e3351bd4424282a8810",
     "https://bcr.bazel.build/modules/rules_nodejs/6.7.3/MODULE.bazel": "c22a48b2a0dbf05a9dc5f83837bbc24c226c1f6e618de3c3a610044c9f336056",
     "https://bcr.bazel.build/modules/rules_nodejs/6.7.3/source.json": "a3f966f4415a8a6545e560ee5449eac95cc633f96429d08e87c87775c72f5e09",
+    "https://bcr.bazel.build/modules/rules_perl/1.0.0/MODULE.bazel": "6a229bc69793a784010313fff139538dbc085c07ca560f25a6155af0e6f27cd6",
+    "https://bcr.bazel.build/modules/rules_perl/1.0.0/source.json": "8c4fc19f98a35b2c20cb702f21f339bcc95a05673898041508cf1bbacc44a919",
     "https://bcr.bazel.build/modules/rules_pkg/0.7.0/MODULE.bazel": "df99f03fc7934a4737122518bb87e667e62d780b610910f0447665a7e2be62dc",
     "https://bcr.bazel.build/modules/rules_pkg/1.0.1/MODULE.bazel": "5b1df97dbc29623bccdf2b0dcd0f5cb08e2f2c9050aab1092fd39a41e82686ff",
     "https://bcr.bazel.build/modules/rules_pkg/1.0.1/source.json": "bd82e5d7b9ce2d31e380dd9f50c111d678c3bdaca190cb76b0e1c71b05e1ba8a",
+    "https://bcr.bazel.build/modules/rules_playwright/0.5.3/MODULE.bazel": "105db08158a3f32302a03252e5eec5e9ee01a2674d3ecda94ad2c41a30001217",
+    "https://bcr.bazel.build/modules/rules_playwright/0.5.3/source.json": "54f2c76d6e6bb0593b89077091e97cf29d8b1129a93497b49d6ca3f07d842e4b",
     "https://bcr.bazel.build/modules/rules_proto/4.0.0/MODULE.bazel": "a7a7b6ce9bee418c1a760b3d84f83a299ad6952f9903c67f19e4edd964894e06",
     "https://bcr.bazel.build/modules/rules_proto/5.3.0-21.7/MODULE.bazel": "e8dff86b0971688790ae75528fe1813f71809b5afd57facb44dad9e8eca631b7",
     "https://bcr.bazel.build/modules/rules_proto/6.0.0-rc1/MODULE.bazel": "1e5b502e2e1a9e825eef74476a5a1ee524a92297085015a052510b09a1a09483",
@@ -892,6 +905,232 @@
             "repoRuleId": "@@rules_nodejs+//nodejs/private:nodejs_toolchains_repo.bzl%nodejs_toolchains_repo",
             "attributes": {
               "user_node_repository_name": "nodejs"
+            }
+          }
+        }
+      }
+    },
+    "@@rules_playwright+//playwright:extensions.bzl%playwright": {
+      "general": {
+        "bzlTransitiveDigest": "vEPXk7OZyBVVPZ//2zwNIy8J7iIcparE2YcunS4asMA=",
+        "usagesDigest": "2MygcbBjIrXmsyJCidoNs3tah0wbgCrTwJ3sqX83VJI=",
+        "recordedInputs": [
+          "REPO_MAPPING:rules_playwright+,bazel_tools bazel_tools",
+          "FILE:@@rules_playwright+//tools/release/artifacts/cli-x86_64-unknown-linux-musl c478e5f07bc0a2b513ff7e7d9f33e9420e8f3bac4ec058c3e3bf332bff8362a1"
+        ],
+        "generatedRepoSpecs": {
+          "playwright-chromium-headless-shell-debian11-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-debian11-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "integrity": "sha256-kuxxKkmkUet0toKa5Lx+4vNkINKEnCRdu7NxCLQd6SA=",
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-debian12-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-debian12-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "integrity": "sha256-kuxxKkmkUet0toKa5Lx+4vNkINKEnCRdu7NxCLQd6SA=",
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac11": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac11-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac12": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac12-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac13": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac13-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac14": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac14-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac15": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-mac15-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-mac-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-ubuntu20.04-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-ubuntu20.04-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "integrity": "sha256-kuxxKkmkUet0toKa5Lx+4vNkINKEnCRdu7NxCLQd6SA=",
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-ubuntu22.04-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-ubuntu22.04-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "integrity": "sha256-kuxxKkmkUet0toKa5Lx+4vNkINKEnCRdu7NxCLQd6SA=",
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-ubuntu24.04-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux-arm64.zip"
+              ]
+            }
+          },
+          "playwright-chromium-headless-shell-ubuntu24.04-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "integrity": "sha256-kuxxKkmkUet0toKa5Lx+4vNkINKEnCRdu7NxCLQd6SA=",
+              "urls": [
+                "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
+                "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip"
+              ]
+            }
+          },
+          "playwright": {
+            "repoRuleId": "@@rules_playwright+//playwright:repositories.bzl%playwright_repository",
+            "attributes": {
+              "playwright_version": "",
+              "browsers_json": "@@//web:playwright-browsers.json",
+              "browsers_workspace_name_prefix": "playwright",
+              "rules_playwright_cannonical_name": "@rules_playwright+"
             }
           }
         }

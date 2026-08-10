@@ -7,6 +7,7 @@ cc_library(
     srcs = ["hil_protocol.c"],
     hdrs = ["hil_protocol.h"],
     visibility = ["//visibility:public"],
+    deps = [":swing_sequence"],
 )
 
 cc_test(
@@ -14,6 +15,23 @@ cc_test(
     size = "small",
     srcs = ["hil_protocol_test.cc"],
     deps = [":hil_protocol"],
+)
+
+cc_library(
+    name = "swing_sequence",
+    srcs = ["swing_sequence.c"],
+    hdrs = ["swing_sequence.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "swing_sequence_test",
+    size = "small",
+    srcs = [
+        "board.h",
+        "swing_sequence_test.cc",
+    ],
+    deps = [":swing_sequence"],
 )
 
 pico_board_config(
@@ -40,6 +58,11 @@ pico_generate_pio_header(
     srcs = ["audio_i2s.pio"],
 )
 
+pico_generate_pio_header(
+    name = "fixture_neopixel_pio",
+    srcs = ["fixture_neopixel.pio"],
+)
+
 rp2040_firmware(
     name = "hil_firmware",
     srcs = ["hil_firmware.c"],
@@ -55,6 +78,8 @@ rp2040_firmware(
     deps = [
         ":audio_i2s_pio",
         ":hil_protocol",
+        ":fixture_neopixel_pio",
+        ":swing_sequence",
         "@pico-sdk//src/rp2_common/hardware_clocks",
         "@pico-sdk//src/rp2_common/hardware_dma",
         "@pico-sdk//src/rp2_common/hardware_pio",

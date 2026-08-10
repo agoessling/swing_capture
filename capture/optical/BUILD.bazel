@@ -1,6 +1,12 @@
 load("//tools:strict_cc.bzl", "cc_library", "cc_test")
 
 cc_library(
+    name = "white_impact_acceptance",
+    hdrs = ["white_impact_acceptance.h"],
+    visibility = ["//capture:__subpackages__"],
+)
+
+cc_library(
     name = "led_pulse",
     srcs = ["led_pulse.cc"],
     hdrs = ["led_pulse.h"],
@@ -56,6 +62,29 @@ cc_test(
         ":frame_selection",
         ":led_pulse",
         ":led_schedule_association",
+    ],
+)
+
+cc_library(
+    name = "rgb_swing",
+    srcs = ["rgb_swing.cc"],
+    hdrs = ["rgb_swing.h"],
+    visibility = ["//capture:__subpackages__"],
+    deps = [
+        ":led_pulse",
+        ":white_impact_acceptance",
+        "//capture/image:image_quality",
+    ],
+)
+
+cc_test(
+    name = "rgb_swing_test",
+    size = "small",
+    srcs = ["rgb_swing_test.cc"],
+    deps = [
+        ":led_pulse",
+        ":rgb_swing",
+        "//capture/image:image_quality",
     ],
 )
 

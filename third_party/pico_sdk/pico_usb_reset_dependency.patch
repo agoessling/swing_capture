@@ -11,3 +11,14 @@ index 65aa564..b5c6985 100644
      ],
      # Ensure `stdio_usb_descriptors.c` isn't affected by link order.
      alwayslink = True,
+diff --git a/src/rp2_common/pico_usb_reset/BUILD.bazel b/src/rp2_common/pico_usb_reset/BUILD.bazel
+index c58ef27..9cf985c 100644
+--- a/src/rp2_common/pico_usb_reset/BUILD.bazel
++++ b/src/rp2_common/pico_usb_reset/BUILD.bazel
+@@ -25,3 +25,6 @@ cc_library(
+         "//src/rp2_common/pico_bootrom",
+     ],
++    # TinyUSB discovers this application driver through weak callbacks. Keep
++    # the implementation linked when optimized section GC is enabled.
++    alwayslink = True,
+ )

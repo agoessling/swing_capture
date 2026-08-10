@@ -41,6 +41,8 @@ struct Options {
   std::optional<std::filesystem::path> station_config;
   std::optional<std::filesystem::path> static_root;
   std::optional<std::filesystem::path> hardware_lock;
+  std::optional<std::filesystem::path> sessions_root;
+  bool enable_hil_controls = false;
 };
 
 class TerminationSignalMask final {
@@ -107,6 +109,10 @@ Options ParseOptions(std::span<char *> arguments) {
       options.static_root = RequireValue(arguments, &index, argument);
     } else if (argument == "--hardware-lock") {
       options.hardware_lock = RequireValue(arguments, &index, argument);
+    } else if (argument == "--sessions-root") {
+      options.sessions_root = RequireValue(arguments, &index, argument);
+    } else if (argument == "--enable-hil-controls") {
+      options.enable_hil_controls = true;
     } else {
       throw std::invalid_argument("unknown option: " + std::string(argument));
     }
@@ -187,6 +193,11 @@ std::filesystem::path ResolveHardwareLock(const Options &options) {
   return ResolveWorkspaceRoot() / "artifacts" / "hil" / "hardware.lock";
 }
 
+std::filesystem::path ResolveSessionsRoot(const Options &options) {
+  return options.sessions_root.has_value() ? std::filesystem::absolute(*options.sessions_root)
+                                           : ResolveWorkspaceRoot() / "artifacts" / "sessions";
+}
+
 int ListenUntilTerminated(httplib::Server &server, const TerminationSignalMask &signal_mask,
                           std::string_view bind_address, int port) {
   std::atomic<int> received_signal = 0;
@@ -224,12 +235,13 @@ int RunServer(std::span<char *> arguments) {
   const std::filesystem::path config_path = ResolveStationConfig(options);
   const std::filesystem::path static_root = ResolveStaticRoot(options, arguments.front());
   const std::filesystem::path lock_path = ResolveHardwareLock(options);
+  const std::filesystem::path sessions_root = ResolveSessionsRoot(options);
 
   const TerminationSignalMask signal_mask;
   const swing_capture::station::StationConfig config =
       swing_capture::station::LoadStationConfig(config_path);
   const HardwareLock hardware_lock(lock_path);
-  PreviewStation station(config);
+  PreviewStation station(config, sessions_root, options.enable_hil_controls);
   httplib::Server server;
   swing_capture::service::RegisterPreviewRoutes(server, station, static_root);
 
@@ -237,6 +249,8 @@ int RunServer(std::span<char *> arguments) {
             << "/\n"
             << "Station config: " << config_path << '\n'
             << "Static assets: " << static_root << '\n'
+            << "Sessions: " << sessions_root << '\n'
+            << "HIL controls: " << (options.enable_hil_controls ? "enabled" : "disabled") << '\n'
             << "Hardware lock: " << lock_path << '\n';
   return ListenUntilTerminated(server, signal_mask, options.bind_address, options.port);
 }

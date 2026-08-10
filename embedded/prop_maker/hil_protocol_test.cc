@@ -1,7 +1,11 @@
 #include "embedded/prop_maker/hil_protocol.h"
 
+#include <array>
 #include <cassert>
+#include <cstddef>
 #include <string_view>
+
+#include "embedded/prop_maker/swing_sequence.h"
 
 namespace {
 
@@ -17,6 +21,8 @@ swing_hil_parser_event FeedLine(swing_hil_line_parser *parser, std::string_view 
 }
 
 void ParsesEveryCommand() {
+  static_assert(std::string_view(SWING_HIL_FIRMWARE_VERSION) == "prop-maker-hil-5");
+  static_assert(SWING_HIL_PREPARE_TIMEOUT_US == 10'000'000ULL);
   swing_hil_line_parser parser{};
   swing_hil_line_parser_init(&parser);
 
@@ -38,6 +44,15 @@ void ParsesEveryCommand() {
   assert(event.command.parameters.tone.duration_us == 20000U);
   assert(event.command.parameters.tone.frequency_hz == 2000U);
   assert(event.command.parameters.tone.level_permille == 125U);
+
+  event = FeedLine(&parser, "SC-HIL/1 10 CALIBRATE\n");
+  assert(event.status == SWING_HIL_FEED_COMMAND);
+  assert(event.command.kind == SWING_HIL_COMMAND_CALIBRATE);
+
+  event = FeedLine(&parser, "SC-HIL/1 11 SWING 12\n");
+  assert(event.status == SWING_HIL_FEED_COMMAND);
+  assert(event.command.kind == SWING_HIL_COMMAND_SWING);
+  assert(event.command.parameters.swing.brightness == 12U);
 }
 
 void EnforcesStimulusSafetyBounds() {
@@ -60,6 +75,29 @@ void EnforcesStimulusSafetyBounds() {
   event = FeedLine(&parser, "SC-HIL/1 4 LED 2000001 44053\n");
   assert(event.status == SWING_HIL_FEED_ERROR);
   assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
+
+  event = FeedLine(&parser, "SC-HIL/1 5 SWING 24\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
+
+  event = FeedLine(&parser, "SC-HIL/1 6 CALIBRATE extra\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_ARGUMENT_COUNT);
+}
+
+void AcceptsExactlyTheV5CalibrationCandidates() {
+  constexpr std::array<std::string_view, SWING_HIL_CALIBRATION_CANDIDATE_COUNT> kCommands = {
+      "SC-HIL/1 11 SWING 1\n",  "SC-HIL/1 12 SWING 2\n",  "SC-HIL/1 13 SWING 3\n",
+      "SC-HIL/1 14 SWING 4\n",  "SC-HIL/1 15 SWING 6\n",  "SC-HIL/1 16 SWING 8\n",
+      "SC-HIL/1 17 SWING 12\n", "SC-HIL/1 18 SWING 16\n",
+  };
+  swing_hil_line_parser parser{};
+  swing_hil_line_parser_init(&parser);
+  for (std::size_t index = 0; index < kCommands.size(); ++index) {
+    const auto event = FeedLine(&parser, kCommands[index]);
+    assert(event.status == SWING_HIL_FEED_COMMAND);
+    assert(event.command.parameters.swing.brightness == swing_hil_calibration_candidate(index));
+  }
 }
 
 void DiagnosesFramingAndVersionErrors() {
@@ -120,6 +158,7 @@ void RejectsNumericOverflowAndControlCharacters() {
 int main() {
   ParsesEveryCommand();
   EnforcesStimulusSafetyBounds();
+  AcceptsExactlyTheV5CalibrationCandidates();
   DiagnosesFramingAndVersionErrors();
   RecoversAfterAnOversizedLine();
   RejectsNumericOverflowAndControlCharacters();

@@ -38,7 +38,9 @@ PreviewFramePublishResult ValidateFrame(const FrameView &frame, std::size_t maxi
 
 }  // namespace
 
-LatestFrameSampler::LatestFrameSampler(LatestFrameSamplerConfig config) : config_(config) {
+LatestFrameSampler::LatestFrameSampler(LatestFrameSamplerConfig config)
+    : maximum_payload_bytes_(config.maximum_payload_bytes),
+      minimum_interval_(config.minimum_interval) {
   if (config.minimum_interval <= std::chrono::steady_clock::duration::zero()) {
     throw std::invalid_argument("preview sampling interval must be positive");
   }
@@ -48,7 +50,7 @@ LatestFrameSampler::LatestFrameSampler(LatestFrameSamplerConfig config) : config
 }
 
 PreviewFramePublishResult LatestFrameSampler::TryPublish(const FrameView &frame) {
-  const PreviewFramePublishResult validation = ValidateFrame(frame, config_.maximum_payload_bytes);
+  const PreviewFramePublishResult validation = ValidateFrame(frame, maximum_payload_bytes_);
   if (validation != PreviewFramePublishResult::kPublished) {
     return validation;
   }
@@ -56,7 +58,7 @@ PreviewFramePublishResult LatestFrameSampler::TryPublish(const FrameView &frame)
   const std::scoped_lock lock(mutex_);
   if (has_published_frame_ &&
       (frame.metadata.host_received_at < last_published_at_ ||
-       frame.metadata.host_received_at - last_published_at_ < config_.minimum_interval)) {
+       frame.metadata.host_received_at - last_published_at_ < minimum_interval_)) {
     return PreviewFramePublishResult::kRateLimited;
   }
   if (next_preview_sequence_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -80,6 +82,14 @@ std::shared_ptr<const SampledPreviewFrame> LatestFrameSampler::Latest() const {
   return latest_;
 }
 
+void LatestFrameSampler::SetMinimumInterval(std::chrono::steady_clock::duration minimum_interval) {
+  if (minimum_interval <= std::chrono::steady_clock::duration::zero()) {
+    throw std::invalid_argument("preview sampling interval must be positive");
+  }
+  const std::scoped_lock lock(mutex_);
+  minimum_interval_ = minimum_interval;
+}
+
 void LatestFrameSampler::Reset() {
   const std::scoped_lock lock(mutex_);
   latest_.reset();
@@ -87,12 +97,13 @@ void LatestFrameSampler::Reset() {
   last_published_at_ = {};
 }
 
-std::chrono::steady_clock::duration LatestFrameSampler::minimum_interval() const noexcept {
-  return config_.minimum_interval;
+std::chrono::steady_clock::duration LatestFrameSampler::minimum_interval() const {
+  const std::scoped_lock lock(mutex_);
+  return minimum_interval_;
 }
 
 std::size_t LatestFrameSampler::maximum_payload_bytes() const noexcept {
-  return config_.maximum_payload_bytes;
+  return maximum_payload_bytes_;
 }
 
 }  // namespace swing_capture::preview

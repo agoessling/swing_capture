@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -14,9 +15,11 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "capture/hil/feather_hil_protocol.h"
 #include "capture/hil/feather_hil_serial.h"
+#include "embedded/prop_maker/swing_sequence.h"
 
 namespace swing_capture::hil {
 namespace {
@@ -25,6 +28,7 @@ constexpr auto kIoTimeout = std::chrono::milliseconds(500);
 constexpr std::uint64_t kMaximumStartLatenessMicroseconds = 5'000;
 constexpr std::uint64_t kMaximumLedDurationOvershootMicroseconds = 100;
 constexpr std::uint64_t kMaximumToneDurationOvershootMicroseconds = 250;
+constexpr std::uint64_t kMaximumOutputShutdownOvershootMicroseconds = 250;
 
 struct ExpectedStimulus {
   std::string_view subject;
@@ -107,6 +111,14 @@ std::uint32_t RequiredUnsigned32Field(const FeatherResponse &response, std::stri
   return static_cast<std::uint32_t>(value);
 }
 
+bool RequiredBooleanField(const FeatherResponse &response, std::string_view name) {
+  const std::uint64_t value = RequiredUnsignedField(response, name);
+  if (value > 1U) {
+    throw std::runtime_error("Feather HIL boolean field is not zero or one: " + std::string(name));
+  }
+  return value == 1U;
+}
+
 std::set<std::string, std::less<>> ParseCapabilities(std::string_view value) {
   std::set<std::string, std::less<>> capabilities;
   std::size_t begin = 0;
@@ -127,8 +139,33 @@ std::set<std::string, std::less<>> ParseCapabilities(std::string_view value) {
   return capabilities;
 }
 
+std::vector<std::uint32_t> ParseUnsignedList(std::string_view value) {
+  std::vector<std::uint32_t> values;
+  std::size_t begin = 0;
+  while (begin < value.size()) {
+    const std::size_t end = value.find(',', begin);
+    const std::string_view token = value.substr(begin, end - begin);
+    if (token.empty()) {
+      throw std::runtime_error("invalid Feather HIL unsigned list");
+    }
+    FeatherResponse item;
+    item.fields.emplace("value", token);
+    values.push_back(RequiredUnsigned32Field(item, "value"));
+    if (end == std::string_view::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  if (values.empty() || value.ends_with(',') ||
+      std::ranges::adjacent_find(values, std::equal_to<>()) != values.end()) {
+    throw std::runtime_error("invalid Feather HIL unsigned list");
+  }
+  return values;
+}
+
 void ValidateDeviceInfo(const FeatherDeviceInfo &info) {
-  const std::set<std::string, std::less<>> expected_capabilities = {"led", "query", "tone"};
+  const std::set<std::string, std::less<>> expected_capabilities = {"calibrate", "led", "query",
+                                                                    "swing", "tone"};
   const bool compatible =
       info.firmware == kFeatherHilFirmware && info.protocol_version == kFeatherHilProtocolVersion &&
       info.capabilities == expected_capabilities &&
@@ -141,9 +178,32 @@ void ValidateDeviceInfo(const FeatherDeviceInfo &info) {
       info.tone_minimum_frequency_hz == kFeatherHilToneMinimumFrequencyHz &&
       info.tone_maximum_frequency_hz == kFeatherHilToneMaximumFrequencyHz &&
       info.tone_minimum_level_permille == kFeatherHilToneMinimumLevelPermille &&
-      info.tone_maximum_level_permille == kFeatherHilToneMaximumLevelPermille;
-  if (!compatible) {
-    throw std::runtime_error("Feather HIL firmware, protocol, capabilities, or limits mismatch");
+      info.tone_maximum_level_permille == kFeatherHilToneMaximumLevelPermille &&
+      info.swing_start_lead_microseconds == SWING_HIL_SWING_START_LEAD_US &&
+      info.swing_step_microseconds == SWING_HIL_SWING_STEP_US &&
+      info.swing_pre_steps == SWING_HIL_SWING_PRE_STEPS &&
+      info.swing_white_microseconds == SWING_HIL_SWING_IMPACT_WHITE_US &&
+      info.swing_post_steps == SWING_HIL_SWING_POST_STEPS &&
+      info.swing_tone_duration_microseconds == SWING_HIL_SWING_TONE_DURATION_US &&
+      info.swing_tone_frequency_hz == SWING_HIL_SWING_TONE_FREQUENCY_HZ &&
+      info.swing_tone_level_permille == SWING_HIL_SWING_TONE_LEVEL_PERMILLE &&
+      info.swing_maximum_lateness_microseconds == SWING_HIL_SWING_MAX_LATENESS_US &&
+      info.swing_maximum_impact_delta_microseconds == SWING_HIL_SWING_MAX_IMPACT_COMMAND_DELTA_US &&
+      info.swing_color_reference_brightness == SWING_HIL_SWING_COLOR_REFERENCE_BRIGHTNESS &&
+      info.calibration_step_microseconds == SWING_HIL_CALIBRATION_STEP_US &&
+      info.calibration_candidates.size() == SWING_HIL_CALIBRATION_CANDIDATE_COUNT &&
+      info.fixture_neopixel_gpio == kFeatherHilFixtureNeopixelGpio &&
+      info.fixture_neopixel_color_order == kFeatherHilFixtureNeopixelColorOrder &&
+      info.shared_power_gpio == kFeatherHilSharedPowerGpio &&
+      info.prepare_timeout_microseconds == kFeatherHilPrepareTimeoutMicroseconds;
+  bool candidates_match = compatible;
+  for (std::size_t index = 0; candidates_match && index < info.calibration_candidates.size();
+       ++index) {
+    candidates_match = info.calibration_candidates[index] == swing_hil_calibration_candidate(index);
+  }
+  if (!candidates_match) {
+    throw std::runtime_error(
+        "Feather HIL firmware, protocol, capabilities, limits, or fixture topology mismatch");
   }
 }
 
@@ -165,6 +225,32 @@ FeatherDeviceInfo DecodeDeviceInfo(const FeatherResponse &response) {
   info.tone_maximum_frequency_hz = RequiredUnsigned32Field(response, "tone_frequency_max_hz");
   info.tone_minimum_level_permille = RequiredUnsigned32Field(response, "tone_level_min_permille");
   info.tone_maximum_level_permille = RequiredUnsigned32Field(response, "tone_level_max_permille");
+  info.swing_start_lead_microseconds = RequiredUnsigned32Field(response, "swing_start_lead_us");
+  info.swing_step_microseconds = RequiredUnsigned32Field(response, "swing_step_us");
+  info.swing_pre_steps = RequiredUnsigned32Field(response, "swing_pre_steps");
+  info.swing_white_microseconds = RequiredUnsigned32Field(response, "swing_white_us");
+  info.swing_post_steps = RequiredUnsigned32Field(response, "swing_post_steps");
+  info.swing_tone_duration_microseconds =
+      RequiredUnsigned32Field(response, "swing_tone_duration_us");
+  info.swing_tone_frequency_hz = RequiredUnsigned32Field(response, "swing_tone_frequency_hz");
+  info.swing_tone_level_permille = RequiredUnsigned32Field(response, "swing_tone_level_permille");
+  info.swing_maximum_lateness_microseconds =
+      RequiredUnsigned32Field(response, "swing_lateness_max_us");
+  info.swing_maximum_impact_delta_microseconds =
+      RequiredUnsigned32Field(response, "swing_impact_delta_max_us");
+  info.swing_color_reference_brightness =
+      RequiredUnsigned32Field(response, "swing_color_reference_brightness");
+  info.calibration_step_microseconds = RequiredUnsigned32Field(response, "calibration_step_us");
+  info.calibration_candidates =
+      ParseUnsignedList(RequiredField(response, "calibration_candidates"));
+  if (RequiredUnsigned32Field(response, "calibration_count") !=
+      info.calibration_candidates.size()) {
+    throw std::runtime_error("Feather calibration candidate count mismatch");
+  }
+  info.fixture_neopixel_gpio = RequiredUnsigned32Field(response, "fixture_neopixel_gpio");
+  info.fixture_neopixel_color_order = RequiredField(response, "fixture_neopixel_color_order");
+  info.shared_power_gpio = RequiredUnsigned32Field(response, "shared_power_gpio");
+  info.prepare_timeout_microseconds = RequiredUnsignedField(response, "prepare_timeout_us");
   info.device_microseconds = RequiredUnsignedField(response, "device_us");
   info.response = response;
   return info;
@@ -268,6 +354,294 @@ void PopulateDone(const FeatherResponse &response, FeatherStimulusReceipt *recei
   }
 }
 
+void PopulateCalibrationAcknowledgement(const FeatherResponse &response,
+                                        const FeatherDeviceInfo &info,
+                                        FeatherCalibrationReceipt *receipt) {
+  RequireResponse(response, FeatherResponseKind::kAcknowledgement, "CALIBRATE");
+  receipt->acknowledgement = response;
+  receipt->accepted_device_microseconds = RequiredUnsignedField(response, "accepted_us");
+  receipt->start_scheduled_device_microseconds =
+      RequiredUnsignedField(response, "start_scheduled_us");
+  receipt->start_lead_microseconds = RequiredUnsigned32Field(response, "start_lead_us");
+  receipt->step_microseconds = RequiredUnsigned32Field(response, "step_us");
+  const std::uint32_t step_count = RequiredUnsigned32Field(response, "step_count");
+  receipt->requested_duration_microseconds = RequiredUnsigned32Field(response, "duration_us");
+  receipt->candidates = ParseUnsignedList(RequiredField(response, "candidates"));
+  receipt->fixture_neopixel_gpio = RequiredUnsigned32Field(response, "fixture_neopixel_gpio");
+  receipt->shared_power_gpio = RequiredUnsigned32Field(response, "shared_power_gpio");
+  receipt->prepare_timeout_microseconds = RequiredUnsignedField(response, "prepare_timeout_us");
+  if (receipt->start_lead_microseconds != info.swing_start_lead_microseconds ||
+      receipt->step_microseconds != info.calibration_step_microseconds ||
+      step_count != info.calibration_candidates.size() ||
+      receipt->candidates != info.calibration_candidates ||
+      receipt->requested_duration_microseconds !=
+          receipt->step_microseconds * receipt->candidates.size() ||
+      receipt->start_scheduled_device_microseconds !=
+          receipt->accepted_device_microseconds + receipt->start_lead_microseconds ||
+      receipt->fixture_neopixel_gpio != info.fixture_neopixel_gpio ||
+      receipt->shared_power_gpio != info.shared_power_gpio ||
+      receipt->prepare_timeout_microseconds != info.prepare_timeout_microseconds) {
+    throw std::runtime_error("inconsistent Feather calibration acknowledgement");
+  }
+  receipt->steps.reserve(receipt->candidates.size());
+}
+
+void AppendCalibrationStep(const FeatherResponse &response, const FeatherDeviceInfo &info,
+                           std::chrono::steady_clock::time_point host_received,
+                           FeatherCalibrationReceipt *receipt) {
+  RequireResponse(response, FeatherResponseKind::kEvent, "CALIBRATE", "STEP");
+  FeatherCalibrationStep step = {
+      .index = RequiredUnsigned32Field(response, "index"),
+      .brightness = RequiredUnsigned32Field(response, "brightness"),
+      .scheduled_device_microseconds = RequiredUnsignedField(response, "scheduled_us"),
+      .device_microseconds = RequiredUnsignedField(response, "device_us"),
+      .lateness_microseconds = RequiredUnsignedField(response, "lateness_us"),
+      .host_received = host_received,
+      .response = response,
+  };
+  const std::size_t expected_index = receipt->steps.size();
+  const std::uint64_t expected_schedule =
+      receipt->start_scheduled_device_microseconds + expected_index * receipt->step_microseconds;
+  if (step.index != expected_index || expected_index >= receipt->candidates.size() ||
+      step.brightness != receipt->candidates[expected_index] ||
+      step.scheduled_device_microseconds != expected_schedule ||
+      step.device_microseconds < step.scheduled_device_microseconds ||
+      step.lateness_microseconds != step.device_microseconds - step.scheduled_device_microseconds ||
+      step.lateness_microseconds > info.swing_maximum_lateness_microseconds) {
+    throw std::runtime_error("inconsistent Feather calibration step");
+  }
+  receipt->steps.push_back(std::move(step));
+}
+
+void PopulateCalibrationDone(const FeatherResponse &response, const FeatherDeviceInfo &info,
+                             FeatherCalibrationReceipt *receipt) {
+  RequireResponse(response, FeatherResponseKind::kEvent, "CALIBRATE", "DONE");
+  receipt->done = response;
+  receipt->start_device_microseconds = RequiredUnsignedField(response, "start_us");
+  receipt->end_device_microseconds = RequiredUnsignedField(response, "end_us");
+  receipt->elapsed_device_microseconds = RequiredUnsignedField(response, "elapsed_us");
+  receipt->maximum_step_lateness_microseconds =
+      RequiredUnsignedField(response, "max_step_lateness_us");
+  receipt->power_on_device_microseconds = RequiredUnsignedField(response, "power_on_us");
+  receipt->prepared_until_device_microseconds =
+      RequiredUnsignedField(response, "prepared_until_us");
+  receipt->pixel_off = RequiredBooleanField(response, "pixel_off");
+  receipt->i2s_inactive = RequiredBooleanField(response, "i2s_inactive");
+  receipt->rail_powered = RequiredBooleanField(response, "rail_powered");
+  receipt->prepared = RequiredBooleanField(response, "prepared");
+  const std::uint32_t fixture_neopixel_gpio =
+      RequiredUnsigned32Field(response, "fixture_neopixel_gpio");
+  const std::uint32_t shared_power_gpio = RequiredUnsigned32Field(response, "shared_power_gpio");
+  const std::uint32_t repeated_duration = RequiredUnsigned32Field(response, "requested_us");
+  std::uint64_t measured_maximum_lateness = 0;
+  for (const FeatherCalibrationStep &step : receipt->steps) {
+    measured_maximum_lateness = std::max(measured_maximum_lateness, step.lateness_microseconds);
+  }
+  const bool preparation_deadline_valid =
+      receipt->power_on_device_microseconds <=
+          std::numeric_limits<std::uint64_t>::max() - receipt->prepare_timeout_microseconds &&
+      receipt->prepared_until_device_microseconds ==
+          receipt->power_on_device_microseconds + receipt->prepare_timeout_microseconds &&
+      receipt->power_on_device_microseconds <= receipt->start_device_microseconds &&
+      receipt->prepared_until_device_microseconds > receipt->end_device_microseconds;
+  if (receipt->steps.size() != receipt->candidates.size() || receipt->steps.empty() ||
+      receipt->start_device_microseconds != receipt->steps.front().device_microseconds ||
+      receipt->end_device_microseconds < receipt->start_device_microseconds ||
+      receipt->elapsed_device_microseconds !=
+          receipt->end_device_microseconds - receipt->start_device_microseconds ||
+      repeated_duration != receipt->requested_duration_microseconds ||
+      receipt->elapsed_device_microseconds < receipt->requested_duration_microseconds ||
+      receipt->elapsed_device_microseconds - receipt->requested_duration_microseconds >
+          kMaximumOutputShutdownOvershootMicroseconds ||
+      receipt->maximum_step_lateness_microseconds != measured_maximum_lateness ||
+      measured_maximum_lateness > info.swing_maximum_lateness_microseconds ||
+      fixture_neopixel_gpio != receipt->fixture_neopixel_gpio ||
+      shared_power_gpio != receipt->shared_power_gpio || !receipt->pixel_off ||
+      !receipt->i2s_inactive || !receipt->rail_powered || !receipt->prepared ||
+      !preparation_deadline_valid) {
+    throw std::runtime_error("inconsistent Feather calibration completion");
+  }
+}
+
+void PopulateSwingAcknowledgement(const FeatherResponse &response, const FeatherDeviceInfo &info,
+                                  std::uint32_t brightness, FeatherSwingReceipt *receipt) {
+  RequireResponse(response, FeatherResponseKind::kAcknowledgement, "SWING");
+  receipt->acknowledgement = response;
+  receipt->accepted_device_microseconds = RequiredUnsignedField(response, "accepted_us");
+  receipt->sequence_start_scheduled_device_microseconds =
+      RequiredUnsignedField(response, "sequence_start_scheduled_us");
+  receipt->impact_scheduled_device_microseconds =
+      RequiredUnsignedField(response, "impact_scheduled_us");
+  receipt->post_scheduled_device_microseconds =
+      RequiredUnsignedField(response, "post_scheduled_us");
+  receipt->end_scheduled_device_microseconds = RequiredUnsignedField(response, "end_scheduled_us");
+  receipt->tone_sample_rate_hz = RequiredUnsigned32Field(response, "tone_sample_rate_hz");
+  receipt->tone_sample_count = RequiredUnsigned32Field(response, "tone_sample_count");
+  receipt->brightness = RequiredUnsigned32Field(response, "brightness");
+  receipt->fixture_neopixel_gpio = RequiredUnsigned32Field(response, "fixture_neopixel_gpio");
+  receipt->shared_power_gpio = RequiredUnsigned32Field(response, "shared_power_gpio");
+  receipt->prepared_at_acknowledgement = RequiredBooleanField(response, "prepared");
+  receipt->rail_powered_at_acknowledgement = RequiredBooleanField(response, "rail_powered");
+  const std::uint64_t expected_tone_samples =
+      static_cast<std::uint64_t>(SWING_HIL_SWING_TONE_DURATION_US) * kFeatherHilToneSampleRateHz /
+      1'000'000U;
+  const bool constants_match =
+      RequiredUnsigned32Field(response, "start_lead_us") == info.swing_start_lead_microseconds &&
+      RequiredUnsigned32Field(response, "step_us") == info.swing_step_microseconds &&
+      RequiredUnsigned32Field(response, "pre_steps") == info.swing_pre_steps &&
+      RequiredUnsigned32Field(response, "white_us") == info.swing_white_microseconds &&
+      RequiredUnsigned32Field(response, "post_steps") == info.swing_post_steps &&
+      RequiredUnsigned32Field(response, "tone_duration_us") ==
+          info.swing_tone_duration_microseconds &&
+      RequiredUnsigned32Field(response, "tone_frequency_hz") == info.swing_tone_frequency_hz &&
+      RequiredUnsigned32Field(response, "tone_level_permille") == info.swing_tone_level_permille;
+  if (!constants_match || receipt->brightness != brightness ||
+      receipt->fixture_neopixel_gpio != info.fixture_neopixel_gpio ||
+      receipt->shared_power_gpio != info.shared_power_gpio ||
+      !receipt->prepared_at_acknowledgement || !receipt->rail_powered_at_acknowledgement ||
+      receipt->tone_sample_rate_hz != kFeatherHilToneSampleRateHz ||
+      receipt->tone_sample_count != expected_tone_samples ||
+      receipt->sequence_start_scheduled_device_microseconds !=
+          receipt->accepted_device_microseconds + info.swing_start_lead_microseconds ||
+      receipt->impact_scheduled_device_microseconds !=
+          receipt->sequence_start_scheduled_device_microseconds +
+              static_cast<std::uint64_t>(info.swing_step_microseconds) * info.swing_pre_steps ||
+      receipt->post_scheduled_device_microseconds !=
+          receipt->impact_scheduled_device_microseconds + info.swing_white_microseconds ||
+      receipt->end_scheduled_device_microseconds !=
+          receipt->post_scheduled_device_microseconds +
+              static_cast<std::uint64_t>(info.swing_step_microseconds) * info.swing_post_steps) {
+    throw std::runtime_error("inconsistent Feather swing acknowledgement");
+  }
+}
+
+FeatherSwingPhase DecodeSwingPhase(const FeatherResponse &response, const FeatherDeviceInfo &info,
+                                   std::string_view expected_phase, std::uint64_t expected_schedule,
+                                   std::chrono::steady_clock::time_point host_received) {
+  RequireResponse(response, FeatherResponseKind::kEvent, "SWING", "PHASE");
+  FeatherSwingPhase phase = {
+      .phase = RequiredField(response, "phase"),
+      .scheduled_device_microseconds = RequiredUnsignedField(response, "scheduled_us"),
+      .device_microseconds = RequiredUnsignedField(response, "device_us"),
+      .lateness_microseconds = RequiredUnsignedField(response, "lateness_us"),
+      .maximum_step_lateness_microseconds = RequiredUnsignedField(response, "max_step_lateness_us"),
+      .step_microseconds = RequiredUnsigned32Field(response, "step_us"),
+      .step_count = RequiredUnsigned32Field(response, "step_count"),
+      .host_received = host_received,
+      .response = response,
+  };
+  const std::uint32_t expected_count =
+      expected_phase == "pre" ? info.swing_pre_steps : info.swing_post_steps;
+  if (phase.phase != expected_phase || phase.scheduled_device_microseconds != expected_schedule ||
+      phase.device_microseconds < phase.scheduled_device_microseconds ||
+      phase.lateness_microseconds !=
+          phase.device_microseconds - phase.scheduled_device_microseconds ||
+      phase.lateness_microseconds > info.swing_maximum_lateness_microseconds ||
+      phase.maximum_step_lateness_microseconds > info.swing_maximum_lateness_microseconds ||
+      phase.step_microseconds != info.swing_step_microseconds ||
+      phase.step_count != expected_count) {
+    throw std::runtime_error("inconsistent Feather swing phase: " + std::string(expected_phase));
+  }
+  return phase;
+}
+
+FeatherSwingImpact DecodeSwingImpact(const FeatherResponse &response, const FeatherDeviceInfo &info,
+                                     const FeatherSwingReceipt &receipt,
+                                     std::chrono::steady_clock::time_point host_received) {
+  RequireResponse(response, FeatherResponseKind::kEvent, "SWING", "IMPACT");
+  FeatherSwingImpact impact = {
+      .scheduled_device_microseconds = RequiredUnsignedField(response, "scheduled_us"),
+      .device_microseconds = RequiredUnsignedField(response, "device_us"),
+      .lateness_microseconds = RequiredUnsignedField(response, "lateness_us"),
+      .white_command_device_microseconds = RequiredUnsignedField(response, "white_command_us"),
+      .tone_command_device_microseconds = RequiredUnsignedField(response, "tone_command_us"),
+      .command_delta_microseconds = RequiredUnsignedField(response, "command_delta_us"),
+      .white_end_device_microseconds = RequiredUnsignedField(response, "white_end_us"),
+      .tone_end_device_microseconds = RequiredUnsignedField(response, "tone_end_us"),
+      .brightness = RequiredUnsigned32Field(response, "brightness"),
+      .host_received = host_received,
+      .response = response,
+  };
+  const std::uint64_t measured_delta =
+      impact.white_command_device_microseconds > impact.tone_command_device_microseconds
+          ? impact.white_command_device_microseconds - impact.tone_command_device_microseconds
+          : impact.tone_command_device_microseconds - impact.white_command_device_microseconds;
+  if (impact.tone_end_device_microseconds < impact.tone_command_device_microseconds ||
+      impact.white_end_device_microseconds < impact.white_command_device_microseconds) {
+    throw std::runtime_error("inconsistent Feather swing impact output times");
+  }
+  const std::uint64_t tone_elapsed =
+      impact.tone_end_device_microseconds - impact.tone_command_device_microseconds;
+  const std::uint64_t white_elapsed =
+      impact.white_end_device_microseconds - impact.white_command_device_microseconds;
+  if (impact.scheduled_device_microseconds != receipt.impact_scheduled_device_microseconds ||
+      impact.device_microseconds != impact.white_command_device_microseconds ||
+      impact.device_microseconds < impact.scheduled_device_microseconds ||
+      impact.lateness_microseconds !=
+          impact.device_microseconds - impact.scheduled_device_microseconds ||
+      impact.lateness_microseconds > info.swing_maximum_lateness_microseconds ||
+      impact.command_delta_microseconds != measured_delta ||
+      measured_delta > info.swing_maximum_impact_delta_microseconds ||
+      impact.brightness != receipt.brightness ||
+      RequiredUnsigned32Field(response, "white_us") != info.swing_white_microseconds ||
+      RequiredUnsigned32Field(response, "tone_duration_us") !=
+          info.swing_tone_duration_microseconds ||
+      RequiredUnsigned32Field(response, "tone_sample_count") != receipt.tone_sample_count ||
+      white_elapsed < info.swing_white_microseconds ||
+      white_elapsed - info.swing_white_microseconds > kMaximumOutputShutdownOvershootMicroseconds ||
+      tone_elapsed < info.swing_tone_duration_microseconds ||
+      tone_elapsed - info.swing_tone_duration_microseconds >
+          kMaximumToneDurationOvershootMicroseconds) {
+    throw std::runtime_error("inconsistent Feather swing impact");
+  }
+  return impact;
+}
+
+void PopulateSwingDone(const FeatherResponse &response, const FeatherDeviceInfo &info,
+                       FeatherSwingReceipt *receipt) {
+  RequireResponse(response, FeatherResponseKind::kEvent, "SWING", "DONE");
+  receipt->done = response;
+  receipt->outputs_inactive_at_completion = RequiredBooleanField(response, "outputs_inactive");
+  receipt->prepared_at_completion = RequiredBooleanField(response, "prepared");
+  receipt->pixel_off_at_completion = RequiredBooleanField(response, "pixel_off");
+  receipt->i2s_inactive_at_completion = RequiredBooleanField(response, "i2s_inactive");
+  receipt->rail_powered_at_completion = RequiredBooleanField(response, "rail_powered");
+  const std::uint32_t fixture_neopixel_gpio =
+      RequiredUnsigned32Field(response, "fixture_neopixel_gpio");
+  const std::uint32_t shared_power_gpio = RequiredUnsigned32Field(response, "shared_power_gpio");
+  const std::uint64_t repeated_start = RequiredUnsignedField(response, "sequence_start_us");
+  const std::uint64_t repeated_impact = RequiredUnsignedField(response, "impact_us");
+  const std::uint64_t repeated_post_start = RequiredUnsignedField(response, "post_start_us");
+  receipt->end_device_microseconds = RequiredUnsignedField(response, "end_us");
+  receipt->elapsed_device_microseconds = RequiredUnsignedField(response, "elapsed_us");
+  if (receipt->end_device_microseconds < receipt->pre.device_microseconds ||
+      receipt->end_device_microseconds < receipt->post.device_microseconds) {
+    throw std::runtime_error("inconsistent Feather swing completion times");
+  }
+  const std::uint64_t post_elapsed =
+      receipt->end_device_microseconds - receipt->post.device_microseconds;
+  if (repeated_start != receipt->pre.device_microseconds ||
+      repeated_impact != receipt->impact.device_microseconds ||
+      repeated_post_start != receipt->post.device_microseconds ||
+      RequiredUnsigned32Field(response, "pre_us") !=
+          info.swing_step_microseconds * info.swing_pre_steps ||
+      RequiredUnsigned32Field(response, "post_us") !=
+          info.swing_step_microseconds * info.swing_post_steps ||
+      receipt->elapsed_device_microseconds !=
+          receipt->end_device_microseconds - receipt->pre.device_microseconds ||
+      fixture_neopixel_gpio != receipt->fixture_neopixel_gpio ||
+      shared_power_gpio != receipt->shared_power_gpio || !receipt->outputs_inactive_at_completion ||
+      receipt->prepared_at_completion || !receipt->pixel_off_at_completion ||
+      !receipt->i2s_inactive_at_completion || receipt->rail_powered_at_completion ||
+      post_elapsed <
+          static_cast<std::uint64_t>(info.swing_step_microseconds) * info.swing_post_steps ||
+      post_elapsed -
+              static_cast<std::uint64_t>(info.swing_step_microseconds) * info.swing_post_steps >
+          kMaximumOutputShutdownOvershootMicroseconds) {
+    throw std::runtime_error("inconsistent Feather swing completion");
+  }
+}
+
 }  // namespace
 
 std::string_view FeatherHilTransactionStageName(FeatherHilTransactionStage stage) noexcept {
@@ -282,6 +656,14 @@ std::string_view FeatherHilTransactionStageName(FeatherHilTransactionStage stage
       return "acknowledgement";
     case FeatherHilTransactionStage::kStart:
       return "start";
+    case FeatherHilTransactionStage::kCalibrationStep:
+      return "calibration_step";
+    case FeatherHilTransactionStage::kPrePhase:
+      return "pre_phase";
+    case FeatherHilTransactionStage::kImpact:
+      return "impact";
+    case FeatherHilTransactionStage::kPostPhase:
+      return "post_phase";
     case FeatherHilTransactionStage::kDone:
       return "done";
   }
@@ -317,6 +699,8 @@ FeatherDeviceInfo FeatherHilController::QueryInfo() {
       .command_wire = BuildFeatherQueryCommand(request_id),
       .device_info = std::nullopt,
       .stimulus_receipt = std::nullopt,
+      .calibration_receipt = std::nullopt,
+      .swing_receipt = std::nullopt,
       .offending_response = std::nullopt,
   };
   const auto write_started = std::chrono::steady_clock::now();
@@ -391,6 +775,20 @@ FeatherStimulusReceipt FeatherHilController::PlayTone(std::chrono::microseconds 
                                   .level_permille = level_permille});
 }
 
+FeatherCalibrationReceipt FeatherHilController::CalibrateSwingBrightness() {
+  static_cast<void>(RequireNegotiated());
+  return RunCalibration(NextRequestId());
+}
+
+FeatherSwingReceipt FeatherHilController::RunSyntheticSwing(std::uint32_t brightness) {
+  const FeatherDeviceInfo &info = RequireNegotiated();
+  if (std::ranges::find(info.calibration_candidates, brightness) ==
+      info.calibration_candidates.end()) {
+    throw std::invalid_argument("swing brightness is not a negotiated calibration candidate");
+  }
+  return RunSwing(NextRequestId(), brightness);
+}
+
 FeatherResponse FeatherHilController::ReadFor(std::uint32_t request_id,
                                               std::chrono::milliseconds timeout,
                                               bool permit_initial_boot) {
@@ -424,6 +822,8 @@ FeatherStimulusReceipt FeatherHilController::RunStimulus(std::uint32_t request_i
       .command_wire = command.wire,
       .device_info = std::nullopt,
       .stimulus_receipt = receipt,
+      .calibration_receipt = std::nullopt,
+      .swing_receipt = std::nullopt,
       .offending_response = std::nullopt,
   };
   receipt.host_command_write_started = std::chrono::steady_clock::now();
@@ -481,6 +881,167 @@ FeatherStimulusReceipt FeatherHilController::RunStimulus(std::uint32_t request_i
     return receipt;
   } catch (const std::exception &error) {
     evidence.stimulus_receipt = receipt;
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+}
+
+FeatherCalibrationReceipt FeatherHilController::RunCalibration(std::uint32_t request_id) {
+  const FeatherDeviceInfo &info = RequireNegotiated();
+  FeatherCalibrationReceipt receipt;
+  receipt.request_id = request_id;
+  FeatherHilFailureEvidence evidence = {
+      .request_id = request_id,
+      .subject = "CALIBRATE",
+      .stage = FeatherHilTransactionStage::kStimulusWrite,
+      .command_wire = BuildFeatherCalibrationCommand(request_id),
+      .device_info = info,
+      .stimulus_receipt = std::nullopt,
+      .calibration_receipt = receipt,
+      .swing_receipt = std::nullopt,
+      .offending_response = std::nullopt,
+  };
+  receipt.host_command_write_started = std::chrono::steady_clock::now();
+  try {
+    serial_->Write(evidence.command_wire, kIoTimeout);
+  } catch (const std::exception &error) {
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+  receipt.host_command_sent = std::chrono::steady_clock::now();
+
+  evidence.stage = FeatherHilTransactionStage::kAcknowledgement;
+  try {
+    const FeatherResponse acknowledgement = ReadFor(request_id, kIoTimeout, false);
+    receipt.host_acknowledgement_received = std::chrono::steady_clock::now();
+    evidence.offending_response = acknowledgement;
+    RequireResponseRequest(acknowledgement, request_id);
+    PopulateCalibrationAcknowledgement(acknowledgement, info, &receipt);
+  } catch (const std::exception &error) {
+    evidence.calibration_receipt = receipt;
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+
+  evidence.stage = FeatherHilTransactionStage::kCalibrationStep;
+  for (std::size_t index = 0; index < info.calibration_candidates.size(); ++index) {
+    try {
+      const auto timeout =
+          index == 0U ? CompletionTimeout(
+                            info.swing_start_lead_microseconds,
+                            info.calibration_step_microseconds *
+                                static_cast<std::uint32_t>(info.calibration_candidates.size()))
+                      : kIoTimeout;
+      const FeatherResponse step = ReadFor(request_id, timeout, false);
+      const auto received = std::chrono::steady_clock::now();
+      evidence.offending_response = step;
+      RequireResponseRequest(step, request_id);
+      AppendCalibrationStep(step, info, received, &receipt);
+    } catch (const std::exception &error) {
+      evidence.calibration_receipt = receipt;
+      ThrowTransactionFailure(error, std::move(evidence));
+    }
+  }
+
+  evidence.stage = FeatherHilTransactionStage::kDone;
+  try {
+    const FeatherResponse done = ReadFor(request_id, kIoTimeout, false);
+    receipt.host_done_received = std::chrono::steady_clock::now();
+    evidence.offending_response = done;
+    RequireResponseRequest(done, request_id);
+    PopulateCalibrationDone(done, info, &receipt);
+    return receipt;
+  } catch (const std::exception &error) {
+    evidence.calibration_receipt = receipt;
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+}
+
+FeatherSwingReceipt FeatherHilController::RunSwing(std::uint32_t request_id,
+                                                   std::uint32_t brightness) {
+  const FeatherDeviceInfo &info = RequireNegotiated();
+  FeatherSwingReceipt receipt;
+  receipt.request_id = request_id;
+  FeatherHilFailureEvidence evidence = {
+      .request_id = request_id,
+      .subject = "SWING",
+      .stage = FeatherHilTransactionStage::kStimulusWrite,
+      .command_wire = BuildFeatherSwingCommand(request_id, brightness),
+      .device_info = info,
+      .stimulus_receipt = std::nullopt,
+      .calibration_receipt = std::nullopt,
+      .swing_receipt = receipt,
+      .offending_response = std::nullopt,
+  };
+  receipt.host_command_write_started = std::chrono::steady_clock::now();
+  try {
+    serial_->Write(evidence.command_wire, kIoTimeout);
+  } catch (const std::exception &error) {
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+  receipt.host_command_sent = std::chrono::steady_clock::now();
+
+  evidence.stage = FeatherHilTransactionStage::kAcknowledgement;
+  try {
+    const FeatherResponse acknowledgement = ReadFor(request_id, kIoTimeout, false);
+    receipt.host_acknowledgement_received = std::chrono::steady_clock::now();
+    evidence.offending_response = acknowledgement;
+    RequireResponseRequest(acknowledgement, request_id);
+    PopulateSwingAcknowledgement(acknowledgement, info, brightness, &receipt);
+  } catch (const std::exception &error) {
+    evidence.swing_receipt = receipt;
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+
+  const std::uint32_t total_duration = info.swing_step_microseconds * info.swing_pre_steps +
+                                       info.swing_white_microseconds +
+                                       info.swing_step_microseconds * info.swing_post_steps;
+  evidence.stage = FeatherHilTransactionStage::kPrePhase;
+  try {
+    const FeatherResponse pre = ReadFor(
+        request_id, CompletionTimeout(info.swing_start_lead_microseconds, total_duration), false);
+    const auto received = std::chrono::steady_clock::now();
+    evidence.offending_response = pre;
+    RequireResponseRequest(pre, request_id);
+    receipt.pre = DecodeSwingPhase(pre, info, "pre",
+                                   receipt.sequence_start_scheduled_device_microseconds, received);
+  } catch (const std::exception &error) {
+    evidence.swing_receipt = receipt;
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+
+  evidence.stage = FeatherHilTransactionStage::kImpact;
+  try {
+    const FeatherResponse impact = ReadFor(request_id, kIoTimeout, false);
+    const auto received = std::chrono::steady_clock::now();
+    evidence.offending_response = impact;
+    RequireResponseRequest(impact, request_id);
+    receipt.impact = DecodeSwingImpact(impact, info, receipt, received);
+  } catch (const std::exception &error) {
+    evidence.swing_receipt = receipt;
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+
+  evidence.stage = FeatherHilTransactionStage::kPostPhase;
+  try {
+    const FeatherResponse post = ReadFor(request_id, kIoTimeout, false);
+    const auto received = std::chrono::steady_clock::now();
+    evidence.offending_response = post;
+    RequireResponseRequest(post, request_id);
+    receipt.post =
+        DecodeSwingPhase(post, info, "post", receipt.post_scheduled_device_microseconds, received);
+  } catch (const std::exception &error) {
+    evidence.swing_receipt = receipt;
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+
+  evidence.stage = FeatherHilTransactionStage::kDone;
+  try {
+    const FeatherResponse done = ReadFor(request_id, kIoTimeout, false);
+    receipt.host_done_received = std::chrono::steady_clock::now();
+    evidence.offending_response = done;
+    RequireResponseRequest(done, request_id);
+    PopulateSwingDone(done, info, &receipt);
+    return receipt;
+  } catch (const std::exception &error) {
+    evidence.swing_receipt = receipt;
     ThrowTransactionFailure(error, std::move(evidence));
   }
 }

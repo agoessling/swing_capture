@@ -118,6 +118,41 @@ void ResetInvalidatesLatestWithoutReusingSequence() {
   assert(after_reset->preview_sequence == 2);
 }
 
+void ChangesCadenceWithoutResettingTheLatestFrame() {
+  using namespace std::chrono_literals;
+  LatestFrameSampler sampler({.minimum_interval = 33ms, .maximum_payload_bytes = 4});
+  const auto start = std::chrono::steady_clock::time_point(5s);
+  const auto first_payload = PayloadFor(1);
+  const auto second_payload = PayloadFor(2);
+  const auto third_payload = PayloadFor(3);
+
+  assert(sampler.TryPublish(MakeFrame(1, start, first_payload)) ==
+         PreviewFramePublishResult::kPublished);
+  assert(sampler.TryPublish(MakeFrame(2, start + 8ms, second_payload)) ==
+         PreviewFramePublishResult::kRateLimited);
+  sampler.SetMinimumInterval(8ms);
+  assert(sampler.minimum_interval() == 8ms);
+  assert(sampler.TryPublish(MakeFrame(2, start + 8ms, second_payload)) ==
+         PreviewFramePublishResult::kPublished);
+  assert(sampler.Latest()->preview_sequence == 2U);
+
+  sampler.SetMinimumInterval(33ms);
+  assert(sampler.Latest()->metadata.frame_id == 2U);
+  assert(sampler.TryPublish(MakeFrame(3, start + 40ms, third_payload)) ==
+         PreviewFramePublishResult::kRateLimited);
+  assert(sampler.TryPublish(MakeFrame(3, start + 41ms, third_payload)) ==
+         PreviewFramePublishResult::kPublished);
+
+  bool rejected = false;
+  try {
+    sampler.SetMinimumInterval(0ns);
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(sampler.minimum_interval() == 33ms);
+}
+
 void RejectsInvalidFramesAndConfiguration() {
   using namespace std::chrono_literals;
   bool rejected_interval = false;
@@ -199,13 +234,46 @@ void SnapshotReadsAreSafeDuringPublication() {
   assert(latest->metadata.frame_id == kFrameCount);
 }
 
+void CadenceChangesAreSafeDuringPublication() {
+  using namespace std::chrono_literals;
+  LatestFrameSampler sampler({.minimum_interval = 33ms, .maximum_payload_bytes = 4});
+  constexpr std::uint64_t kFrameCount = 2000;
+  std::atomic<bool> producer_done = false;
+  std::thread producer([&] {
+    for (std::uint64_t frame_id = 1; frame_id <= kFrameCount; ++frame_id) {
+      const auto payload = PayloadFor(frame_id);
+      const auto frame_time =
+          std::chrono::steady_clock::time_point(std::chrono::milliseconds(frame_id));
+      const auto result = sampler.TryPublish(MakeFrame(frame_id, frame_time, payload));
+      assert(result == PreviewFramePublishResult::kPublished ||
+             result == PreviewFramePublishResult::kRateLimited);
+    }
+    producer_done.store(true, std::memory_order_release);
+  });
+  std::thread cadence_changer([&] {
+    while (!producer_done.load(std::memory_order_acquire)) {
+      sampler.SetMinimumInterval(8ms);
+      sampler.SetMinimumInterval(33ms);
+    }
+  });
+  producer.join();
+  cadence_changer.join();
+
+  const auto latest = sampler.Latest();
+  assert(latest != nullptr);
+  assert(latest->metadata.frame_id <= kFrameCount);
+  assert(sampler.minimum_interval() == 33ms);
+}
+
 }  // namespace
 
 int main() {
   RateLimitsBeforeCopyingAndPreservesMetadata();
   OverwriteKeepsOlderSnapshotsImmutable();
   ResetInvalidatesLatestWithoutReusingSequence();
+  ChangesCadenceWithoutResettingTheLatestFrame();
   RejectsInvalidFramesAndConfiguration();
   SnapshotReadsAreSafeDuringPublication();
+  CadenceChangesAreSafeDuringPublication();
   return 0;
 }

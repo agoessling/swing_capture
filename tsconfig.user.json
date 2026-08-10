@@ -1,0 +1,15 @@
+{
+  "extends": "./.bazel_devtools/tsconfig.json",
+  "compilerOptions": {
+    "allowJs": false,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "lib": ["DOM", "DOM.Iterable", "ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "target": "ES2022",
+    "verbatimModuleSyntax": true
+  }
+}

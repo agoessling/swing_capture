@@ -20,6 +20,7 @@ namespace {
 
 using swing_capture::FrameMetadata;
 using swing_capture::image::Rgb8Image;
+using swing_capture::preview::DemosaicBayerRg8ToFit;
 using swing_capture::preview::FitWithin;
 using swing_capture::preview::PreviewDimensions;
 using swing_capture::preview::RenderPreview;
@@ -77,6 +78,25 @@ void BilinearResizePreservesConstantColorAndGeometry() {
     assert(resized.pixels[index + 1U] == 100);
     assert(resized.pixels[index + 2U] == 220);
   }
+}
+
+void FittedBayerDemosaicValidatesAndPreservesGeometry() {
+  const auto bayer = MakeBayer(8, 6);
+  const Rgb8Image fitted =
+      DemosaicBayerRg8ToFit(bayer, {.width = 8, .height = 6}, {.width = 4, .height = 4});
+  assert(fitted.width == 4);
+  assert(fitted.height == 3);
+  assert(fitted.pixels.size() == 4U * 3U * 3U);
+
+  bool rejected = false;
+  try {
+    static_cast<void>(
+        DemosaicBayerRg8ToFit(std::span<const std::byte>(bayer).first(bayer.size() - 1U),
+                              {.width = 8, .height = 6}, {.width = 4, .height = 4}));
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  assert(rejected);
 }
 
 void RenderingPreservesMetadataAndMeasuresFullBayerInput() {
@@ -203,6 +223,7 @@ void RenderSetSharesOneSequenceAcrossRoutineAndFullResolutionImages() {
 int main() {
   ComputesFitWithinGeometryWithoutUpscaling();
   BilinearResizePreservesConstantColorAndGeometry();
+  FittedBayerDemosaicValidatesAndPreservesGeometry();
   RenderingPreservesMetadataAndMeasuresFullBayerInput();
   RenderingRejectsInvalidBayerPayload();
   RenderSetSharesOneSequenceAcrossRoutineAndFullResolutionImages();

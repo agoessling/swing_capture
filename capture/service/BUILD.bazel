@@ -4,6 +4,7 @@ cc_library(
     name = "preview_api",
     srcs = ["preview_api.cc"],
     hdrs = ["preview_api.h"],
+    visibility = ["//capture:__subpackages__"],
     deps = [
         "@cpp-httplib//:httplib",
         "@nlohmann_json//:json",
@@ -26,12 +27,91 @@ cc_library(
     srcs = ["preview_station.cc"],
     hdrs = ["preview_station.h"],
     tags = ["requires-daheng-sdk"],
+    visibility = ["//capture:__subpackages__"],
     deps = [
         ":camera_worker",
         ":preview_api",
+        ":synthetic_swing_hil_operation",
+        "//capture/application:camera_clip_buffer",
+        "//capture/application:capture_controller",
+        "//capture/application:clip_session_publisher",
+        "//capture/application:session_catalog",
+        "//capture/audio:audio_capture_session",
+        "//capture/audio:arecord_pcm_source",
         "//capture/core:camera_source",
         "//capture/daheng:daheng_camera",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
         "//station:station_config",
+        ":synthetic_swing_station_workflow",
+    ],
+)
+
+cc_library(
+    name = "synthetic_swing_hil_operation",
+    srcs = ["synthetic_swing_hil_operation.cc"],
+    hdrs = ["synthetic_swing_hil_operation.h"],
+)
+
+cc_test(
+    name = "synthetic_swing_hil_operation_test",
+    size = "small",
+    srcs = ["synthetic_swing_hil_operation_test.cc"],
+    deps = [":synthetic_swing_hil_operation"],
+)
+
+cc_library(
+    name = "synthetic_swing_hil_timeline",
+    srcs = ["synthetic_swing_hil_timeline.cc"],
+    hdrs = ["synthetic_swing_hil_timeline.h"],
+    deps = [
+        "//capture/hil:feather_hil_controller",
+        "//capture/optical:rgb_swing",
+        "//embedded/prop_maker:swing_sequence",
+    ],
+)
+
+cc_test(
+    name = "synthetic_swing_hil_timeline_test",
+    size = "small",
+    srcs = ["synthetic_swing_hil_timeline_test.cc"],
+    deps = [
+        ":synthetic_swing_hil_timeline",
+        "//capture/hil:feather_hil_controller",
+        "//capture/optical:rgb_swing",
+        "//embedded/prop_maker:swing_sequence",
+    ],
+)
+
+cc_library(
+    name = "synthetic_swing_station_workflow",
+    srcs = ["synthetic_swing_station_workflow.cc"],
+    hdrs = ["synthetic_swing_station_workflow.h"],
+    deps = [
+        ":synthetic_swing_hil_timeline",
+        "//capture/application:capture_controller",
+        "//capture/application:clip_session_publisher",
+        "//capture/core:device_clock_mapper",
+        "//capture/core:pooled_raw_frame_ring",
+        "//capture/hil:feather_hil_controller",
+        "//capture/image:image_quality",
+        "//capture/optical:led_pulse",
+        "//capture/optical:rgb_swing",
+        "//capture/preview:latest_frame_sampler",
+        "//embedded/prop_maker:swing_sequence",
+    ],
+)
+
+cc_test(
+    name = "synthetic_swing_station_workflow_test",
+    size = "small",
+    srcs = ["synthetic_swing_station_workflow_test.cc"],
+    deps = [
+        ":synthetic_swing_station_workflow",
+        "//capture/application:capture_controller",
+        "//capture/core:pooled_raw_frame_ring",
+        "//capture/hil:feather_hil_controller",
+        "//capture/preview:latest_frame_sampler",
     ],
 )
 
@@ -39,6 +119,7 @@ cc_binary(
     name = "preview_server",
     srcs = ["preview_server.cc"],
     data = ["//web:static_app"],
+    linkstatic = False,
     tags = ["requires-daheng-sdk"],
     visibility = ["//visibility:public"],
     deps = [

@@ -32,6 +32,9 @@ using swing_capture::daheng::DahengDiagnostics;
 using swing_capture::daheng::FrameHandler;
 using swing_capture::daheng::kDefaultExposureMicroseconds;
 using swing_capture::daheng::kDefaultGainDecibels;
+using swing_capture::preview::PreviewFrameProcessor;
+using swing_capture::preview::PreviewRenderOptions;
+using swing_capture::preview::RenderedPreviewImage;
 using swing_capture::service::CameraRole;
 using swing_capture::service::CameraSettingsUpdate;
 using swing_capture::service::CameraStatus;
@@ -191,7 +194,35 @@ class FakeCamera final : public PreviewCameraDevice {
   bool return_incomplete_frames_ = false;
 };
 
-CameraWorker MakeWorker(FakeCamera **fake_out, std::uint32_t width = 8, std::uint32_t height = 6) {
+class CountingPreviewProcessor final : public PreviewFrameProcessor {
+ public:
+  RenderedPreviewImage Render(const swing_capture::preview::SampledPreviewFrame &frame,
+                              const PreviewRenderOptions &) override {
+    render_count_.fetch_add(1U, std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now();
+    return {
+        .source_metadata = frame.metadata,
+        .preview_sequence = frame.preview_sequence,
+        .dimensions = {.width = frame.metadata.width, .height = frame.metadata.height},
+        .source_quality = {},
+        .media_type = "image/jpeg",
+        .encoded_bytes = "jpeg",
+        .timings = {},
+        .render_started_at = now,
+        .render_completed_at = now,
+    };
+  }
+
+  [[nodiscard]] std::uint64_t render_count() const {
+    return render_count_.load(std::memory_order_relaxed);
+  }
+
+ private:
+  std::atomic<std::uint64_t> render_count_ = 0;
+};
+
+CameraWorker MakeWorker(FakeCamera **fake_out, std::uint32_t width = 8, std::uint32_t height = 6,
+                        std::unique_ptr<PreviewFrameProcessor> frame_processor = nullptr) {
   auto fake = std::make_unique<FakeCamera>();
   *fake_out = fake.get();
   return CameraWorker(CameraRole::kDownTheLine, std::move(fake),
@@ -200,7 +231,8 @@ CameraWorker MakeWorker(FakeCamera **fake_out, std::uint32_t width = 8, std::uin
                        .target_frames_per_second = 200.0,
                        .exposure_microseconds = kDefaultExposureMicroseconds,
                        .gain_decibels = kDefaultGainDecibels,
-                       .acquisition_buffer_count = 4});
+                       .acquisition_buffer_count = 4},
+                      std::move(frame_processor));
 }
 
 void WaitForPreview(CameraWorker &worker) {
@@ -243,6 +275,11 @@ void TestCapturePreviewAndSettingsLifecycle() {
   assert(initial.preview_performance.rendered_age_milliseconds >= 0.0);
   assert(initial.preview_performance.total_milliseconds >=
          initial.preview_performance.encode_milliseconds);
+  const auto sampled = worker.LatestSampledFrame();
+  assert(sampled != nullptr);
+  assert(sampled->metadata.width == 800);
+  assert(sampled->metadata.height == 600);
+  assert(sampled->bayer_pixels.size() == 800U * 600U);
   const auto initial_routine = worker.LatestPreview(false);
   const auto initial_full_resolution = worker.LatestPreview(true);
   assert(initial_routine.has_value());
@@ -260,6 +297,7 @@ void TestCapturePreviewAndSettingsLifecycle() {
   assert(updated.exposure_microseconds.value == 1770.0);
   assert(updated.gain_decibels.value == 3.5);
   assert(updated.preview_sequence == 0);
+  assert(worker.LatestSampledFrame() == nullptr);
   assert(!worker.LatestPreview(false).has_value());
   assert(!worker.LatestPreview(true).has_value());
 
@@ -290,6 +328,7 @@ void TestCapturePreviewAndSettingsLifecycle() {
   assert(stopped.error.empty());
   assert(!worker.LatestPreview(false).has_value());
   assert(!worker.LatestPreview(true).has_value());
+  assert(worker.LatestSampledFrame() == nullptr);
 }
 
 void TestUpdateAfterStopRejectsPromptly() {
@@ -401,6 +440,33 @@ void TestFailedUpdateRestoresPreviousConfiguration() {
   worker.Stop();
 }
 
+void TestHighRateSamplingDoesNotIncreaseRoutineRenderCadence() {
+  using namespace std::chrono_literals;
+  FakeCamera *fake = nullptr;
+  auto processor = std::make_unique<CountingPreviewProcessor>();
+  CountingPreviewProcessor *const processor_observer = processor.get();
+  CameraWorker worker = MakeWorker(&fake, 8, 6, std::move(processor));
+  assert(worker.LatestFrameSamplingInterval() == 33ms);
+  worker.SetLatestFrameSamplingInterval(8ms);
+  assert(worker.LatestFrameSamplingInterval() == 8ms);
+  worker.Start();
+
+  const std::uint64_t first_capture = fake->capture_calls();
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  while (fake->capture_calls() < first_capture + 100U &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(2ms);
+  }
+  assert(fake->capture_calls() >= first_capture + 100U);
+  const auto sampled = worker.LatestSampledFrame();
+  assert(sampled != nullptr);
+  assert(sampled->preview_sequence >= 20U);
+  const std::uint64_t render_count = processor_observer->render_count();
+  assert(render_count > 0U);
+  assert(sampled->preview_sequence > render_count * 2U);
+  worker.Stop();
+}
+
 }  // namespace
 
 int main() {
@@ -415,5 +481,6 @@ int main() {
   run("stop failure", TestStopFailureDuringSettingsUpdateIsFatal);
   run("rejected setting", TestRejectedSettingDoesNotStopCamera);
   run("failed update rollback", TestFailedUpdateRestoresPreviousConfiguration);
+  run("high-rate sample render throttle", TestHighRateSamplingDoesNotIncreaseRoutineRenderCadence);
   return 0;
 }

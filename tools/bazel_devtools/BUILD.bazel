@@ -1,5 +1,10 @@
 # ##BAZEL_DEVTOOLS_MANAGED_BEGIN:tools##
-load("@bazel_devtools//tools:defs.bzl", "bazel_devtools_formatters", "tool_binary")
+load(
+    "@bazel_devtools//tools:defs.bzl",
+    "bazel_devtools_format_driver",
+    "bazel_devtools_formatters",
+    "tool_binary",
+)
 
 package(default_visibility = ["//visibility:public"])
 
@@ -31,5 +36,15 @@ bazel_devtools_formatters(
         "typescript",
     ],
     clang_format = ":clang_format",
+)
+
+bazel_devtools_format_driver(
+    name = "format",
+    languages = [
+        "python",
+        "cpp",
+        "typescript",
+    ],
+    biome = ":biome",
 )
 # ##BAZEL_DEVTOOLS_MANAGED_END:tools##

@@ -383,6 +383,23 @@ PooledRawFrameSnapshot PooledRawFrameRing::Freeze() const {
   }
 }
 
+void PooledRawFrameRing::Reset() {
+  if ((state_->publication_sequence.fetch_add(1, std::memory_order_acq_rel) & 1U) != 0U) {
+    std::terminate();
+  }
+  for (std::size_t slot = 0; slot < state_->active_capacity; ++slot) {
+    const std::size_t block_index = state_->active_slots[slot].exchange(
+        PooledRawFrameRingState::kUnusedBlock, std::memory_order_acq_rel);
+    if (block_index != PooledRawFrameRingState::kUnusedBlock) {
+      ReleaseBlockReference(*state_, block_index);
+    }
+  }
+  state_->active_size.store(0, std::memory_order_relaxed);
+  state_->next_active_slot.store(0, std::memory_order_relaxed);
+  next_pool_candidate_ = 0;
+  state_->publication_sequence.fetch_add(1, std::memory_order_release);
+}
+
 std::size_t PooledRawFrameRing::size() const noexcept {
   return state_->active_size.load(std::memory_order_acquire);
 }
