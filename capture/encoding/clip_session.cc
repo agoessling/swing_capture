@@ -73,6 +73,9 @@ void ValidateCapturePipelineProfile(const ClipCapturePipelineProfile &profile) {
   ValidateNonnegativeDuration(profile.audio_stop, "audio-stop duration");
   ValidateNonnegativeDuration(profile.prepublication_analysis, "prepublication-analysis duration");
   ValidateNonnegativeDuration(profile.publisher_planning, "publisher-planning duration");
+  ValidateNonnegativeDuration(profile.impact_preview_render, "impact-preview-render duration");
+  ValidateNonnegativeDuration(profile.impact_preview_ready_after_confirmation,
+                              "impact-preview-ready duration");
 }
 
 bool IsSafePathComponent(std::string_view value) {
@@ -424,6 +427,9 @@ Json SessionPipelineProfileJson(const ClipSessionPipelineProfile &profile) {
   return {
       {"prepublication_analysis_ms", profile.prepublication_analysis_ms},
       {"publisher_planning_ms", profile.publisher_planning_ms},
+      {"impact_preview_render_ms", profile.impact_preview_render_ms},
+      {"impact_preview_ready_after_confirmation_ms",
+       profile.impact_preview_ready_after_confirmation_ms},
       {"validation_and_timeline_ms", profile.validation_and_timeline_ms},
       {"output_setup_ms", profile.output_setup_ms},
       {"media_encoding_wall_ms", profile.media_encoding_wall_ms},
@@ -660,6 +666,9 @@ ClipPipelineProfile SnapshotPipelineProfile(const ClipCapturePipelineProfile &ca
   profile.session.prepublication_analysis_ms =
       Milliseconds(profile.capture.prepublication_analysis);
   profile.session.publisher_planning_ms = Milliseconds(profile.capture.publisher_planning);
+  profile.session.impact_preview_render_ms = Milliseconds(profile.capture.impact_preview_render);
+  profile.session.impact_preview_ready_after_confirmation_ms =
+      Milliseconds(profile.capture.impact_preview_ready_after_confirmation);
   profile.session.validation_and_timeline_ms = validated.validation_and_timeline_ms;
   profile.session.output_setup_ms = measurements.output_setup_ms;
   profile.session.media_encoding_wall_ms = encoded_views.wall_ms;

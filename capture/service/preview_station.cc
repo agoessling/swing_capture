@@ -46,6 +46,7 @@ using application::CaptureController;
 using application::CaptureControllerStatus;
 using application::CapturedSession;
 using application::ClipSessionPublisher;
+using application::ImpactPreviewImage;
 using application::PublishedSessionCatalog;
 using application::PublishedSessionRecord;
 using application::SessionIdentity;
@@ -247,8 +248,17 @@ struct PreviewStation::Impl {
           application::ClipSessionPublisherConfig{
               .output_root = session_output_root,
               .pre_roll = application::kDefaultCapturePreRoll,
-              .post_roll = application::kDefaultCapturePostRoll},
-          encoding::MakeVaapiVp9WebmEncoder());
+              .post_roll = application::kDefaultCapturePostRoll,
+              .impact_preview_ready =
+                  [this](const SessionIdentity &identity,
+                         std::array<ImpactPreviewImage, 2> images) {
+                    StoreImpactPreviews(identity, std::move(images));
+                  }},
+          encoding::MakeVaapiVp9WebmEncoder({.maximum_width = 1440,
+                                             .maximum_height = 1080,
+                                             .preprocessing_threads = 6,
+                                             .encoding_queue_depth = 8,
+                                             .quality_index = 24}));
       std::array<CameraCaptureEndpoint, 2> endpoints;
       for (std::size_t index = 0; index < endpoints.size(); ++index) {
         CameraSlot &slot = slots[index];
@@ -420,6 +430,34 @@ struct PreviewStation::Impl {
     return session_catalog.Find(session_id);
   }
 
+  void StoreImpactPreviews(const SessionIdentity &identity,
+                           std::array<ImpactPreviewImage, 2> images) {
+    std::array<SessionImpactPreview, 2> stored;
+    for (std::size_t index = 0; index < images.size(); ++index) {
+      ImpactPreviewImage &image = images[index];
+      stored[index] = {
+          .frame_id = image.frame_id,
+          .time_from_impact_microseconds = image.time_from_impact_us,
+          .width = image.width,
+          .height = image.height,
+          .media_type = std::move(image.media_type),
+          .bytes = std::make_shared<const std::string>(std::move(image.encoded_bytes)),
+      };
+    }
+    const std::scoped_lock lock(impact_preview_mutex);
+    impact_preview_session_id = identity.session_id;
+    impact_previews = std::move(stored);
+  }
+
+  [[nodiscard]] std::optional<SessionImpactPreview> FindImpactPreview(std::string_view session_id,
+                                                                      CameraRole role) const {
+    const std::scoped_lock lock(impact_preview_mutex);
+    if (impact_preview_session_id != session_id) {
+      return std::nullopt;
+    }
+    return impact_previews[role == CameraRole::kDownTheLine ? 0U : 1U];
+  }
+
   CameraSlot &Slot(CameraRole role) {
     const auto slot = std::ranges::find(slots, role, &CameraSlot::role);
     if (slot == slots.end()) {
@@ -439,6 +477,9 @@ struct PreviewStation::Impl {
   std::unique_ptr<hil::FeatherHilSerial> feather_serial;
   std::unique_ptr<hil::FeatherHilController> feather_controller;
   std::mutex camera_settings_mutex;
+  mutable std::mutex impact_preview_mutex;
+  std::string impact_preview_session_id;
+  std::array<SessionImpactPreview, 2> impact_previews;
   std::unique_ptr<SyntheticSwingStationWorkflow> hil_workflow;
   std::unique_ptr<SyntheticSwingHilOperation> hil_operation;
   std::atomic<std::uint64_t> next_session_sequence = 1;
@@ -634,6 +675,11 @@ std::optional<SessionAsset> PreviewStation::SessionMedia(std::string_view sessio
       .path = session->media_paths.at(role_index),
       .media_type = "video/webm",
   };
+}
+
+std::optional<SessionImpactPreview> PreviewStation::ImpactPreview(std::string_view session_id,
+                                                                  CameraRole role) {
+  return impl_->FindImpactPreview(session_id, role);
 }
 
 }  // namespace swing_capture::service

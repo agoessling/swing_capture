@@ -186,6 +186,8 @@ ClipCapturePipelineProfile CompleteCapturePipelineProfile() {
       .audio_stop = 1'500us,
       .prepublication_analysis = 6'000us,
       .publisher_planning = 7'000us,
+      .impact_preview_render = 8'000us,
+      .impact_preview_ready_after_confirmation = 509'000us,
   };
 }
 
@@ -290,7 +292,7 @@ void WritesDetailedPipelineProfile() {
   assert(result.pipeline_profile.has_value());
 
   const Json profile = Json::parse(ReadFile(result.manifest_path)).at("pipeline_profile");
-  assert(profile.at("schema_version") == 2);
+  assert(profile.at("schema_version") == 3);
   const Json &capture = profile.at("capture");
   assert(capture.at("trigger_estimate_to_confirmation_ms") == 0.03125);
   assert(capture.at("confirmation_to_acceptance_ms") == -3.5);
@@ -302,6 +304,8 @@ void WritesDetailedPipelineProfile() {
   const Json &session = profile.at("session");
   assert(session.at("prepublication_analysis_ms") == 6.0);
   assert(session.at("publisher_planning_ms") == 7.0);
+  assert(session.at("impact_preview_render_ms") == 8.0);
+  assert(session.at("impact_preview_ready_after_confirmation_ms") == 509.0);
   assert(session.at("validation_and_timeline_ms").get<double>() >= 0.0);
   assert(session.at("output_setup_ms").get<double>() >= 0.0);
   assert(session.at("media_encoding_wall_ms").get<double>() > 0.0);

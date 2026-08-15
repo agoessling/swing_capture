@@ -11,6 +11,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 
 #include "capture/application/camera_clip_buffer.h"
 #include "capture/application/capture_controller.h"
@@ -29,6 +30,7 @@ using swing_capture::application::CapturedSession;
 using swing_capture::application::CapturedTrigger;
 using swing_capture::application::CaptureTriggerSource;
 using swing_capture::application::ClipSessionPublisher;
+using swing_capture::application::ImpactPreviewImage;
 using swing_capture::application::PublishedSession;
 using swing_capture::application::SessionIdentity;
 using swing_capture::application::SyntheticSwingCameraEvidence;
@@ -145,7 +147,18 @@ void TestPlansAndPublishesRetainedSession() {
           },
   };
   const std::filesystem::path output_root = TestOutputRoot();
-  ClipSessionPublisher publisher({.output_root = output_root, .pre_roll = 5ms, .post_roll = 5ms},
+  std::vector<ImpactPreviewImage> impact_previews;
+  ClipSessionPublisher publisher({.output_root = output_root,
+                                  .pre_roll = 5ms,
+                                  .post_roll = 5ms,
+                                  .impact_preview_ready =
+                                      [&impact_previews](const SessionIdentity &identity,
+                                                         std::array<ImpactPreviewImage, 2> images) {
+                                        assert(identity.session_id == "session-test");
+                                        impact_previews.assign(
+                                            std::make_move_iterator(images.begin()),
+                                            std::make_move_iterator(images.end()));
+                                      }},
                                  std::make_unique<FakeEncoder>());
   const PublishedSession published = publisher.Publish(
       std::move(captured),
@@ -191,6 +204,16 @@ void TestPlansAndPublishesRetainedSession() {
       });
   assert(published.session_id == "session-test");
   assert(published.manifest_path == "session-test/manifest.json");
+  assert(impact_previews.size() == 2);
+  assert(impact_previews[0].role == "down_the_line");
+  assert(impact_previews[0].frame_id == 11);
+  assert(impact_previews[0].time_from_impact_us == 0);
+  assert(impact_previews[0].width == 2 && impact_previews[0].height == 2);
+  assert(impact_previews[0].media_type == "image/jpeg");
+  assert(impact_previews[0].encoded_bytes.starts_with("\xff\xd8"));
+  assert(impact_previews[1].role == "face_on");
+  assert(impact_previews[1].frame_id == 111);
+  assert(impact_previews[1].time_from_impact_us == 100);
 
   std::ifstream manifest_file(output_root / published.manifest_path);
   const Json manifest = Json::parse(manifest_file);
@@ -198,7 +221,7 @@ void TestPlansAndPublishesRetainedSession() {
   assert(manifest.at("session_id") == "session-test");
   assert(manifest.at("trigger").at("source") == "audio");
   const Json &profile = manifest.at("pipeline_profile");
-  assert(profile.at("schema_version") == 2);
+  assert(profile.at("schema_version") == 3);
   assert(profile.at("capture").at("trigger_estimate_to_confirmation_ms") == 2.0);
   assert(profile.at("capture").at("confirmation_to_acceptance_ms") == 1.0);
   assert(profile.at("capture").at("acceptance_to_freeze_start_ms") == 3.0);
@@ -207,6 +230,9 @@ void TestPlansAndPublishesRetainedSession() {
   assert(profile.at("capture").at("audio_stop_ms") == 1.0);
   assert(profile.at("session").at("prepublication_analysis_ms").get<double>() >= 0.0);
   assert(profile.at("session").at("publisher_planning_ms").get<double>() >= 0.0);
+  assert(profile.at("session").at("impact_preview_render_ms").get<double>() >= 0.0);
+  assert(profile.at("session").at("impact_preview_ready_after_confirmation_ms").get<double>() >
+         0.0);
   assert(profile.at("session").at("profile_snapshot_after_confirmation_ms").get<double>() > 0.0);
   assert(profile.at("views").at(0).at("role") == "down_the_line");
   assert(profile.at("views").at(1).at("role") == "face_on");

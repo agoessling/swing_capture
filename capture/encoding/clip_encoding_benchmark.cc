@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -68,13 +69,46 @@ bool IsValidViewProfile(const swing_capture::encoding::ClipViewPipelineProfile &
          std::isfinite(profile.total_ms) && profile.total_ms + 1e-6 >= stage_total;
 }
 
+std::optional<std::size_t> ParseSize(std::string_view text) {
+  if (text.empty()) {
+    return std::nullopt;
+  }
+  std::size_t value = 0;
+  for (const char character : text) {
+    if (character < '0' || character > '9') {
+      return std::nullopt;
+    }
+    const auto digit = static_cast<std::size_t>(character - '0');
+    if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10U) {
+      return std::nullopt;
+    }
+    value = value * 10U + digit;
+  }
+  return value;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
   const std::span<char *> arguments(argv, static_cast<std::size_t>(argc));
-  const bool use_vaapi = arguments.size() == 3U && std::string_view(arguments[1]) == "--vaapi";
-  if (arguments.size() != 2U && !use_vaapi) {
-    std::cerr << "usage: clip_encoding_benchmark [--vaapi] <fresh-output-parent>\n";
+  const bool use_vaapi =
+      (arguments.size() == 3U || arguments.size() == 5U || arguments.size() == 6U) &&
+      (std::string_view(arguments[1]) == "--vaapi" ||
+       std::string_view(arguments[1]) == "--vaapi-full");
+  const bool use_full_resolution = use_vaapi && std::string_view(arguments[1]) == "--vaapi-full";
+  const bool tuned = arguments.size() >= 5U;
+  const std::optional<std::size_t> preprocessing_threads =
+      tuned ? ParseSize(arguments[2]) : std::optional<std::size_t>{4U};
+  const std::optional<std::size_t> encoding_queue_depth =
+      tuned ? ParseSize(arguments[3]) : std::optional<std::size_t>{4U};
+  const std::optional<std::size_t> quality_index =
+      arguments.size() == 6U ? ParseSize(arguments[4]) : std::optional<std::size_t>{24U};
+  if ((arguments.size() != 2U && !use_vaapi) || !preprocessing_threads.has_value() ||
+      !encoding_queue_depth.has_value() || !quality_index.has_value() ||
+      preprocessing_threads.value_or(0U) == 0U || encoding_queue_depth.value_or(0U) == 0U ||
+      quality_index.value_or(256U) > 255U) {
+    std::cerr << "usage: clip_encoding_benchmark [--vaapi|--vaapi-full "
+                 "[preprocessing-threads queue-depth [quality-index]]] <fresh-output-parent>\n";
     return 2;
   }
   const std::vector<std::byte> payload = MakeBayerFrame();
@@ -105,11 +139,22 @@ int main(int argc, char **argv) {
       .hil_evidence = std::nullopt,
       .capture_pipeline_profile = swing_capture::encoding::ClipCapturePipelineProfile{},
   };
-  const auto encoder = use_vaapi ? swing_capture::encoding::MakeVaapiVp9WebmEncoder()
-                                 : swing_capture::encoding::MakeSoftwareVp8WebmEncoder();
+  const auto encoder =
+      use_vaapi
+          ? swing_capture::encoding::MakeVaapiVp9WebmEncoder(
+                use_full_resolution
+                    ? swing_capture::encoding::VaapiVp9WebmOptions{
+                          .maximum_width = kSourceWidth,
+                          .maximum_height = kSourceHeight,
+                          .preprocessing_threads = preprocessing_threads.value_or(0U),
+                          .encoding_queue_depth = encoding_queue_depth.value_or(0U),
+                          .quality_index = static_cast<std::uint32_t>(quality_index.value_or(0U)),
+                      }
+                    : swing_capture::encoding::VaapiVp9WebmOptions{})
+          : swing_capture::encoding::MakeSoftwareVp8WebmEncoder();
   const auto started = std::chrono::steady_clock::now();
   const auto result = swing_capture::encoding::WriteClipSession(
-      std::filesystem::path(arguments[use_vaapi ? 2U : 1U]), input, *encoder);
+      std::filesystem::path(arguments[arguments.size() - 1U]), input, *encoder);
   const auto elapsed = std::chrono::steady_clock::now() - started;
   if (!result.pipeline_profile.has_value() ||
       !IsValidViewProfile(result.pipeline_profile->views[0], "down_the_line") ||

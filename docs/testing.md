@@ -390,6 +390,19 @@ The report, media, full camera images, browser screenshot, and structured
 profiles are preserved under
 `artifacts/hil/application-flow/20260809T211742Z-vaapi-vp9-pass/`.
 
+The low-latency revision retained full 1440x1080 output, overlapped bounded CPU
+frame preparation with queued VA-API submissions, requested ALSA shutdown as
+soon as the trigger was accepted, added exact early-impact JPEGs, and replaced
+one-second session polling with server-sent events. A fresh physical run passed
+with 433 contiguous frames per view at approximately 226.87 fps. The early
+JPEG pair was server-ready 538.2 ms after audio confirmation, of which roughly
+510.9 ms was required post-roll. Audio join consumed 0.004 ms. Concurrent
+full-resolution encoding took 2.901 seconds, and the pre-manifest snapshot was
+3.440 seconds after confirmation. Pinned Chromium loaded, decoded, sought, and
+presented both physical impact frames 398.3 ms after starting its manifest
+request. Evidence is preserved under
+`artifacts/hil/application-flow/20260809T230608Z-fullres-low-latency-pass/`.
+
 After a physical run, the pinned-Chromium bridge can replay the exact preserved
 manifest and WebMs without touching hardware:
 

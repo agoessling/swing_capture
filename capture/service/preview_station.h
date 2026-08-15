@@ -39,6 +39,8 @@ class PreviewStation final : public StationBackend {
   [[nodiscard]] std::optional<SessionAsset> SessionManifest(std::string_view session_id) override;
   [[nodiscard]] std::optional<SessionAsset> SessionMedia(std::string_view session_id,
                                                          CameraRole role) override;
+  [[nodiscard]] std::optional<SessionImpactPreview> ImpactPreview(std::string_view session_id,
+                                                                  CameraRole role) override;
 
  private:
   struct Impl;

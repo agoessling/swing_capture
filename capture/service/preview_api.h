@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -126,6 +127,15 @@ struct SessionAsset {
   std::string media_type;
 };
 
+struct SessionImpactPreview {
+  std::uint64_t frame_id = 0;
+  std::int64_t time_from_impact_microseconds = 0;
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
+  std::string media_type;
+  std::shared_ptr<const std::string> bytes;
+};
+
 class StationBackend {
  public:
   StationBackend() = default;
@@ -150,6 +160,8 @@ class StationBackend {
       std::string_view session_id) = 0;
   [[nodiscard]] virtual std::optional<SessionAsset> SessionMedia(std::string_view session_id,
                                                                  CameraRole role) = 0;
+  [[nodiscard]] virtual std::optional<SessionImpactPreview> ImpactPreview(
+      std::string_view session_id, CameraRole role) = 0;
 };
 
 [[nodiscard]] std::string_view CameraRoleName(CameraRole role) noexcept;

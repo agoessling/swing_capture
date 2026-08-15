@@ -1,9 +1,9 @@
-# Headless setup-preview service
+# Headless capture and review service
 
 `//capture/service:preview_server` is the sole camera-owning process for the
-headless setup UI. It opens the serials assigned in `.station.local.conf`, runs
-one acquisition/command thread per camera, and serves the production web bundle
-on port 8080.
+headless setup, capture, and review UI. It opens the serials assigned in
+`.station.local.conf`, runs one acquisition/command thread per camera, and
+serves the production web bundle on port 8080.
 
 The HTTP API is versioned at `/api/v1`:
 
@@ -16,6 +16,12 @@ The HTTP API is versioned at `/api/v1`:
   frame request. The legacy `.png` route remains available during migration.
 - `PATCH /api/v1/cameras/{role}/settings` accepts numeric `exposure_us` and
   `gain_db` fields and returns the camera's complete read-back status.
+- `/api/v1/capture/*` arms the one-shot microphone trigger and reports capture
+  progress. `/api/v1/sessions/*` serves the persistent catalog, manifests,
+  byte-range full-resolution VP9 media, and provisional trigger-nearest JPEGs.
+- `GET /api/v1/events` is a server-sent event stream for capture, early-image,
+  and session changes. The browser keeps a slow recovery poll but does not wait
+  for it during the normal path.
 
 The service is intentionally conservative:
 
@@ -34,6 +40,9 @@ The service is intentionally conservative:
   download/decode at a time, atomically swaps both roles, retains the last successful
   pair on failure, and collapses pending work to the newest sequences.
 - Settings are session-local for this milestone.
+- Production publication prepares frames on a bounded CPU worker pool while
+  two Intel VA-API VP9 contexts encode concurrently. Completed sessions remain
+  atomic; the exact impact JPEG pair is visible during encoding.
 - The listener has no authentication or TLS and belongs only on a trusted
   station network.
 

@@ -21,6 +21,7 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
   const [manifest, setManifest] = useState<ClipManifest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
+  const [refreshRevision, setRefreshRevision] = useState(0);
   const latestSeenRef = useRef<string | null>(null);
   const manifestRequestRef = useRef<string | null>(null);
   const selectedSessionIdRef = useRef<string | null>(null);
@@ -82,6 +83,7 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
       }
       setCapture(nextCapture);
       setSessions(visibleSessions);
+      setRefreshRevision((revision) => revision + 1);
       setError(null);
       const latest = visibleSessions[0];
       if (latest !== undefined && latest.session_id !== latestSeenRef.current) {
@@ -107,23 +109,44 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let refreshing = false;
+    let refreshAgain = false;
     const poll = async () => {
       if (!active) {
         return;
       }
-      await refresh();
+      if (refreshing) {
+        refreshAgain = true;
+        return;
+      }
+      refreshing = true;
+      do {
+        refreshAgain = false;
+        await refresh();
+      } while (active && refreshAgain);
+      refreshing = false;
       if (active) {
-        timer = setTimeout(() => void poll(), pollIntervalMs);
+        const nextRefreshMs = unsubscribe === undefined ? pollIntervalMs : 15_000;
+        timer = setTimeout(() => void poll(), nextRefreshMs);
       }
     };
+    unsubscribe = api.subscribeToChanges?.(() => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      void poll();
+    });
     void poll();
     return () => {
       active = false;
+      unsubscribe?.();
       if (timer !== undefined) {
         clearTimeout(timer);
       }
     };
-  }, [pollIntervalMs, refresh]);
+  }, [api, pollIntervalMs, refresh]);
 
   const setArmed = async (armed: boolean) => {
     setActionPending(true);
@@ -306,9 +329,28 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
             </p>
           ) : null}
           {selectedSession !== undefined && selectedSession.state !== "ready" ? (
-            <div className="review-placeholder" role="status">
-              <strong>{stateLabel(selectedSession.state)}</strong>
-              <span>The retained frames are being prepared for browser playback.</span>
+            <div className="impact-preview-panel" role="status">
+              <div className="impact-preview-heading">
+                <strong>{stateLabel(selectedSession.state)}</strong>
+                <span>Impact-adjacent frames appear first; exact video playback is encoding.</span>
+              </div>
+              {api.impactPreviewUrl === undefined ? null : (
+                <div className="impact-preview-grid">
+                  {(["down_the_line", "face_on"] as const).map((role) => (
+                    <figure key={role}>
+                      <img
+                        alt={`${roleLabel(role)} impact preview`}
+                        src={api.impactPreviewUrl?.(
+                          selectedSession.session_id,
+                          role,
+                          refreshRevision,
+                        )}
+                      />
+                      <figcaption>{roleLabel(role)}</figcaption>
+                    </figure>
+                  ))}
+                </div>
+              )}
             </div>
           ) : null}
           {manifest !== null && selectedSession?.state === "ready" ? (
@@ -316,7 +358,9 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
               <div className="clip-summary">
                 <span>{triggerLabel(manifest.trigger.source)}</span>
                 <span>{formatSessionTime(manifest.created_at_utc)}</span>
-                <span>VP8 · all-intra review proxy</span>
+                <span>
+                  {manifest.views[0]?.media.codec.toUpperCase()} · all-intra full resolution
+                </span>
                 {manifest.hil_evidence !== undefined ? <span>Synthetic HIL evidence</span> : null}
               </div>
               <ReviewPlayer manifest={manifest} />
@@ -424,6 +468,10 @@ function stateLabel(state: CaptureStatus["state"]): string {
     default:
       return state.charAt(0).toUpperCase() + state.slice(1);
   }
+}
+
+function roleLabel(role: "down_the_line" | "face_on"): string {
+  return role === "down_the_line" ? "Down the line" : "Face on";
 }
 
 function captureHeading(status: CaptureStatus | null): string {

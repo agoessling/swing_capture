@@ -26,6 +26,7 @@ struct SessionArtifactExpectations {
   double maximum_nominal_fps = 250.0;
   std::uint32_t maximum_encoded_width = 640;
   std::uint32_t maximum_encoded_height = 480;
+  bool require_source_resolution_encoding = false;
   std::string expected_codec = "vp8";
   // Ordinary audio-triggered sessions may omit HIL evidence. Setting either
   // requirement makes the current synthetic-swing evidence mandatory.
@@ -81,6 +82,8 @@ struct ValidatedCapturePipelineProfile {
 struct ValidatedSessionPipelineProfile {
   double prepublication_analysis_ms = 0.0;
   double publisher_planning_ms = 0.0;
+  double impact_preview_render_ms = 0.0;
+  double impact_preview_ready_after_confirmation_ms = 0.0;
   double validation_and_timeline_ms = 0.0;
   double output_setup_ms = 0.0;
   double media_encoding_wall_ms = 0.0;

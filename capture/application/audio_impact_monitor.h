@@ -45,6 +45,9 @@ class AudioImpactMonitor final {
   AudioImpactMonitor &operator=(AudioImpactMonitor &&) = delete;
 
   void Start();
+  // Nonblocking; safe from the monitor's own impact callback. Stop() performs
+  // the eventual join once the latency-critical post-roll boundary is reached.
+  void RequestStop() noexcept;
   void Stop() noexcept;
   [[nodiscard]] AudioImpactMonitorStatus Status() const;
 

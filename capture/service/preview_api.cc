@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -12,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -349,6 +351,103 @@ void HandleSessions(StationBackend &backend, httplib::Response &response) {
   }
 }
 
+std::string StationEventFingerprint(StationBackend &backend) {
+  const CaptureApplicationStatus capture = backend.CaptureStatus();
+  Json sessions = Json::array();
+  for (const SessionSummaryStatus &session : backend.Sessions()) {
+    sessions.push_back({
+        {"session_id", session.session_id},
+        {"state", session.state},
+        {"error", session.error},
+    });
+  }
+  Json impact_previews = nullptr;
+  if (capture.active_session_id.has_value()) {
+    const auto frame_id = [&backend, &capture](CameraRole role) -> std::optional<std::uint64_t> {
+      const auto preview = backend.ImpactPreview(*capture.active_session_id, role);
+      return preview.has_value() ? std::optional(preview->frame_id) : std::nullopt;
+    };
+    impact_previews = {
+        {"down_the_line", frame_id(CameraRole::kDownTheLine)},
+        {"face_on", frame_id(CameraRole::kFaceOn)},
+    };
+  }
+  return Json({
+                  {"capture_state", capture.state},
+                  {"armed", capture.armed},
+                  {"active_session_id", capture.active_session_id},
+                  {"capture_error", capture.error},
+                  {"hil_stage", capture.hil.stage},
+                  {"hil_busy", capture.hil.busy},
+                  {"hil_error", capture.hil.error},
+                  {"impact_previews", std::move(impact_previews)},
+                  {"sessions", std::move(sessions)},
+              })
+      .dump();
+}
+
+void HandleImpactPreview(StationBackend &backend, const httplib::Request &request,
+                         httplib::Response &response) {
+  const std::optional<CameraRole> role = ParseCameraRole(request.matches[2].str());
+  if (!role.has_value()) {
+    SetError(response, 404, "unknown camera role");
+    return;
+  }
+  try {
+    const auto preview = backend.ImpactPreview(request.matches[1].str(), *role);
+    if (!preview.has_value() || preview->bytes == nullptr) {
+      SetError(response, 404, "impact preview is not ready");
+      return;
+    }
+    response.set_content(*preview->bytes, preview->media_type);
+    response.set_header("Cache-Control", "no-store");
+    response.set_header("X-Swing-Capture-Frame-Id", std::to_string(preview->frame_id));
+    response.set_header("X-Swing-Capture-Time-From-Impact-Us",
+                        std::to_string(preview->time_from_impact_microseconds));
+  } catch (const std::invalid_argument &error) {
+    SetError(response, 400, error.what());
+  } catch (const std::exception &error) {
+    SetError(response, 503, error.what());
+  }
+}
+
+void HandleStationEvents(StationBackend &backend, httplib::Response &response) {
+  constexpr auto kObservationInterval = std::chrono::milliseconds(25);
+  constexpr auto kHeartbeatInterval = std::chrono::seconds(15);
+  response.set_header("Cache-Control", "no-cache");
+  response.set_header("X-Accel-Buffering", "no");
+  response.set_chunked_content_provider(
+      "text/event-stream",
+      [&backend, previous = std::string{}, next_observation = std::chrono::steady_clock::now(),
+       next_heartbeat = std::chrono::steady_clock::now(),
+       observation_interval = kObservationInterval,
+       heartbeat_interval = kHeartbeatInterval](std::size_t, httplib::DataSink &sink) mutable {
+        if (!sink.is_writable()) {
+          return false;
+        }
+        std::this_thread::sleep_until(next_observation);
+        const auto now = std::chrono::steady_clock::now();
+        next_observation = now + observation_interval;
+        try {
+          std::string current = StationEventFingerprint(backend);
+          if (current != previous) {
+            previous = std::move(current);
+            next_heartbeat = now + heartbeat_interval;
+            return sink.write("event: station\ndata: {}\n\n", 25);
+          }
+        } catch (const std::exception &) {
+          // The ordinary JSON status routes retain detailed errors. Wake the
+          // client so it can fetch and present them through the same parser.
+          return sink.write("event: station\ndata: {}\n\n", 25);
+        }
+        if (now >= next_heartbeat) {
+          next_heartbeat = now + heartbeat_interval;
+          return sink.write(": keepalive\n\n", 13);
+        }
+        return true;
+      });
+}
+
 void ServeSessionAsset(const std::optional<SessionAsset> &asset, httplib::Response &response) {
   if (!asset.has_value()) {
     SetError(response, 404, "session asset not found");
@@ -473,6 +572,9 @@ void RegisterPreviewRoutes(httplib::Server &server, StationBackend &backend,
   server.Get("/api/v1/sessions", [&backend](const httplib::Request &, httplib::Response &response) {
     HandleSessions(backend, response);
   });
+  server.Get("/api/v1/events", [&backend](const httplib::Request &, httplib::Response &response) {
+    HandleStationEvents(backend, response);
+  });
   server.Get(R"(/api/v1/sessions/([A-Za-z0-9_.-]+)/manifest)",
              [&backend](const httplib::Request &request, httplib::Response &response) {
                HandleSessionManifest(backend, request, response);
@@ -480,6 +582,10 @@ void RegisterPreviewRoutes(httplib::Server &server, StationBackend &backend,
   server.Get(R"(/api/v1/sessions/([A-Za-z0-9_.-]+)/(down_the_line|face_on)\.webm)",
              [&backend](const httplib::Request &request, httplib::Response &response) {
                HandleSessionMedia(backend, request, response);
+             });
+  server.Get(R"(/api/v1/sessions/([A-Za-z0-9_.-]+)/impact/(down_the_line|face_on)\.jpg)",
+             [&backend](const httplib::Request &request, httplib::Response &response) {
+               HandleImpactPreview(backend, request, response);
              });
 
   if (static_root.has_value()) {

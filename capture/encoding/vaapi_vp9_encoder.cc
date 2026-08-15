@@ -18,17 +18,24 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <exception>
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <ratio>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -289,6 +296,123 @@ Nv12Image ConvertRgbToNv12(const image::Rgb8Image &rgb) {
   return output;
 }
 
+struct PreparedFrame {
+  Nv12Image image;
+  double bayer_fit_demosaic_ms = 0.0;
+  double rgb_to_nv12_ms = 0.0;
+};
+
+PreparedFrame PrepareFrame(const ClipFrameInput &frame, const VaapiVp9WebmOptions &options) {
+  const auto demosaic_started = ProfileClock::now();
+  const image::Rgb8Image rgb = PrepareRgb(frame, options);
+  const double demosaic_ms = ElapsedMilliseconds(demosaic_started);
+  const auto conversion_started = ProfileClock::now();
+  Nv12Image nv12 = ConvertRgbToNv12(rgb);
+  return {
+      .image = std::move(nv12),
+      .bayer_fit_demosaic_ms = demosaic_ms,
+      .rgb_to_nv12_ms = ElapsedMilliseconds(conversion_started),
+  };
+}
+
+class BoundedFramePreprocessor final {
+ public:
+  BoundedFramePreprocessor(const CameraClipInput &input, VaapiVp9WebmOptions options,
+                           PreparedFrame first)
+      : input_(input),
+        options_(std::move(options)),
+        maximum_in_flight_(std::max<std::size_t>(2U, options_.preprocessing_threads * 2U)),
+        slots_(input.frames.size()) {
+    slots_.front() = std::move(first);
+    workers_.reserve(options_.preprocessing_threads);
+    for (std::size_t index = 0; index < options_.preprocessing_threads; ++index) {
+      workers_.emplace_back([this](const std::stop_token &stop_token) { Run(stop_token); });
+    }
+  }
+
+  ~BoundedFramePreprocessor() {
+    for (std::jthread &worker : workers_) {
+      worker.request_stop();
+    }
+    changed_.notify_all();
+  }
+
+  BoundedFramePreprocessor(const BoundedFramePreprocessor &) = delete;
+  BoundedFramePreprocessor &operator=(const BoundedFramePreprocessor &) = delete;
+  BoundedFramePreprocessor(BoundedFramePreprocessor &&) = delete;
+  BoundedFramePreprocessor &operator=(BoundedFramePreprocessor &&) = delete;
+
+  [[nodiscard]] PreparedFrame Take(std::size_t index) {
+    if (index >= slots_.size()) {
+      throw std::out_of_range("prepared clip frame index is out of range");
+    }
+    std::unique_lock lock(mutex_);
+    changed_.wait(lock, [this, index] { return failure_ != nullptr || slots_[index].has_value(); });
+    if (failure_ != nullptr) {
+      std::rethrow_exception(failure_);
+    }
+    if (!slots_[index].has_value()) {
+      throw std::logic_error("prepared clip frame notification had no frame");
+    }
+    PreparedFrame result = std::move(slots_[index]).value_or(PreparedFrame{});
+    slots_[index].reset();
+    next_to_consume_ = index + 1U;
+    lock.unlock();
+    changed_.notify_all();
+    return result;
+  }
+
+ private:
+  void Run(const std::stop_token &stop_token) noexcept {
+    while (!stop_token.stop_requested()) {
+      const std::optional<std::size_t> index = Reserve(stop_token);
+      if (!index.has_value()) {
+        return;
+      }
+      try {
+        PreparedFrame prepared = PrepareFrame(input_.frames[*index], options_);
+        {
+          const std::scoped_lock lock(mutex_);
+          slots_[*index] = std::move(prepared);
+        }
+        changed_.notify_all();
+      } catch (...) {
+        {
+          const std::scoped_lock lock(mutex_);
+          if (failure_ == nullptr) {
+            failure_ = std::current_exception();
+          }
+        }
+        changed_.notify_all();
+        return;
+      }
+    }
+  }
+
+  [[nodiscard]] std::optional<std::size_t> Reserve(const std::stop_token &stop_token) {
+    std::unique_lock lock(mutex_);
+    changed_.wait(lock, stop_token, [this] {
+      return failure_ != nullptr || next_to_prepare_ >= slots_.size() ||
+             next_to_prepare_ < next_to_consume_ + maximum_in_flight_;
+    });
+    if (stop_token.stop_requested() || failure_ != nullptr || next_to_prepare_ >= slots_.size()) {
+      return std::nullopt;
+    }
+    return next_to_prepare_++;
+  }
+
+  const CameraClipInput &input_;
+  VaapiVp9WebmOptions options_;
+  std::size_t maximum_in_flight_;
+  std::vector<std::optional<PreparedFrame>> slots_;
+  std::vector<std::jthread> workers_;
+  std::mutex mutex_;
+  std::condition_variable_any changed_;
+  std::exception_ptr failure_;
+  std::size_t next_to_prepare_ = 1;
+  std::size_t next_to_consume_ = 0;
+};
+
 std::vector<std::uint64_t> MediaTimesMicroseconds(const CameraClipInput &input) {
   std::vector<std::uint64_t> media_times;
   media_times.reserve(input.frames.size());
@@ -331,7 +455,17 @@ class VaEncoderContext final {
   VaEncoderContext(VaEncoderContext &&) = delete;
   VaEncoderContext &operator=(VaEncoderContext &&) = delete;
 
-  void Initialize(int render_fd, EncodedGeometry geometry) {
+  struct PendingFrame {
+    std::size_t surface_index;
+    VABufferID coded_buffer;
+  };
+
+  struct SubmitOptions {
+    std::uint32_t quality_index;
+    std::size_t surface_index;
+  };
+
+  void Initialize(int render_fd, EncodedGeometry geometry, std::size_t queue_depth) {
     display_ = api_.get_display_drm(render_fd);
     if (display_ == nullptr) {
       throw std::runtime_error("vaGetDisplayDRM returned no display");
@@ -342,13 +476,14 @@ class VaEncoderContext final {
     initialized_ = true;
     RequireEntrypoint();
     CreateConfig();
-    CreateResources(geometry);
+    CreateResources(geometry, queue_depth);
   }
 
-  void Upload(const Nv12Image &nv12) const {
-    RequireVa(api_, api_.sync_surface(display_, input_surface_), "vaSyncSurface before upload");
+  void Upload(const Nv12Image &nv12, std::size_t surface_index) const {
+    const SurfacePair &surfaces = SurfaceAt(surface_index);
+    RequireVa(api_, api_.sync_surface(display_, surfaces.input), "vaSyncSurface before upload");
     VAImage image{};
-    RequireVa(api_, api_.derive_image(display_, input_surface_, &image), "vaDeriveImage");
+    RequireVa(api_, api_.derive_image(display_, surfaces.input, &image), "vaDeriveImage");
     try {
       UploadMappedImage(nv12, image);
     } catch (...) {
@@ -358,7 +493,8 @@ class VaEncoderContext final {
     RequireVa(api_, api_.destroy_image(display_, image.image_id), "vaDestroyImage");
   }
 
-  [[nodiscard]] std::vector<std::uint8_t> EncodeKeyframe(std::uint32_t quality_index) const {
+  [[nodiscard]] PendingFrame SubmitKeyframe(SubmitOptions options) {
+    const SurfacePair &surfaces = SurfaceAt(options.surface_index);
     const std::size_t coded_capacity = std::max<std::size_t>(
         1U << 20U, static_cast<std::size_t>(geometry_.width) * geometry_.height * 4U);
     if (!std::in_range<unsigned int>(coded_capacity)) {
@@ -372,25 +508,43 @@ class VaEncoderContext final {
         "vaCreateBuffer coded data");
     try {
       const std::array<VABufferID, 3> parameters =
-          CreateFrameParameters({.coded_buffer = coded_buffer, .quality_index = quality_index});
+          CreateFrameParameters({.coded_buffer = coded_buffer,
+                                 .reconstructed_surface = surfaces.reconstructed,
+                                 .quality_index = options.quality_index});
       try {
-        Submit(parameters);
+        Submit(parameters, surfaces.input);
       } catch (...) {
         DestroyBuffers(parameters);
         throw;
       }
       DestroyBuffers(parameters);
-      RequireVa(api_, api_.sync_surface(display_, input_surface_), "vaSyncSurface encoded frame");
-      std::vector<std::uint8_t> output = CopyCodedBuffer(coded_buffer);
-      RequireVa(api_, api_.destroy_buffer(display_, coded_buffer), "vaDestroyBuffer coded data");
-      return output;
+      pending_coded_buffers_.push_back(coded_buffer);
+      return {.surface_index = options.surface_index, .coded_buffer = coded_buffer};
     } catch (...) {
       static_cast<void>(api_.destroy_buffer(display_, coded_buffer));
       throw;
     }
   }
 
+  [[nodiscard]] std::vector<std::uint8_t> Complete(PendingFrame pending) {
+    const SurfacePair &surfaces = SurfaceAt(pending.surface_index);
+    RequireVa(api_, api_.sync_surface(display_, surfaces.input), "vaSyncSurface encoded frame");
+    try {
+      std::vector<std::uint8_t> output = CopyCodedBuffer(pending.coded_buffer);
+      DestroyPendingBuffer(pending.coded_buffer);
+      return output;
+    } catch (...) {
+      DiscardPendingBuffer(pending.coded_buffer);
+      throw;
+    }
+  }
+
  private:
+  struct SurfacePair {
+    VASurfaceID input;
+    VASurfaceID reconstructed;
+  };
+
   void RequireEntrypoint() const {
     const int maximum = api_.max_num_entrypoints(display_);
     if (maximum <= 0) {
@@ -430,21 +584,24 @@ class VaEncoderContext final {
               "vaCreateConfig VP9");
   }
 
-  void CreateResources(EncodedGeometry geometry) {
+  void CreateResources(EncodedGeometry geometry, std::size_t queue_depth) {
     geometry_ = geometry;
     VASurfaceAttrib pixel_format{
         .type = VASurfaceAttribPixelFormat,
         .flags = VA_SURFACE_ATTRIB_SETTABLE,
         .value = {.type = VAGenericValueTypeInteger, .value = {.i = VA_FOURCC_NV12}},
     };
-    std::array<VASurfaceID, 2> surfaces{VA_INVALID_ID, VA_INVALID_ID};
+    std::vector<VASurfaceID> surfaces(queue_depth * 2U, VA_INVALID_ID);
     RequireVa(api_,
               api_.create_surfaces(display_, VA_RT_FORMAT_YUV420, geometry.width, geometry.height,
                                    surfaces.data(), static_cast<unsigned int>(surfaces.size()),
                                    &pixel_format, 1),
               "vaCreateSurfaces VP9");
-    input_surface_ = surfaces[0];
-    reconstructed_surface_ = surfaces[1];
+    surfaces_.reserve(queue_depth);
+    for (std::size_t index = 0; index < queue_depth; ++index) {
+      surfaces_.push_back(
+          {.input = surfaces[index * 2U], .reconstructed = surfaces[index * 2U + 1U]});
+    }
     RequireVa(api_,
               api_.create_context(display_, config_, static_cast<int>(geometry.width),
                                   static_cast<int>(geometry.height), VA_PROGRESSIVE,
@@ -485,6 +642,7 @@ class VaEncoderContext final {
 
   struct FrameParameterOptions {
     VABufferID coded_buffer;
+    VASurfaceID reconstructed_surface;
     std::uint32_t quality_index;
   };
 
@@ -505,7 +663,7 @@ class VaEncoderContext final {
     picture.frame_height_src = geometry_.height;
     picture.frame_width_dst = geometry_.width;
     picture.frame_height_dst = geometry_.height;
-    picture.reconstructed_frame = reconstructed_surface_;
+    picture.reconstructed_frame = options.reconstructed_surface;
     std::ranges::fill(picture.reference_frames, VA_INVALID_ID);
     picture.coded_buf = options.coded_buffer;
     // These are C API bitfield unions. Zero initialization above establishes
@@ -548,8 +706,8 @@ class VaEncoderContext final {
         "vaCreateBuffer VP9 parameter");
   }
 
-  void Submit(const std::array<VABufferID, 3> &parameters) const {
-    RequireVa(api_, api_.begin_picture(display_, context_, input_surface_), "vaBeginPicture VP9");
+  void Submit(const std::array<VABufferID, 3> &parameters, VASurfaceID input_surface) const {
+    RequireVa(api_, api_.begin_picture(display_, context_, input_surface), "vaBeginPicture VP9");
     try {
       std::array<VABufferID, 3> mutable_parameters = parameters;
       RequireVa(api_,
@@ -608,15 +766,48 @@ class VaEncoderContext final {
     }
   }
 
+  [[nodiscard]] const SurfacePair &SurfaceAt(std::size_t index) const {
+    if (index >= surfaces_.size()) {
+      throw std::out_of_range("VA-API surface index is out of range");
+    }
+    return surfaces_[index];
+  }
+
+  void DestroyPendingBuffer(VABufferID buffer) {
+    RequireVa(api_, api_.destroy_buffer(display_, buffer), "vaDestroyBuffer coded data");
+    ErasePendingBuffer(buffer);
+  }
+
+  void DiscardPendingBuffer(VABufferID buffer) noexcept {
+    static_cast<void>(api_.destroy_buffer(display_, buffer));
+    ErasePendingBuffer(buffer);
+  }
+
+  void ErasePendingBuffer(VABufferID buffer) {
+    const auto found = std::ranges::find(pending_coded_buffers_, buffer);
+    if (found != pending_coded_buffers_.end()) {
+      pending_coded_buffers_.erase(found);
+    }
+  }
+
   void Cleanup() noexcept {
     if (display_ == nullptr) {
       return;
     }
+    for (const VABufferID buffer : pending_coded_buffers_) {
+      static_cast<void>(api_.destroy_buffer(display_, buffer));
+    }
+    pending_coded_buffers_.clear();
     if (context_ != VA_INVALID_ID) {
       static_cast<void>(api_.destroy_context(display_, context_));
     }
-    std::array<VASurfaceID, 2> surfaces{input_surface_, reconstructed_surface_};
-    if (input_surface_ != VA_INVALID_ID && reconstructed_surface_ != VA_INVALID_ID) {
+    std::vector<VASurfaceID> surfaces;
+    surfaces.reserve(surfaces_.size() * 2U);
+    for (const SurfacePair &pair : surfaces_) {
+      surfaces.push_back(pair.input);
+      surfaces.push_back(pair.reconstructed);
+    }
+    if (!surfaces.empty()) {
       static_cast<void>(
           api_.destroy_surfaces(display_, surfaces.data(), static_cast<int>(surfaces.size())));
     }
@@ -632,8 +823,8 @@ class VaEncoderContext final {
   VADisplay display_ = nullptr;
   VAConfigID config_ = VA_INVALID_ID;
   VAContextID context_ = VA_INVALID_ID;
-  VASurfaceID input_surface_ = VA_INVALID_ID;
-  VASurfaceID reconstructed_surface_ = VA_INVALID_ID;
+  std::vector<SurfacePair> surfaces_;
+  std::vector<VABufferID> pending_coded_buffers_;
   EncodedGeometry geometry_{};
   bool initialized_ = false;
 };
@@ -663,6 +854,44 @@ std::uint64_t ConfigureWebm(mkvmuxer::Segment &segment, mkvmuxer::MkvWriter &wri
   return track_number;
 }
 
+void RecordCriticalPreprocessing(ClipViewPipelineProfile &profile, double blocking_ms,
+                                 double bayer_work_ms, double conversion_work_ms) {
+  const double total_work_ms = bayer_work_ms + conversion_work_ms;
+  if (total_work_ms <= 0.0) {
+    return;
+  }
+  profile.bayer_fit_demosaic_ms = blocking_ms * bayer_work_ms / total_work_ms;
+  profile.rgb_to_yuv420_ms = blocking_ms * conversion_work_ms / total_work_ms;
+}
+
+struct PendingMuxFrame {
+  std::size_t frame_index;
+  VaEncoderContext::PendingFrame va_frame;
+};
+
+void CompleteAndMuxFront(std::deque<PendingMuxFrame> &pending, VaEncoderContext &context,
+                         mkvmuxer::Segment &segment, std::uint64_t track_number,
+                         std::span<const std::uint64_t> media_times,
+                         ClipViewPipelineProfile &profile) {
+  if (pending.empty()) {
+    throw std::logic_error("cannot complete an empty VA-API frame queue");
+  }
+  const PendingMuxFrame frame = pending.front();
+  const auto encode_started = ProfileClock::now();
+  const std::vector<std::uint8_t> encoded = context.Complete(frame.va_frame);
+  profile.codec_encode_ms += ElapsedMilliseconds(encode_started);
+  const auto mux_started = ProfileClock::now();
+  if (frame.frame_index > 0U) {
+    segment.ForceNewClusterOnNextFrame();
+  }
+  if (!segment.AddFrame(encoded.data(), encoded.size(), track_number,
+                        media_times[frame.frame_index] * kWebmTimecodeScaleNanoseconds, true)) {
+    throw std::runtime_error("could not mux VP9 frame into WebM");
+  }
+  profile.webm_mux_ms += ElapsedMilliseconds(mux_started);
+  pending.pop_front();
+}
+
 class VaapiVp9WebmEncoder final : public ClipMediaEncoder {
  public:
   explicit VaapiVp9WebmEncoder(VaapiVp9WebmOptions options) : options_(std::move(options)) {}
@@ -687,15 +916,15 @@ class VaapiVp9WebmEncoder final : public ClipMediaEncoder {
                                     .frame_count = input.frames.size()};
     const std::vector<std::uint64_t> media_times = MediaTimesMicroseconds(input);
     const std::uint64_t cadence_us = MedianDurationMicroseconds(media_times);
-    auto demosaic_started = ProfileClock::now();
-    const image::Rgb8Image first_rgb = PrepareRgb(input.frames.front(), options_);
-    profile.bayer_fit_demosaic_ms += ElapsedMilliseconds(demosaic_started);
-    const EncodedGeometry geometry{.width = first_rgb.width, .height = first_rgb.height};
+    PreparedFrame first = PrepareFrame(input.frames.front(), options_);
+    const EncodedGeometry geometry{.width = first.image.width, .height = first.image.height};
+    double preprocessing_blocked_ms = first.bayer_fit_demosaic_ms + first.rgb_to_nv12_ms;
+    BoundedFramePreprocessor preprocessor(input, options_, std::move(first));
 
     const VaApi api;
     const FileDescriptor render_node(options_.render_node);
     auto context = std::make_unique<VaEncoderContext>(api);
-    context->Initialize(render_node.value(), geometry);
+    context->Initialize(render_node.value(), geometry, options_.encoding_queue_depth);
     mkvmuxer::MkvWriter writer;
     const std::string output_string = output_path.string();
     if (!writer.Open(output_string.c_str())) {
@@ -703,32 +932,33 @@ class VaapiVp9WebmEncoder final : public ClipMediaEncoder {
     }
     mkvmuxer::Segment segment;
     const std::uint64_t track_number = ConfigureWebm(segment, writer, geometry, cadence_us);
+    double bayer_work_ms = 0.0;
+    double conversion_work_ms = 0.0;
+    std::deque<PendingMuxFrame> pending;
     for (std::size_t index = 0; index < input.frames.size(); ++index) {
-      image::Rgb8Image rgb;
-      if (index == 0U) {
-        rgb = first_rgb;
-      } else {
-        demosaic_started = ProfileClock::now();
-        rgb = PrepareRgb(input.frames[index], options_);
-        profile.bayer_fit_demosaic_ms += ElapsedMilliseconds(demosaic_started);
+      if (pending.size() == options_.encoding_queue_depth) {
+        CompleteAndMuxFront(pending, *context, segment, track_number, media_times, profile);
       }
-      const auto conversion_started = ProfileClock::now();
-      const Nv12Image nv12 = ConvertRgbToNv12(rgb);
-      profile.rgb_to_yuv420_ms += ElapsedMilliseconds(conversion_started);
-      const auto encode_started = ProfileClock::now();
-      context->Upload(nv12);
-      const std::vector<std::uint8_t> encoded = context->EncodeKeyframe(options_.quality_index);
-      profile.codec_encode_ms += ElapsedMilliseconds(encode_started);
-      const auto mux_started = ProfileClock::now();
+      const auto preparation_wait_started = ProfileClock::now();
+      const PreparedFrame prepared = preprocessor.Take(index);
       if (index > 0U) {
-        segment.ForceNewClusterOnNextFrame();
+        preprocessing_blocked_ms += ElapsedMilliseconds(preparation_wait_started);
       }
-      if (!segment.AddFrame(encoded.data(), encoded.size(), track_number,
-                            media_times[index] * kWebmTimecodeScaleNanoseconds, true)) {
-        throw std::runtime_error("could not mux VP9 frame into WebM");
-      }
-      profile.webm_mux_ms += ElapsedMilliseconds(mux_started);
+      bayer_work_ms += prepared.bayer_fit_demosaic_ms;
+      conversion_work_ms += prepared.rgb_to_nv12_ms;
+      const auto encode_started = ProfileClock::now();
+      const std::size_t surface_index = index % options_.encoding_queue_depth;
+      context->Upload(prepared.image, surface_index);
+      const VaEncoderContext::PendingFrame va_frame = context->SubmitKeyframe(
+          {.quality_index = options_.quality_index, .surface_index = surface_index});
+      profile.codec_encode_ms += ElapsedMilliseconds(encode_started);
+      pending.push_back({.frame_index = index, .va_frame = va_frame});
     }
+    while (!pending.empty()) {
+      CompleteAndMuxFront(pending, *context, segment, track_number, media_times, profile);
+    }
+    RecordCriticalPreprocessing(profile, preprocessing_blocked_ms, bayer_work_ms,
+                                conversion_work_ms);
     const auto finalize_started = ProfileClock::now();
     segment.set_duration(static_cast<double>(media_times.back() + cadence_us));
     if (!segment.Finalize()) {
@@ -769,6 +999,12 @@ void ValidateOptions(const VaapiVp9WebmOptions &options) {
   }
   if (options.quality_index > 255U) {
     throw std::invalid_argument("VA-API VP9 quality index must be in [0, 255]");
+  }
+  if (options.preprocessing_threads == 0U || options.preprocessing_threads > 32U) {
+    throw std::invalid_argument("VA-API preprocessing thread count must be in [1, 32]");
+  }
+  if (options.encoding_queue_depth == 0U || options.encoding_queue_depth > 16U) {
+    throw std::invalid_argument("VA-API encoding queue depth must be in [1, 16]");
   }
 }
 

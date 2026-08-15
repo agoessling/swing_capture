@@ -196,8 +196,50 @@ Json PostJson(httplib::Client &client, std::string_view path, std::string_view b
   return Json::parse(response->body);
 }
 
+bool TryFetchImpactPreviews(httplib::Client &client, const Json &status,
+                            const std::filesystem::path &output_directory,
+                            std::chrono::steady_clock::time_point operation_started_at,
+                            Json *evidence) {
+  if (status.at("state") != "encoding" || status.at("active_session_id").is_null()) {
+    return false;
+  }
+  const std::string session_id = status.at("active_session_id").get<std::string>();
+  Json views = Json::object();
+  for (const std::string_view role : {"down_the_line", "face_on"}) {
+    const std::string route =
+        "/api/v1/sessions/" + session_id + "/impact/" + std::string(role) + ".jpg";
+    const auto response = client.Get(route);
+    if (!response || response->status == 404) {
+      return false;
+    }
+    if (response->status != 200 ||
+        !response->get_header_value("Content-Type").starts_with("image/jpeg") ||
+        !response->body.starts_with("\xff\xd8")) {
+      throw std::runtime_error("impact preview response is invalid for " + std::string(role));
+    }
+    const std::string filename = "impact-preview-" + std::string(role) + ".jpg";
+    WriteFile(output_directory / filename, response->body);
+    views[role] = {
+        {"path", filename},
+        {"bytes", response->body.size()},
+        {"frame_id", response->get_header_value("X-Swing-Capture-Frame-Id")},
+        {"time_from_impact_us", response->get_header_value("X-Swing-Capture-Time-From-Impact-Us")},
+    };
+  }
+  (*evidence) = {
+      {"ready_after_operation_start_ms",
+       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                 operation_started_at)
+           .count()},
+      {"views", std::move(views)},
+  };
+  return true;
+}
+
 Json AwaitSyntheticSwing(httplib::Client &client, std::chrono::steady_clock::time_point deadline,
-                         Json *statuses) {
+                         const std::filesystem::path &output_directory,
+                         std::chrono::steady_clock::time_point operation_started_at, Json *statuses,
+                         Json *impact_preview_evidence) {
   static constexpr std::array<std::string_view, 6> kStages = {"calibrating", "arming",   "stimulus",
                                                               "capturing",   "encoding", "ready"};
   Json status;
@@ -220,7 +262,14 @@ Json AwaitSyntheticSwing(httplib::Client &client, std::chrono::steady_clock::tim
       throw std::runtime_error("synthetic swing HIL stage regressed: " + status.dump());
     }
     last_stage_index = stage_index;
+    if (impact_preview_evidence->is_null()) {
+      static_cast<void>(TryFetchImpactPreviews(client, status, output_directory,
+                                               operation_started_at, impact_preview_evidence));
+    }
     if (stage == "ready" && !hil.at("busy").get<bool>()) {
+      if (impact_preview_evidence->is_null()) {
+        throw std::runtime_error("impact previews were not available before video publication");
+      }
       return status;
     }
     std::this_thread::sleep_for(20ms);
@@ -391,6 +440,7 @@ class FailureEvidenceGuard final {
 };
 
 std::string FetchSessionArtifacts(httplib::Client &client, std::string_view session_id,
+                                  const std::filesystem::path &published_root,
                                   const std::filesystem::path &directory, Json *evidence) {
   const std::string base = "/api/v1/sessions/" + std::string(session_id) + "/";
   const auto manifest = client.Get(base + "manifest");
@@ -401,29 +451,39 @@ std::string FetchSessionArtifacts(httplib::Client &client, std::string_view sess
   WriteFile(directory / "manifest.json", manifest->body);
   for (const std::string_view role : {"down_the_line", "face_on"}) {
     const std::string media_route = base + std::string(role) + ".webm";
-    const auto media = client.Get(media_route);
-    if (!media || media->status != 200 ||
-        !media->get_header_value("Content-Type").starts_with("video/webm") || media->body.empty()) {
-      throw std::runtime_error("published session media is unavailable for " + std::string(role));
-    }
     const httplib::Headers range_headers = {{"Range", "bytes=0-15"}};
     const auto range = client.Get(media_route, range_headers);
     if (!range || range->status != 206 || range->body.size() != 16U ||
-        range->body != media->body.substr(0, 16) ||
+        !range->get_header_value("Content-Type").starts_with("video/webm") ||
         range->get_header_value("Accept-Ranges") != "bytes" ||
         !range->get_header_value("Content-Range").starts_with("bytes 0-15/")) {
       throw std::runtime_error("published session media does not support browser byte ranges for " +
                                std::string(role));
     }
+    const std::filesystem::path source =
+        published_root / std::string(session_id) / (std::string(role) + ".webm");
+    const std::filesystem::path destination = directory / (std::string(role) + ".webm");
+    if (!std::filesystem::is_regular_file(source)) {
+      throw std::runtime_error("published session media is absent on disk for " +
+                               std::string(role));
+    }
+    std::filesystem::create_directories(directory);
+    std::filesystem::copy_file(source, destination,
+                               std::filesystem::copy_options::overwrite_existing);
+    std::ifstream copied(destination, std::ios::binary);
+    std::string prefix(16, '\0');
+    copied.read(prefix.data(), static_cast<std::streamsize>(prefix.size()));
+    if (!copied || prefix != range->body) {
+      throw std::runtime_error("HTTP range bytes disagree with the published media for " +
+                               std::string(role));
+    }
     (*evidence)[std::string(role)] = {
-        {"full_status", media->status},
-        {"full_bytes", media->body.size()},
+        {"published_bytes", std::filesystem::file_size(destination)},
         {"range_status", range->status},
         {"range_bytes", range->body.size()},
         {"accept_ranges", range->get_header_value("Accept-Ranges")},
         {"content_range", range->get_header_value("Content-Range")},
     };
-    WriteFile(directory / (std::string(role) + ".webm"), media->body);
   }
   return manifest->body;
 }
@@ -474,6 +534,9 @@ Json ValidationJson(const SessionArtifactValidation &validation) {
        {{"prepublication_analysis_ms",
          validation.pipeline_profile.session.prepublication_analysis_ms},
         {"publisher_planning_ms", validation.pipeline_profile.session.publisher_planning_ms},
+        {"impact_preview_render_ms", validation.pipeline_profile.session.impact_preview_render_ms},
+        {"impact_preview_ready_after_confirmation_ms",
+         validation.pipeline_profile.session.impact_preview_ready_after_confirmation_ms},
         {"validation_and_timeline_ms",
          validation.pipeline_profile.session.validation_and_timeline_ms},
         {"output_setup_ms", validation.pipeline_profile.session.output_setup_ms},
@@ -630,8 +693,10 @@ void RunWorkflow(const std::filesystem::path &output_directory, Json *report) {
   WriteReport(output_directory, *report);
 
   (*report)["capture"]["status_timeline"] = Json::array();
+  (*report)["impact_preview"] = nullptr;
   const Json ready =
-      AwaitSyntheticSwing(client, deadline, &(*report)["capture"]["status_timeline"]);
+      AwaitSyntheticSwing(client, deadline, output_directory, operation_started_at,
+                          &(*report)["capture"]["status_timeline"], &(*report)["impact_preview"]);
   (*report)["capture"]["ready"] = ready;
   const std::uint64_t stimulus_baseline_impact_count =
       StimulusBaselineImpactCount((*report)["capture"]["status_timeline"]);
@@ -663,7 +728,7 @@ void RunWorkflow(const std::filesystem::path &output_directory, Json *report) {
   const std::filesystem::path fetched_session = output_directory / "http-session";
   Json http_evidence;
   const std::string manifest =
-      FetchSessionArtifacts(client, session_id, fetched_session, &http_evidence);
+      FetchSessionArtifacts(client, session_id, session_root, fetched_session, &http_evidence);
   (*report)["session_http"] = std::move(http_evidence);
   const SessionArtifactValidation validation = ValidateSessionArtifacts(
       manifest, fetched_session,
@@ -678,6 +743,9 @@ void RunWorkflow(const std::filesystem::path &output_directory, Json *report) {
                       .expected_synthetic_swing_exposure_us = kExpectedHilExposureMicroseconds,
                       .expected_synthetic_swing_gain_db = kExpectedHilGainDecibels}}},
           .minimum_frame_count = 400,
+          .maximum_encoded_width = 1440,
+          .maximum_encoded_height = 1080,
+          .require_source_resolution_encoding = true,
           .expected_codec = "vp9",
           .require_synthetic_swing_evidence = true,
           .expected_synthetic_swing_brightness = selected_brightness,

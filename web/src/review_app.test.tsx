@@ -338,7 +338,7 @@ function testRuntimeSchemaRejection() {
   const unsupportedPipeline = structuredClone(FIXTURE_MANIFEST) as unknown as {
     pipeline_profile: { schema_version: number };
   };
-  unsupportedPipeline.pipeline_profile.schema_version = 3;
+  unsupportedPipeline.pipeline_profile.schema_version = 2;
   assert.throws(() => parseClipManifest(unsupportedPipeline), /pipeline profile schema/);
 
   const mismatchedPipelineFrames = structuredClone(FIXTURE_MANIFEST);
@@ -357,6 +357,11 @@ function testRuntimeSchemaRejection() {
   assert.ok(negativePublisherPlanning.pipeline_profile !== undefined);
   negativePublisherPlanning.pipeline_profile.session.publisher_planning_ms = -0.1;
   assert.throws(() => parseClipManifest(negativePublisherPlanning), /publisher_planning_ms/);
+
+  const negativeImpactPreview = structuredClone(FIXTURE_MANIFEST);
+  assert.ok(negativeImpactPreview.pipeline_profile !== undefined);
+  negativeImpactPreview.pipeline_profile.session.impact_preview_render_ms = -0.1;
+  assert.throws(() => parseClipManifest(negativeImpactPreview), /impact_preview_render_ms/);
 
   const negativePrepublicationAnalysis = structuredClone(FIXTURE_MANIFEST);
   assert.ok(negativePrepublicationAnalysis.pipeline_profile !== undefined);

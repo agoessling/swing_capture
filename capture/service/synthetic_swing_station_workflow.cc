@@ -51,7 +51,11 @@ constexpr std::size_t kMaximumCalibrationSamplesPerCamera = 160;
 constexpr std::size_t kMinimumCalibrationSamplesPerCamera = 32;
 constexpr std::size_t kMinimumFrameIdCoverageDenominator = 5;
 constexpr auto kSwingReceiptWait = std::chrono::seconds(3);
-constexpr auto kMaximumHilScheduleUncertainty = std::chrono::milliseconds(3);
+// The 20 ms white interval still leaves at least 9 ms of conservative stable
+// interior at the maximum accepted fit uncertainty with a 500 us exposure.
+// This is enough for two 227 fps frames while allowing a broad low-duty PWM
+// calibration shoulder to remain useful for ROI/timeline setup.
+constexpr auto kMaximumHilScheduleUncertainty = std::chrono::milliseconds(5);
 
 template <typename Value>
 const Value &RequireValue(const std::optional<Value> &value, std::string_view message) {
@@ -375,6 +379,12 @@ std::string synthetic_swing_workflow_internal::FormatBrightnessRecommendationFai
   return message.str();
 }
 
+std::chrono::steady_clock::duration
+synthetic_swing_workflow_internal::ConstrainReceiptTimelineCorrection(
+    std::chrono::steady_clock::duration estimated_correction) noexcept {
+  return std::min(estimated_correction, std::chrono::steady_clock::duration::zero());
+}
+
 SyntheticSwingStationWorkflow::SyntheticSwingStationWorkflow(
     std::array<SyntheticSwingCameraCalibrationSource, 2> cameras,
     SyntheticSwingStationWorkflowHooks hooks)
@@ -428,14 +438,15 @@ std::uint8_t SyntheticSwingStationWorkflow::CalibrateBrightness(const std::stop_
     }
   }
 
+  optical::RgbBrightnessCalibrationOptions calibration_options;
+  calibration_options.minimum_frames_per_probe = 3;
   std::array<optical::RgbBrightnessCalibration, 2> analyzed;
   for (std::size_t index = 0; index < cameras_.size(); ++index) {
     ValidateSampleCoverage(cameras_[index].role, samples[index]);
     CalibrationCameraViews views = MakeCalibrationViews(samples[index]);
     const auto schedule = BuildCalibrationRgbSchedule(receipt, EarliestSampleTime(samples[index]));
-    optical::RgbBrightnessCalibrationOptions calibration_options;
-    calibration_options.minimum_frames_per_probe = 3;
-    calibration_options.optical.exposure_duration = camera_profiles[index].exposure_duration;
+    optical::RgbBrightnessCalibrationOptions camera_options = calibration_options;
+    camera_options.optical.exposure_duration = camera_profiles[index].exposure_duration;
     analyzed[index] = optical::AnalyzeRgbBrightnessCalibration(
         {
             .camera_id = cameras_[index].role,
@@ -443,13 +454,13 @@ std::uint8_t SyntheticSwingStationWorkflow::CalibrateBrightness(const std::stop_
             .mapped_host_times = views.host_times,
             .schedule = schedule,
         },
-        calibration_options);
+        camera_options);
     if (!analyzed[index].located || !analyzed[index].schedule_offset.available) {
       throw std::runtime_error(CalibrationFailure(cameras_[index].role, analyzed[index]));
     }
     if (analyzed[index].schedule_offset.uncertainty > kMaximumHilScheduleUncertainty) {
       throw std::runtime_error(cameras_[index].role +
-                               " schedule-offset uncertainty exceeds the 3 ms HIL bound");
+                               " schedule-offset uncertainty exceeds the 5 ms HIL bound");
     }
   }
   const std::array sweeps = {
@@ -458,8 +469,17 @@ std::uint8_t SyntheticSwingStationWorkflow::CalibrateBrightness(const std::stop_
       optical::CameraBrightnessSweep{.camera_id = cameras_[1].role,
                                      .candidates = analyzed[1].brightness_candidates},
   };
-  const optical::SharedBrightnessRecommendation recommendation =
+  optical::SharedBrightnessRecommendation recommendation =
       optical::RecommendSharedRgbBrightness(sweeps);
+  if (!recommendation.available) {
+    recommendation = optical::RecommendSharedNonSaturatingRgbBrightness(
+        sweeps,
+        {
+            .minimum_stable_frames = calibration_options.minimum_frames_per_probe,
+            .maximum_saturated_fraction = calibration_options.optical.maximum_saturated_fraction,
+            .maximum_bloom_fraction = calibration_options.optical.maximum_bloom_fraction,
+        });
+  }
   if (!recommendation.available || !recommendation.brightness.has_value()) {
     throw std::runtime_error(
         synthetic_swing_workflow_internal::FormatBrightnessRecommendationFailure(analyzed,
@@ -549,8 +569,10 @@ SyntheticSwingStationWorkflow::AnalyzeCapturedSession(
       throw std::logic_error("captured camera has no synthetic swing calibration");
     }
     RetainedCameraViews views = MakeRetainedViews(camera);
-    ApplyMappedTimeCorrection(calibration->schedule_offset.mapped_time_correction,
-                              &views.host_times);
+    const auto mapped_time_correction =
+        synthetic_swing_workflow_internal::ConstrainReceiptTimelineCorrection(
+            calibration->schedule_offset.mapped_time_correction);
+    ApplyMappedTimeCorrection(mapped_time_correction, &views.host_times);
     const auto schedule = BuildSyntheticSwingRgbSchedule(
         receipt, views.host_times.front() - std::chrono::milliseconds(1));
     optical::RgbSwingAnalysisOptions analysis_options;
@@ -582,9 +604,8 @@ SyntheticSwingStationWorkflow::AnalyzeCapturedSession(
     evidence.cameras[index] = {
         .role = camera.role,
         .optical_white_impact_frame_id = views.frames[impact_index].frame_id,
-        .mapped_time_correction_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                                         calibration->schedule_offset.mapped_time_correction)
-                                         .count(),
+        .mapped_time_correction_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(mapped_time_correction).count(),
         .schedule_uncertainty_us =
             static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                            calibration->schedule_offset.uncertainty)

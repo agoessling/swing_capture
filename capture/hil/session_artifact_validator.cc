@@ -132,7 +132,9 @@ ValidatedSessionView ValidateView(const Json &view, const std::filesystem::path 
   Require(encoded_width > 0U && encoded_height > 0U && encoded_width <= source_width &&
               encoded_height <= source_height &&
               encoded_width <= expectations.maximum_encoded_width &&
-              encoded_height <= expectations.maximum_encoded_height,
+              encoded_height <= expectations.maximum_encoded_height &&
+              (!expectations.require_source_resolution_encoding ||
+               (encoded_width == source_width && encoded_height == source_height)),
           "manifest encoded dimensions are invalid or exceed the HIL bound");
 
   const std::size_t frame_count = view.at("frame_count").get<std::size_t>();
@@ -441,7 +443,8 @@ ValidatedSessionPipelineProfile ValidateSessionPipelineProfile(const Json &sessi
                                                                std::uint64_t confirmation_time) {
   RequireExactFields(
       session,
-      {"prepublication_analysis_ms", "publisher_planning_ms", "validation_and_timeline_ms",
+      {"prepublication_analysis_ms", "publisher_planning_ms", "impact_preview_render_ms",
+       "impact_preview_ready_after_confirmation_ms", "validation_and_timeline_ms",
        "output_setup_ms", "media_encoding_wall_ms", "frame_metadata_ms",
        "profile_snapshot_after_confirmation_ms", "profile_snapshot_host_monotonic_ns"},
       "pipeline session profile");
@@ -451,6 +454,11 @@ ValidatedSessionPipelineProfile ValidateSessionPipelineProfile(const Json &sessi
                                        "pipeline session prepublication-analysis time"),
       .publisher_planning_ms = ParseNonnegativeMilliseconds(
           session.at("publisher_planning_ms"), "pipeline session publisher-planning time"),
+      .impact_preview_render_ms = ParseNonnegativeMilliseconds(
+          session.at("impact_preview_render_ms"), "pipeline session impact-preview render time"),
+      .impact_preview_ready_after_confirmation_ms =
+          ParseNonnegativeMilliseconds(session.at("impact_preview_ready_after_confirmation_ms"),
+                                       "pipeline session impact-preview-ready time"),
       .validation_and_timeline_ms = ParseNonnegativeMilliseconds(
           session.at("validation_and_timeline_ms"), "pipeline session validation/timeline time"),
       .output_setup_ms = ParseNonnegativeMilliseconds(session.at("output_setup_ms"),
@@ -541,7 +549,7 @@ ValidatedPipelineProfile ValidatePipelineProfile(
                      "pipeline profile");
   const std::uint64_t schema_version =
       ParseUnsignedNumber(profile.at("schema_version"), "pipeline profile schema version");
-  Require(schema_version == 2U, "unsupported pipeline profile schema");
+  Require(schema_version == 3U, "unsupported pipeline profile schema");
   const Json &view_profiles = profile.at("views");
   Require(view_profiles.is_array() && view_profiles.size() == manifest_views.size(),
           "pipeline profile must contain exactly two views");

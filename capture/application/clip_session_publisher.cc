@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -19,6 +21,7 @@
 #include "capture/core/device_clock_mapper.h"
 #include "capture/core/pooled_raw_frame_ring.h"
 #include "capture/encoding/clip_session.h"
+#include "capture/image/bayer_rg8.h"
 #include "capture/trigger/impact_detector.h"
 
 namespace swing_capture::application {
@@ -113,6 +116,54 @@ encoding::ClipCapturePipelineProfile CapturePipelineProfile(
       .audio_stop = timing.audio_stop_completed_at - timing.audio_stop_started_at,
       .prepublication_analysis = prepublication_analysis,
       .publisher_planning = publisher_planning,
+  };
+}
+
+ImpactPreviewImage RenderImpactPreview(const CapturedCameraWindow &camera,
+                                       const PlannedCameraInput &planned) {
+  if (!planned.plan.strike_frame.has_value()) {
+    throw std::logic_error("impact preview requires a selected strike frame");
+  }
+  const PooledRawFrameHandle &frame = camera.frames.at(planned.plan.strike_frame->frame_index);
+  const FrameView view = frame.view();
+  const image::Rgb8Image rgb =
+      image::DemosaicBayerRg8(view.payload, view.metadata.width, view.metadata.height);
+  return {
+      .role = camera.role,
+      .frame_id = view.metadata.frame_id,
+      .time_from_impact_us =
+          std::chrono::round<std::chrono::microseconds>(planned.plan.strike_frame->time_error)
+              .count(),
+      .width = rgb.width,
+      .height = rgb.height,
+      .media_type = "image/jpeg",
+      .encoded_bytes = image::EncodeJpeg(rgb, 90),
+  };
+}
+
+struct ImpactPreviewMeasurements {
+  std::chrono::steady_clock::duration render{};
+  std::chrono::steady_clock::duration ready_after_confirmation{};
+};
+
+ImpactPreviewMeasurements PublishImpactPreviews(const ClipSessionPublisherConfig &config,
+                                                const CapturedSession &captured,
+                                                const std::array<PlannedCameraInput, 2> &planned) {
+  if (!config.impact_preview_ready) {
+    return {};
+  }
+  const auto started_at = std::chrono::steady_clock::now();
+  auto first = std::async(std::launch::async, RenderImpactPreview, std::cref(captured.cameras[0]),
+                          std::cref(planned[0]));
+  ImpactPreviewImage second = RenderImpactPreview(captured.cameras[1], planned[1]);
+  config.impact_preview_ready(captured.identity, std::array{first.get(), std::move(second)});
+  const auto ready_at = std::chrono::steady_clock::now();
+  if (ready_at < captured.trigger.impact.confirmation_time) {
+    throw std::logic_error("impact preview became ready before trigger confirmation");
+  }
+  return {
+      .render = ready_at - started_at,
+      .ready_after_confirmation = ready_at - captured.trigger.impact.confirmation_time,
   };
 }
 
@@ -213,6 +264,8 @@ PublishedSession ClipSessionPublisher::Publish(
   if (!dual_plan.ok()) {
     throw std::runtime_error("dual-view clip plan changed while publishing");
   }
+  const ImpactPreviewMeasurements impact_preview =
+      PublishImpactPreviews(config_, captured, planned);
 
   std::optional<std::chrono::nanoseconds> mapped_skew;
   if (dual_plan.mapped_nearest_frame_skew.has_value()) {
@@ -226,6 +279,10 @@ PublishedSession ClipSessionPublisher::Publish(
   const auto publisher_planning = std::chrono::steady_clock::now() - publisher_started_at;
   const auto prepublication_analysis =
       publisher_started_at - captured.pipeline_timing.audio_stop_completed_at;
+  encoding::ClipCapturePipelineProfile capture_profile =
+      CapturePipelineProfile(captured, prepublication_analysis, publisher_planning);
+  capture_profile.impact_preview_render = impact_preview.render;
+  capture_profile.impact_preview_ready_after_confirmation = impact_preview.ready_after_confirmation;
   const encoding::DualViewClipInput input = {
       .session_id = captured.identity.session_id,
       .created_at_utc = captured.identity.created_at_utc,
@@ -247,8 +304,7 @@ PublishedSession ClipSessionPublisher::Publish(
           },
       .mapped_nearest_frame_skew = mapped_skew,
       .hil_evidence = encoded_hil_evidence,
-      .capture_pipeline_profile =
-          CapturePipelineProfile(captured, prepublication_analysis, publisher_planning),
+      .capture_pipeline_profile = capture_profile,
   };
   const encoding::ClipSessionWriteResult written =
       encoding::WriteClipSession(config_.output_root, input, *encoder_);

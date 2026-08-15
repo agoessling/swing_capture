@@ -31,6 +31,7 @@ using swing_capture::service::SyntheticSwingCameraAnalysisProfile;
 using swing_capture::service::SyntheticSwingCameraCalibrationSource;
 using swing_capture::service::SyntheticSwingStationWorkflow;
 using swing_capture::service::SyntheticSwingStationWorkflowHooks;
+using swing_capture::service::synthetic_swing_workflow_internal::ConstrainReceiptTimelineCorrection;
 using swing_capture::service::synthetic_swing_workflow_internal::
     FormatBrightnessRecommendationFailure;
 
@@ -110,6 +111,12 @@ SyntheticSwingStationWorkflow MakeWorkflow() {
           .run_feather_swing =
               [](std::uint32_t) { return swing_capture::hil::FeatherSwingReceipt{}; },
       });
+}
+
+void TestReceiptTimelineCorrectionRejectsNoncausalPositiveOffsets() {
+  assert(ConstrainReceiptTimelineCorrection(11ms) == 0ms);
+  assert(ConstrainReceiptTimelineCorrection(-3500us) == -3500us);
+  assert(ConstrainReceiptTimelineCorrection(0ms) == 0ms);
 }
 
 void TestCalibrationCadenceRestoresOnCancellation() {
@@ -546,6 +553,7 @@ void TestBrightnessFailureIncludesCameraAlignment() {
 }  // namespace
 
 int main() {
+  TestReceiptTimelineCorrectionRejectsNoncausalPositiveOffsets();
   TestInactiveCaptureIsNotDecorated();
   TestIncompleteConfigurationIsRejected();
   TestBrightnessFailureIncludesCameraAlignment();

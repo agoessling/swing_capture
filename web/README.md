@@ -19,9 +19,10 @@ measured end to end.
 The fixture bundle injects `FakeStationApi` and `FakeReviewApi`. Checked-in
 software-encoded, all-intra VP8/WebM clips and deterministic per-frame timing
 metadata exercise the same review player without cameras, a microphone, or the
-Galaxy SDK. Production sessions use concurrent Intel VA-API all-keyframe
-VP9/WebM, and the physical-artifact Playwright bridge qualifies those files
-through the same player.
+Galaxy SDK. Production sessions use concurrent full-resolution Intel VA-API
+all-keyframe VP9/WebM. While those files are encoding, the application shows
+the two exact trigger-nearest full-resolution JPEGs. The physical-artifact
+Playwright bridge qualifies the completed files through the same player.
 
 Build and test with Bazel:
 
@@ -38,6 +39,12 @@ application expects capture/session endpoints for arming, manual diagnostics,
 session discovery, manifests, and media. WebM responses must implement HTTP
 byte ranges; Chromium cannot seek or step the clip from a non-range 200-only
 route.
+
+The production API also exposes `/api/v1/events` as a server-sent event stream.
+Session/capture changes trigger an immediate coalesced refresh; a slow
+15-second poll remains only as recovery if an event is missed. This removes
+the former one-second session-discovery delay without coupling the UI to camera
+objects.
 
 The server writes atomically published session directories under
 `artifacts/sessions/` by default. Pass `--sessions-root <absolute-path>` to use

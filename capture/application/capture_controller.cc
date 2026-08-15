@@ -223,6 +223,11 @@ std::optional<SessionIdentity> CaptureController::SubmitImpact(CaptureTriggerSou
   active_session_id_ = pending_identity_->session_id;
   freeze_at_ = impact.strike_time + config_.post_roll + config_.frame_boundary_margin;
   state_ = CaptureApplicationState::kWaitingPostRoll;
+  // This controller is deliberately one-shot. Once the trigger is accepted,
+  // no later microphone event can affect the retained window, so let ALSA
+  // shutdown overlap the required camera post-roll instead of joining it on
+  // the publication critical path.
+  audio_monitor_->RequestStop();
   changed_.notify_all();
   return pending_identity_;
 }

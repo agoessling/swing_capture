@@ -80,6 +80,7 @@ cc_library(
         "//capture/core:camera_source",
         "//capture/core:device_clock_mapper",
         "//capture/encoding:clip_session",
+        "//capture/image:bayer_rg8",
         "//capture/trigger:impact_detector",
     ],
 )

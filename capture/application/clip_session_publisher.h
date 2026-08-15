@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,10 +16,27 @@
 
 namespace swing_capture::application {
 
+struct ImpactPreviewImage {
+  std::string role;
+  std::uint64_t frame_id = 0;
+  std::int64_t time_from_impact_us = 0;
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
+  std::string media_type;
+  std::string encoded_bytes;
+};
+
+using ImpactPreviewCallback =
+    std::function<void(const SessionIdentity &, std::array<ImpactPreviewImage, 2>)>;
+
 struct ClipSessionPublisherConfig {
   std::filesystem::path output_root;
   std::chrono::steady_clock::duration pre_roll = kDefaultCapturePreRoll;
   std::chrono::steady_clock::duration post_roll = kDefaultCapturePostRoll;
+  // Optional transient delivery path. The exact impact-adjacent frames are
+  // rendered before video encoding so a browser can show useful feedback
+  // while the complete, frame-steppable review assets are still publishing.
+  ImpactPreviewCallback impact_preview_ready;
 };
 
 struct SyntheticSwingCameraEvidence {

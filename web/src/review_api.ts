@@ -1,5 +1,5 @@
 export const REVIEW_SCHEMA_VERSION = 1 as const;
-export const PIPELINE_PROFILE_SCHEMA_VERSION = 2 as const;
+export const PIPELINE_PROFILE_SCHEMA_VERSION = 3 as const;
 export const CAPTURE_SCHEMA_VERSION = 2 as const;
 
 export type CaptureState =
@@ -168,6 +168,8 @@ export interface CapturePipelineProfile {
 export interface SessionPipelineProfile {
   prepublication_analysis_ms: number;
   publisher_planning_ms: number;
+  impact_preview_render_ms: number;
+  impact_preview_ready_after_confirmation_ms: number;
   validation_and_timeline_ms: number;
   output_setup_ms: number;
   media_encoding_wall_ms: number;
@@ -223,6 +225,8 @@ export interface ReviewApi {
   startSyntheticSwing(): Promise<CaptureStatus>;
   getSessions(): Promise<SessionList>;
   getManifest(sessionId: string): Promise<ClipManifest>;
+  subscribeToChanges?(onChange: () => void): () => void;
+  impactPreviewUrl?(sessionId: string, role: ReviewRole, revision: number): string;
 }
 
 type Fetcher = typeof fetch;
@@ -310,6 +314,27 @@ export class HttpReviewApi implements ReviewApi {
         server_response_host_monotonic_ns: serverMonotonic,
       },
     };
+  }
+
+  subscribeToChanges(onChange: () => void): () => void {
+    if (typeof EventSource === "undefined") {
+      return () => undefined;
+    }
+    const events = new EventSource(this.#absoluteUrl("/api/v1/events"));
+    events.addEventListener("station", onChange);
+    events.addEventListener("error", onChange);
+    return () => {
+      events.removeEventListener("station", onChange);
+      events.removeEventListener("error", onChange);
+      events.close();
+    };
+  }
+
+  impactPreviewUrl(sessionId: string, role: ReviewRole, revision: number): string {
+    const encodedId = encodeURIComponent(sessionId);
+    return this.#absoluteUrl(
+      `/api/v1/sessions/${encodedId}/impact/${role}.jpg?v=${String(revision)}`,
+    );
   }
 
   #get<T>(path: string, parser: (value: unknown) => T): Promise<T> {
@@ -485,6 +510,14 @@ function parsePipelineProfile(value: unknown, tracks: ClipTrack[]): PipelineProf
         session.publisher_planning_ms,
         "pipeline_profile.session.publisher_planning_ms",
       ),
+      impact_preview_render_ms: asDuration(
+        session.impact_preview_render_ms,
+        "pipeline_profile.session.impact_preview_render_ms",
+      ),
+      impact_preview_ready_after_confirmation_ms: asDuration(
+        session.impact_preview_ready_after_confirmation_ms,
+        "pipeline_profile.session.impact_preview_ready_after_confirmation_ms",
+      ),
       validation_and_timeline_ms: asDuration(
         session.validation_and_timeline_ms,
         "pipeline_profile.session.validation_and_timeline_ms",
@@ -514,7 +547,10 @@ function parsePipelineProfile(value: unknown, tracks: ClipTrack[]): PipelineProf
   };
 }
 
-function parseViewPipelineProfile(value: unknown, schemaVersion: 1 | 2): ViewPipelineProfile {
+function parseViewPipelineProfile(
+  value: unknown,
+  schemaVersion: 1 | typeof PIPELINE_PROFILE_SCHEMA_VERSION,
+): ViewPipelineProfile {
   const object = asObject(value, "pipeline_profile view");
   const role = parseRole(object.role);
   const duration = (field: string) =>

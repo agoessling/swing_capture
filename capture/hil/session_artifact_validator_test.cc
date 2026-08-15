@@ -40,6 +40,7 @@ SessionArtifactExpectations Expectations() {
                   .expected_synthetic_swing_exposure_us = 500.0,
                   .expected_synthetic_swing_gain_db = 24.0}}},
       .minimum_frame_count = 3,
+      .require_source_resolution_encoding = true,
   };
 }
 
@@ -81,7 +82,7 @@ Json View(std::string role, std::string serial, std::string media_path,
 
 Json PipelineProfile() {
   return {
-      {"schema_version", 2},
+      {"schema_version", 3},
       {"capture",
        {{"trigger_estimate_to_confirmation_ms", 2.0},
         {"confirmation_to_acceptance_ms", 0.2},
@@ -92,6 +93,8 @@ Json PipelineProfile() {
       {"session",
        {{"prepublication_analysis_ms", 0.5},
         {"publisher_planning_ms", 0.3},
+        {"impact_preview_render_ms", 4.2},
+        {"impact_preview_ready_after_confirmation_ms", 506.0},
         {"validation_and_timeline_ms", 0.4},
         {"output_setup_ms", 0.2},
         {"media_encoding_wall_ms", 6.8},
@@ -247,11 +250,13 @@ void AcceptsCompleteAudioTriggeredDualViewSession() {
   assert(validation.views[0].frame_count == 3U);
   assert(validation.views[0].impact_frame_index == 1U);
   assert(validation.views[1].camera_serial == "FACE456");
-  assert(validation.pipeline_profile.schema_version == 2U);
+  assert(validation.pipeline_profile.schema_version == 3U);
   assert(validation.pipeline_profile.capture.trigger_estimate_to_confirmation_ms == 2.0);
   assert(validation.pipeline_profile.capture.freeze_schedule_lateness_ms == -0.25);
   assert(validation.pipeline_profile.session.prepublication_analysis_ms == 0.5);
   assert(validation.pipeline_profile.session.publisher_planning_ms == 0.3);
+  assert(validation.pipeline_profile.session.impact_preview_render_ms == 4.2);
+  assert(validation.pipeline_profile.session.impact_preview_ready_after_confirmation_ms == 506.0);
   assert(validation.pipeline_profile.session.media_encoding_wall_ms == 6.8);
   assert(validation.pipeline_profile.session.profile_snapshot_host_monotonic_ns == 225'456'789U);
   assert(validation.pipeline_profile.views[0].role == "down_the_line");
@@ -333,6 +338,12 @@ void RejectsUnsafeOrMalformedMedia() {
   validation = ValidateSessionArtifacts(wrong_size.dump(), directory, Expectations());
   assert(!validation.passed);
   assert(validation.error.find("file size") != std::string::npos);
+
+  Json downsampled = Manifest(directory);
+  downsampled["views"][0]["encoded"]["width"] = 2;
+  validation = ValidateSessionArtifacts(downsampled.dump(), directory, Expectations());
+  assert(!validation.passed);
+  assert(validation.error.find("encoded dimensions") != std::string::npos);
 }
 
 void ExpectPipelineProfileFailure(Json manifest, const std::filesystem::path &directory,

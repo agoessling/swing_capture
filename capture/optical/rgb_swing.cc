@@ -1584,6 +1584,41 @@ bool MergeCameraCandidate(const CameraBrightnessSweep &sweep, std::uint8_t brigh
   return false;
 }
 
+bool MergeNonSaturatingCameraCandidate(const CameraBrightnessSweep &sweep, std::uint8_t brightness,
+                                       const PwmTolerantBrightnessSelectionOptions &options,
+                                       SharedBrightnessCandidate *shared) {
+  const BrightnessCandidateEvidence *candidate = FindCandidate(sweep, brightness);
+  if (candidate == nullptr) {
+    shared->rejection_reasons.push_back(sweep.camera_id + ": candidate was not observed");
+    return false;
+  }
+  ++shared->cameras_observed;
+  shared->worst_minimum_signal_delta =
+      std::min(shared->worst_minimum_signal_delta, candidate->minimum_signal_delta);
+  shared->worst_minimum_signal_to_background_noise =
+      std::min(shared->worst_minimum_signal_to_background_noise,
+               candidate->minimum_signal_to_background_noise);
+  shared->worst_maximum_saturated_fraction =
+      std::max(shared->worst_maximum_saturated_fraction, candidate->maximum_saturated_fraction);
+  shared->worst_maximum_bloom_fraction =
+      std::max(shared->worst_maximum_bloom_fraction, candidate->maximum_bloom_fraction);
+
+  bool accepted = true;
+  const auto reject = [&](bool condition, std::string reason) {
+    if (condition) {
+      accepted = false;
+      shared->rejection_reasons.push_back(sweep.camera_id + ": " + std::move(reason));
+    }
+  };
+  reject(candidate->stable_frame_count < options.minimum_stable_frames,
+         "candidate has too few stable calibration frames");
+  reject(candidate->maximum_saturated_fraction > options.maximum_saturated_fraction,
+         "ROI saturation exceeds the fallback safe bound");
+  reject(candidate->maximum_bloom_fraction > options.maximum_bloom_fraction,
+         "background-annulus bloom exceeds the fallback safe bound");
+  return accepted;
+}
+
 SharedBrightnessCandidate BuildSharedCandidate(std::uint8_t brightness,
                                                std::span<const CameraBrightnessSweep> sweeps) {
   SharedBrightnessCandidate shared{
@@ -1595,6 +1630,24 @@ SharedBrightnessCandidate BuildSharedCandidate(std::uint8_t brightness,
   bool every_safe = true;
   for (const CameraBrightnessSweep &sweep : sweeps) {
     every_safe = MergeCameraCandidate(sweep, brightness, &shared) && every_safe;
+  }
+  shared.safe_for_every_camera = every_safe && shared.cameras_observed == sweeps.size();
+  return shared;
+}
+
+SharedBrightnessCandidate BuildNonSaturatingSharedCandidate(
+    std::uint8_t brightness, std::span<const CameraBrightnessSweep> sweeps,
+    const PwmTolerantBrightnessSelectionOptions &options) {
+  SharedBrightnessCandidate shared{
+      .brightness = brightness,
+      .worst_minimum_signal_delta = std::numeric_limits<double>::infinity(),
+      .worst_minimum_signal_to_background_noise = std::numeric_limits<double>::infinity(),
+      .rejection_reasons = {},
+  };
+  bool every_safe = true;
+  for (const CameraBrightnessSweep &sweep : sweeps) {
+    every_safe =
+        MergeNonSaturatingCameraCandidate(sweep, brightness, options, &shared) && every_safe;
   }
   shared.safe_for_every_camera = every_safe && shared.cameras_observed == sweeps.size();
   return shared;
@@ -1887,6 +1940,37 @@ SharedBrightnessRecommendation RecommendSharedRgbBrightness(
           ? "selected the lowest shared brightness above background and below saturation and "
             "bloom limits"
           : SharedBrightnessFailureDiagnostic(camera_sweeps, recommendation.candidates);
+  return recommendation;
+}
+
+SharedBrightnessRecommendation RecommendSharedNonSaturatingRgbBrightness(
+    std::span<const CameraBrightnessSweep> camera_sweeps,
+    const PwmTolerantBrightnessSelectionOptions &options) {
+  ValidateSweeps(camera_sweeps);
+  if (options.minimum_stable_frames == 0U ||
+      !IsFiniteFraction(options.maximum_saturated_fraction) ||
+      !IsFiniteFraction(options.maximum_bloom_fraction)) {
+    throw std::invalid_argument("PWM-tolerant brightness selection options are invalid");
+  }
+  const std::set<std::uint8_t> brightnesses = ObservedBrightnesses(camera_sweeps);
+
+  SharedBrightnessRecommendation recommendation;
+  recommendation.candidates.reserve(brightnesses.size());
+  for (const std::uint8_t brightness : brightnesses) {
+    SharedBrightnessCandidate shared =
+        BuildNonSaturatingSharedCandidate(brightness, camera_sweeps, options);
+    if (shared.safe_for_every_camera && !recommendation.brightness.has_value()) {
+      recommendation.brightness = brightness;
+    }
+    recommendation.candidates.push_back(std::move(shared));
+  }
+  recommendation.available = recommendation.brightness.has_value();
+  recommendation.diagnostic =
+      recommendation.available
+          ? "selected the lowest repeatedly sampled shared brightness below saturation and bloom "
+            "limits; retained white impact remains the signal qualification gate"
+          : "no repeatedly sampled brightness remained below saturation and bloom limits in every "
+            "camera";
   return recommendation;
 }
 

@@ -93,6 +93,8 @@ struct ClipCapturePipelineProfile {
   // Measured by ClipSessionPublisher before entering WriteClipSession, but
   // serialized with the publication/session work rather than capture stages.
   std::chrono::steady_clock::duration publisher_planning{};
+  std::chrono::steady_clock::duration impact_preview_render{};
+  std::chrono::steady_clock::duration impact_preview_ready_after_confirmation{};
 };
 
 struct ClipViewPipelineProfile {
@@ -111,6 +113,8 @@ struct ClipViewPipelineProfile {
 struct ClipSessionPipelineProfile {
   double prepublication_analysis_ms = 0.0;
   double publisher_planning_ms = 0.0;
+  double impact_preview_render_ms = 0.0;
+  double impact_preview_ready_after_confirmation_ms = 0.0;
   double validation_and_timeline_ms = 0.0;
   double output_setup_ms = 0.0;
   double media_encoding_wall_ms = 0.0;
@@ -120,7 +124,7 @@ struct ClipSessionPipelineProfile {
 };
 
 struct ClipPipelineProfile {
-  static constexpr std::uint32_t kSchemaVersion = 2;
+  static constexpr std::uint32_t kSchemaVersion = 3;
 
   ClipCapturePipelineProfile capture;
   ClipSessionPipelineProfile session;
@@ -225,6 +229,14 @@ struct VaapiVp9WebmOptions {
   std::filesystem::path render_node = "/dev/dri/renderD128";
   std::uint32_t maximum_width = 640;
   std::uint32_t maximum_height = 480;
+  // Frame preparation is CPU-bound and independent for all-intra output.
+  // Workers prepare a bounded look-ahead queue while VA-API encodes the
+  // preceding frame, keeping both the CPU and GPU active without retaining a
+  // second full clip in converted form.
+  std::size_t preprocessing_threads = 4;
+  // Independent all-intra frames can be queued on separate VA surfaces. This
+  // avoids a per-frame GPU round trip while keeping output completion ordered.
+  std::size_t encoding_queue_depth = 4;
   // VA-API VP9 constant-quality index. Intel iHD accepts [0, 255]; 24 gives
   // retained-clip size and visual quality close to the former software VP8
   // path on this station while remaining substantially faster.

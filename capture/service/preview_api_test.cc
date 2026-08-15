@@ -32,6 +32,7 @@ using swing_capture::service::PreviewImage;
 using swing_capture::service::PreviewPerformanceStatus;
 using swing_capture::service::PreviewQualityStatus;
 using swing_capture::service::SessionAsset;
+using swing_capture::service::SessionImpactPreview;
 using swing_capture::service::SessionSummaryStatus;
 using swing_capture::service::StationBackend;
 
@@ -155,6 +156,21 @@ class FakeBackend final : public StationBackend {
         .path =
             session_root_ / (std::string(swing_capture::service::CameraRoleName(role)) + ".webm"),
         .media_type = "video/webm"};
+  }
+
+  std::optional<SessionImpactPreview> ImpactPreview(std::string_view session_id,
+                                                    CameraRole role) override {
+    if (session_id != "session-1") {
+      return std::nullopt;
+    }
+    return SessionImpactPreview{
+        .frame_id = role == CameraRole::kDownTheLine ? 42U : 43U,
+        .time_from_impact_microseconds = role == CameraRole::kDownTheLine ? -120 : 85,
+        .width = 2,
+        .height = 1,
+        .media_type = "image/jpeg",
+        .bytes = std::make_shared<const std::string>("fake-jpeg"),
+    };
   }
 
   bool preview_available_ = true;
@@ -356,6 +372,31 @@ void TestCaptureSessionRoutes() {
   assert(media_range->get_header_value("X-Content-Type-Options") == "nosniff");
   const auto missing = client.Get("/api/v1/sessions/missing/manifest");
   assert(missing && missing->status == 404);
+  const auto impact = client.Get("/api/v1/sessions/session-1/impact/down_the_line.jpg");
+  assert(impact && impact->status == 200);
+  assert(impact->body == "fake-jpeg");
+  assert(impact->get_header_value("Content-Type").starts_with("image/jpeg"));
+  assert(impact->get_header_value("Cache-Control") == "no-store");
+  assert(impact->get_header_value("X-Swing-Capture-Frame-Id") == "42");
+  assert(impact->get_header_value("X-Swing-Capture-Time-From-Impact-Us") == "-120");
+  const auto missing_impact = client.Get("/api/v1/sessions/missing/impact/face_on.jpg");
+  assert(missing_impact && missing_impact->status == 404);
+
+  std::string event_body;
+  const auto events = client.Get(
+      "/api/v1/events",
+      [&](const httplib::Response &response) {
+        assert(response.status == 200);
+        assert(response.get_header_value("Content-Type").starts_with("text/event-stream"));
+        assert(response.get_header_value("Cache-Control") == "no-cache");
+        return true;
+      },
+      [&](const char *data, std::size_t size) {
+        event_body.append(data, size);
+        return false;
+      });
+  assert(!events);
+  assert(event_body == "event: station\ndata: {}\n\n");
 }
 
 void TestStaticAssets() {

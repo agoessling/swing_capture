@@ -53,6 +53,13 @@ namespace synthetic_swing_workflow_internal {
     std::span<const optical::RgbBrightnessCalibration> calibrations,
     const optical::SharedBrightnessRecommendation &recommendation);
 
+// Retained camera mappings are fitted to host receipt timestamps. Receipt can
+// lag an optical exposure, but it cannot causally precede it, so an optical
+// calibration result that asks us to move a received frame later is a PWM-fit
+// artifact rather than a physical transport correction.
+[[nodiscard]] std::chrono::steady_clock::duration ConstrainReceiptTimelineCorrection(
+    std::chrono::steady_clock::duration estimated_correction) noexcept;
+
 }  // namespace synthetic_swing_workflow_internal
 
 // Bridges the typed Feather schedule, explicitly capped preview calibration samples,

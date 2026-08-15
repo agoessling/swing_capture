@@ -189,11 +189,14 @@ pre-trigger allocation if memory becomes constrained.
    prepared generation before stopping ALSA.
 4. The clip planner independently maps each camera's device timestamps to host
    time and selects 1.4 seconds before through 500 ms after the trigger estimate.
-5. Two publication tasks concurrently demosaic and fit the selected BayerRG8
-   frames to at most 640x480, convert them to NV12, and encode all-keyframe
-   VP9/WebM through the Intel GPU's VA-API low-power path. Camera acquisition
-   and the second ring generations continue during this work. A deterministic
-   software VP8 implementation remains an injected hermetic-test backend.
+5. The publisher first renders each trigger-nearest source frame as a
+   full-resolution JPEG and exposes the pair as provisional review evidence.
+   Two publication tasks then concurrently retain the full 1440x1080 BayerRG8
+   geometry, use bounded CPU look-ahead workers for demosaic/NV12 preparation,
+   and queue all-keyframe VP9/WebM work through independent Intel GPU VA-API
+   low-power contexts. Camera acquisition and the second ring generations
+   continue during this work. A deterministic software VP8 implementation
+   remains an injected hermetic-test backend.
 6. The publisher writes both media assets and a manifest into a private sibling
    directory, then atomically renames the complete directory into the session
    root. It never exposes a partial session or overwrites an existing one.
@@ -218,10 +221,11 @@ before manifest serialization. Capture timings separate confirmation,
 acceptance, the scheduled post-roll wait, ring rotation, and ALSA shutdown.
 Session timings separate prepublication analysis, publisher planning, output
 setup, media encoding, frame metadata, and the snapshot's monotonic timestamp.
-Each camera view further separates timeline work, fitted Bayer demosaic,
+Each camera view further separates timeline work, Bayer demosaic,
 RGB-to-YUV420 conversion, codec encoding, WebM muxing, finalization, and output
-verification. Profile schema 2 uses those backend-neutral stage names; the web
-reader retains schema-1 support for already published software-VP8 sessions.
+verification. Profile schema 3 additionally records early-impact render time
+and its audio-confirmation-relative availability; the web reader retains older
+schemas for already published sessions.
 
 The timing tree is hierarchical: both concurrent view totals are contained in
 media encoding wall time, and per-view stages are contained in that view's total.

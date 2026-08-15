@@ -19,17 +19,24 @@ audio impact freezes one generation of each preallocated camera buffer and
 rotates acquisition onto the other generation, so both cameras keep running
 while the completed clip is encoded.
 
-The production publisher demosaics and fits Bayer frames to at most 640x480,
-converts them to NV12, and encodes both views concurrently with the Intel GPU's
-VA-API VP9 low-power encoder. Every encoded frame is a keyframe so browser
-seeking and exact source-frame stepping remain deterministic. The WebMs are
-video-only: microphone samples are used for trigger detection and are not
-encoded. A deterministic software VP8 backend remains for hermetic fixtures
-and encoder-independent tests. The publisher writes exact source-frame timing
-metadata and both media files into a private directory, then atomically
-publishes the complete session. The persistent on-disk catalog is cached in
-memory at startup and refreshed after publication; the HTTP media routes
-support byte ranges for browser seeking.
+The production publisher retains the full 1440x1080 Bayer geometry, demosaics
+and converts frames to NV12 on a bounded CPU worker pool, and overlaps that
+work with queued Intel GPU VA-API VP9 low-power encoding. Both views encode
+concurrently. Every encoded frame is a keyframe so browser seeking and exact
+source-frame stepping remain deterministic. The WebMs are video-only:
+microphone samples are used for trigger detection and are not encoded. A
+deterministic software VP8 backend remains for hermetic fixtures and
+encoder-independent tests. Before video encoding, the publisher renders the
+two exact trigger-nearest frames as full-resolution JPEGs so the review page
+can show useful evidence after post-roll without waiting for both videos. The
+complete session is still atomically published only after both media files and
+the manifest are ready.
+
+The persistent on-disk catalog is cached in memory at startup and refreshed
+after publication; media routes support byte ranges for browser seeking. A
+server-sent event endpoint notifies connected browsers when capture, session,
+or early-impact-image state changes. The UI uses a 15-second poll only as a
+safety net while that event stream is connected.
 
 Capture is deliberately one-shot: ALSA monitoring stops after the rings rotate;
 after publication the application enters `ready`, releases the four raw rings,
@@ -332,7 +339,7 @@ camera-to-Feather edge association is not claimed.
 
 The shortest complete application check exercises the explicitly enabled
 synthetic-swing operation through the production station backend, real
-microphone trigger, one-shot ring rotation, software dual-view encoding,
+microphone trigger, one-shot ring rotation, hardware dual-view encoding,
 atomic publication, catalog and HTTP byte-range serving, and the
 post-publication setup-preview path:
 
@@ -357,21 +364,22 @@ optical/audio evidence, but ALSA, camera, amplifier, and acoustic latency are
 not calibrated, so it is not a true-impact timing claim.
 
 Published sessions also retain a versioned pipeline profile from audio
-confirmation through capture freeze, analysis, per-view image conversion and
-codec/WebM encoding, and the last pre-manifest snapshot. The review page combines
-that backend profile with manifest-fetch and decoded-impact-frame presentation
-timing, making post-impact latency regressions visible in both physical HIL
-reports and normal recorded sessions.
+confirmation through capture freeze, analysis, early-impact rendering,
+per-view image conversion and codec/WebM encoding, and the last pre-manifest
+snapshot. The review page combines that backend profile with manifest-fetch
+and decoded-impact-frame presentation timing, making post-impact latency
+regressions visible in both physical HIL reports and normal recorded sessions.
 
-The 2026-08-09 VA-API production run passed at the normal 500 us exposure and
-24 dB gain. Both VP9 clips retained 433 contiguous all-keyframe frames at
-approximately 226.87 fps. Concurrent hardware media encoding took 3.005
-seconds, and the profile snapshot was captured 3.735 seconds after audio
-confirmation. Pinned Chromium then passed dual decode, exact stepping,
-synchronized playback, and evidence rendering against the physical files. The
-complete HIL operation took 10.47 seconds; its report, media, camera images,
-and browser evidence are retained under
-`artifacts/hil/application-flow/20260809T211742Z-vaapi-vp9-pass/`.
+The latest 2026-08-09 low-latency production run passed at the normal 500 us
+exposure and 24 dB gain. Both full-resolution VP9 clips retained 433 contiguous
+all-keyframe frames at approximately 226.87 fps. The exact trigger-nearest JPEG
+pair was server-ready 538 ms after audio confirmation, including the required
+500 ms post-roll. Concurrent hardware media encoding took 2.901 seconds and
+the complete profile snapshot was captured 3.440 seconds after confirmation.
+Pinned Chromium decoded the physical files, sought and stepped exactly, and
+presented both impact frames 398 ms after beginning its manifest request. The
+report, media, camera images, and browser evidence are retained under
+`artifacts/hil/application-flow/20260809T230608Z-fullres-low-latency-pass/`.
 
 For unattended operation,
 `bazel run //tools:run_unattended_hil -- smoke|qualify|soak` invokes the

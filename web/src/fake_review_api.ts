@@ -32,6 +32,8 @@ export const FIXTURE_PIPELINE_PROFILE: PipelineProfile = {
   session: {
     prepublication_analysis_ms: 4.6,
     publisher_planning_ms: 3.7,
+    impact_preview_render_ms: 6.2,
+    impact_preview_ready_after_confirmation_ms: 512.8,
     validation_and_timeline_ms: 5.2,
     output_setup_ms: 1.8,
     media_encoding_wall_ms: 82.5,
@@ -280,6 +282,10 @@ export class FakeReviewApi implements ReviewApi {
       server_response_host_monotonic_ns: "458500000000",
     };
     return manifest;
+  }
+
+  impactPreviewUrl(_sessionId: string, role: ReviewRole, revision: number): string {
+    return `fixtures/${role === "down_the_line" ? "down-the-line" : "face-on"}.svg?v=${String(revision)}`;
   }
 
   #advanceSyntheticSwing() {

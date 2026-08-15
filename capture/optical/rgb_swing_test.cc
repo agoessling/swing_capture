@@ -30,6 +30,7 @@ using swing_capture::optical::BrightnessCandidateEvidence;
 using swing_capture::optical::CameraBrightnessSweep;
 using swing_capture::optical::FeatherRgbStep;
 using swing_capture::optical::PixelRegion;
+using swing_capture::optical::RecommendSharedNonSaturatingRgbBrightness;
 using swing_capture::optical::RecommendSharedRgbBrightness;
 using swing_capture::optical::Rgb8;
 using swing_capture::optical::RgbBrightnessCalibrationInput;
@@ -614,6 +615,51 @@ void ReportsPerCameraEvidenceWhenNoSharedBrightnessIsSafe() {
          "shared candidate diagnostic reports missing cross-camera observations");
 }
 
+void SelectsNonSaturatingFallbackAcrossShortExposurePwmDropout() {
+  const auto evidence = [](std::uint8_t brightness, std::size_t stable_frames, double signal,
+                           double saturation, double bloom, bool strictly_safe) {
+    return BrightnessCandidateEvidence{
+        .brightness = brightness,
+        .stable_frame_count = stable_frames,
+        .minimum_signal_delta = signal,
+        .minimum_signal_to_background_noise = signal / 2.0,
+        .maximum_saturated_fraction = saturation,
+        .maximum_bloom_fraction = bloom,
+        .safe_for_camera = strictly_safe,
+        .rejection_reasons =
+            strictly_safe
+                ? std::vector<std::string>{}
+                : std::vector<std::string>{"signal is not clearly above the local background"},
+    };
+  };
+  std::vector<BrightnessCandidateEvidence> down_the_line = {
+      evidence(1U, 7U, 34.0, 0.05, 0.01, true),
+      evidence(2U, 7U, 190.0, 0.49, 0.09, false),
+  };
+  std::vector<BrightnessCandidateEvidence> face_on = {
+      evidence(1U, 7U, 1.6, 0.02, 0.003, false),
+      evidence(2U, 7U, 32.0, 0.32, 0.04, false),
+  };
+  const std::array sweeps = {
+      CameraBrightnessSweep{.camera_id = "down-the-line", .candidates = down_the_line},
+      CameraBrightnessSweep{.camera_id = "face-on", .candidates = face_on},
+  };
+
+  const auto strict = RecommendSharedRgbBrightness(sweeps);
+  Expect(!strict.available,
+         "one short-exposure PWM dropout prevents strict every-frame signal qualification");
+  const auto fallback = RecommendSharedNonSaturatingRgbBrightness(sweeps);
+  Expect(fallback.available && fallback.brightness == 1U,
+         "lowest repeatedly sampled non-saturating level survives a short PWM OFF sample");
+  Expect(!fallback.candidates[1].safe_for_every_camera,
+         "brighter level remains rejected by physical saturation and bloom evidence");
+
+  face_on.front().stable_frame_count = 2U;
+  const auto insufficient = RecommendSharedNonSaturatingRgbBrightness(sweeps);
+  Expect(!insufficient.available,
+         "fallback does not select a level without multi-frame evidence in every camera");
+}
+
 void LocatesPreviewSweepAndCalibratesBayerColor() {
   const std::vector<FeatherRgbStep> calibration_schedule = MakeCalibrationSchedule();
   constexpr std::array<double, 3> kFirstResponse = {0.55, 1.0, 0.35};
@@ -859,6 +905,7 @@ int main() {
   RejectsNoisyRoiMinusAnnulusAggregateBySignalToNoise();
   AcceptsBrightnessOneLikeSignalWithAggregateNoiseUnits();
   ReportsPerCameraEvidenceWhenNoSharedBrightnessIsSafe();
+  SelectsNonSaturatingFallbackAcrossShortExposurePwmDropout();
   LocatesPreviewSweepAndCalibratesBayerColor();
   EstimatesSignedPreviewTimelineOffsetsAndRejectsAmbiguity();
   AcceptsOneBroadOffsetPeakButRejectsRemoteCompetition();

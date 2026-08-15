@@ -521,6 +521,11 @@ function PipelineProfilePanel({
           values={[
             ["Prepublication analysis", profile.session.prepublication_analysis_ms],
             ["Publisher planning", profile.session.publisher_planning_ms],
+            ["Impact preview render", profile.session.impact_preview_render_ms],
+            [
+              "Confirmation → impact preview ready",
+              profile.session.impact_preview_ready_after_confirmation_ms,
+            ],
             ["Validation + timeline", profile.session.validation_and_timeline_ms],
             ["Output setup", profile.session.output_setup_ms],
             ["Media encoding wall", profile.session.media_encoding_wall_ms],

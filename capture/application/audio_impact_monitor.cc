@@ -88,11 +88,18 @@ void AudioImpactMonitor::Start() {
   }
 }
 
-void AudioImpactMonitor::Stop() noexcept {
+void AudioImpactMonitor::RequestStop() noexcept {
   if (!worker_.joinable()) {
     return;
   }
   worker_.request_stop();
+}
+
+void AudioImpactMonitor::Stop() noexcept {
+  RequestStop();
+  if (!worker_.joinable()) {
+    return;
+  }
   worker_.join();
 }
 

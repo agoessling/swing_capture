@@ -303,6 +303,13 @@ diagnosing a delayed update. `Ctrl-C` and `SIGTERM` stop HTTP acceptance, join
 both camera workers, stop their streams, and destroy the Galaxy SDK before the
 process exits.
 
+That polling applies only to the continuously changing setup preview. Capture,
+early-impact-image, and completed-session changes are pushed through
+`/api/v1/events`; the review UI keeps a 15-second recovery poll while the event
+stream is connected. Completed production clips retain the full 1440x1080
+camera geometry and may be hundreds of megabytes because every VP9 frame is a
+keyframe. Provision the sessions volume accordingly.
+
 Only one process may own the cameras. Exit the preview service before running
 a direct Bazel camera HIL target. The preview service and
 `//tools:run_unattended_hil` both take `artifacts/hil/hardware.lock`, so those

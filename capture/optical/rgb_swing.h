@@ -341,6 +341,13 @@ struct SharedBrightnessRecommendation {
   std::vector<SharedBrightnessCandidate> candidates;
 };
 
+struct PwmTolerantBrightnessSelectionOptions {
+  std::size_t minimum_stable_frames = 3;
+  double maximum_saturated_fraction =
+      kDefaultWhiteImpactAcceptancePolicy.maximum_saturated_fraction;
+  double maximum_bloom_fraction = kDefaultWhiteImpactAcceptancePolicy.maximum_bloom_fraction;
+};
+
 // Intersects the observed brightness levels across every camera and chooses
 // the lowest level that is clearly above local background while remaining
 // below the configured saturation and bloom gates in every view. Candidate
@@ -348,6 +355,17 @@ struct SharedBrightnessRecommendation {
 // this function never weakens it.
 [[nodiscard]] SharedBrightnessRecommendation RecommendSharedRgbBrightness(
     std::span<const CameraBrightnessSweep> camera_sweeps);
+
+// Chooses the lowest level that was sampled repeatedly and remained below the
+// saturation and bloom limits in every camera. This deliberately ignores a
+// probe's minimum signal and SNR: very low NeoPixel levels use internal PWM,
+// so a short-exposure calibration sweep can sample an OFF phase in one camera
+// even though the later multi-frame white interval is observable. Callers must
+// use this only as a fallback and independently qualify the retained white
+// impact with AnalyzeRgbWhiteImpact.
+[[nodiscard]] SharedBrightnessRecommendation RecommendSharedNonSaturatingRgbBrightness(
+    std::span<const CameraBrightnessSweep> camera_sweeps,
+    const PwmTolerantBrightnessSelectionOptions &options = {});
 
 }  // namespace swing_capture::optical
 
