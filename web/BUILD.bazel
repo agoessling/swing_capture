@@ -4,6 +4,7 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 load("@npm//web:@playwright/test/package_json.bzl", playwright_bin = "bin")
+load("//tools:strict_cc.bzl", strict_cc_test = "cc_test")
 
 npm_link_all_packages(name = "node_modules")
 
@@ -23,6 +24,7 @@ APP_SRCS = [
     "src/app.tsx",
     "src/application.tsx",
     "src/assets.d.ts",
+    "src/dual_node_review_api.ts",
     "src/fake_api.ts",
     "src/fake_review_api.ts",
     "src/paired_preview.ts",
@@ -52,6 +54,7 @@ ts_project(
     srcs = APP_SRCS + [
         "src/app.test.tsx",
         "src/demo.tsx",
+        "src/dual_node_review_api.test.ts",
         "src/main.tsx",
         "src/review_app.test.tsx",
         "src/review.e2e.spec.ts",
@@ -61,6 +64,31 @@ ts_project(
     no_emit = True,
     transpiler = "tsc",
     tsconfig = ":tsconfig",
+)
+
+esbuild(
+    name = "dual_node_review_api_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/dual_node_review_api.test.ts"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/dual_node_review_api.test.ts",
+    external = [
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "dual_node_review_api_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "dual_node_review_api_test",
+    size = "small",
+    entry_point = ":dual_node_review_api_test.js",
 )
 
 esbuild(
@@ -183,6 +211,36 @@ playwright_bin.playwright_test(
         "SWING_CAPTURE_STATIC_APP": "$(rootpath :static_app)",
     },
     size = "small",
+)
+
+strict_cc_test(
+    name = "android_browser_hil_test",
+    size = "medium",
+    srcs = ["run_test_executable.cc"],
+    args = [
+        "$(rootpath :browser_test)",
+        "test",
+        "--config",
+        "web/playwright.config.ts",
+    ],
+    data = [
+        ":browser_test",
+        ":fixture_demo",
+        ":static_app",
+        "@playwright//:chromium-headless-shell",
+    ],
+    env = {
+        "PLAYWRIGHT_BROWSERS_PATH": "$(rootpath @playwright//:chromium-headless-shell)/../",
+        "SWING_CAPTURE_FIXTURE_APP": "$(rootpath :fixture_demo)",
+        "SWING_CAPTURE_STATIC_APP": "$(rootpath :static_app)",
+    },
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "requires-android-phone",
+    ],
 )
 
 copy_to_directory(

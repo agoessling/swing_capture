@@ -105,9 +105,13 @@ of:
 - 60 color steps at 20 ms each (1.2 s) before impact;
 - a white impact marker lasting 20,000 us, approximately four to five periods
   at 227 fps;
-- a 10 ms, 2 kHz, 10-permille speaker tone commanded on the same device
+- a 10 ms, 2 kHz, 125-permille speaker tone commanded on the same device
   timeline as the white marker, after amplifier warmup; and
 - 25 color steps at 20 ms each (500 ms) after impact.
+
+The fixed 125-permille HIL level uses the firmware's conservative ceiling. It
+gives the production impact detector useful margin in the qualified fixture
+geometry while the retained PCM gate still rejects clipping.
 
 The ACK contains the planned sequence, impact, post-impact, and completion
 device times plus every fixed sequence parameter, `prepared=1`,

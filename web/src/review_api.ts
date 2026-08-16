@@ -90,7 +90,7 @@ export interface ClipImageGeometry {
 }
 
 export interface ClipSourceGeometry extends ClipImageGeometry {
-  pixel_format: "BayerRG8";
+  pixel_format: "BayerRG8" | "camera2_private";
 }
 
 export interface ClipTrack {
@@ -213,9 +213,18 @@ export interface ClipManifest {
   trigger: ClipTrigger;
   mapped_nearest_frame_skew_us: number | null;
   views: ClipTrack[];
+  android_capture?: AndroidCaptureMetadata;
+  dual_node_alignment?: unknown;
   hil_evidence?: SyntheticSwingHilEvidence;
   pipeline_profile?: PipelineProfile;
   client_delivery_profile?: ManifestDeliveryProfile;
+}
+
+export interface AndroidCaptureMetadata {
+  node_id: string;
+  shared_session_id: string | null;
+  trigger_timestamp_uncertainty_ns: number | null;
+  local_nearest_frame_residual_us?: number;
 }
 
 export interface ReviewApi {
@@ -225,7 +234,7 @@ export interface ReviewApi {
   startSyntheticSwing(): Promise<CaptureStatus>;
   getSessions(): Promise<SessionList>;
   getManifest(sessionId: string): Promise<ClipManifest>;
-  subscribeToChanges?(onChange: () => void): () => void;
+  subscribeToChanges?(onChange: () => void): (() => void) | undefined;
   impactPreviewUrl?(sessionId: string, role: ReviewRole, revision: number): string;
 }
 
@@ -236,15 +245,21 @@ export class HttpReviewApi implements ReviewApi {
   readonly #baseUrl: string;
   readonly #fetcher: Fetcher;
   readonly #now: HighResolutionNow;
+  readonly #controlToken: string;
+  readonly #eventsSupported: boolean;
 
   constructor(
     baseUrl = "",
     fetcher: Fetcher = globalThis.fetch.bind(globalThis),
     now: HighResolutionNow = highResolutionNow,
+    controlToken = "",
+    eventsSupported = baseUrl.length === 0,
   ) {
     this.#baseUrl = baseUrl.replace(/\/$/, "");
     this.#fetcher = fetcher;
     this.#now = now;
+    this.#controlToken = controlToken;
+    this.#eventsSupported = eventsSupported;
   }
 
   async getCaptureStatus(): Promise<CaptureStatus> {
@@ -316,9 +331,9 @@ export class HttpReviewApi implements ReviewApi {
     };
   }
 
-  subscribeToChanges(onChange: () => void): () => void {
-    if (typeof EventSource === "undefined") {
-      return () => undefined;
+  subscribeToChanges(onChange: () => void): (() => void) | undefined {
+    if (!this.#eventsSupported || typeof EventSource === "undefined") {
+      return undefined;
     }
     const events = new EventSource(this.#absoluteUrl("/api/v1/events"));
     events.addEventListener("station", onChange);
@@ -342,7 +357,11 @@ export class HttpReviewApi implements ReviewApi {
   }
 
   async #request<T>(path: string, parser: (value: unknown) => T, init: RequestInit): Promise<T> {
-    const response = await this.#fetcher(this.#absoluteUrl(path), init);
+    const headers = new Headers(init.headers);
+    if (this.#controlToken.length > 0) {
+      headers.set("Authorization", `Bearer ${this.#controlToken}`);
+    }
+    const response = await this.#fetcher(this.#absoluteUrl(path), { ...init, headers });
     if (!response.ok) {
       throw await reviewRequestError(response);
     }
@@ -402,13 +421,8 @@ export function parseClipManifest(value: unknown): ClipManifest {
   }
   const tracks = object.views.map(parseClipTrack);
   const roles = new Set(tracks.map((track) => track.role));
-  if (
-    tracks.length !== 2 ||
-    roles.size !== 2 ||
-    !roles.has("down_the_line") ||
-    !roles.has("face_on")
-  ) {
-    throw new Error("clip manifest must contain one view for each camera role");
+  if (tracks.length < 1 || tracks.length > 2 || roles.size !== tracks.length) {
+    throw new Error("clip manifest must contain one or two unique camera roles");
   }
   const trigger = asObject(object.trigger, "clip trigger");
   const mappedSkew = object.mapped_nearest_frame_skew_us;
@@ -417,6 +431,7 @@ export function parseClipManifest(value: unknown): ClipManifest {
   }
   const hilEvidence = parseSyntheticSwingHilEvidence(object.hil_evidence, tracks);
   const pipelineProfile = parsePipelineProfile(object.pipeline_profile, tracks);
+  const androidCapture = parseAndroidCaptureMetadata(object.android_capture);
   return {
     schema_version: REVIEW_SCHEMA_VERSION,
     session_id: asNonemptyString(object.session_id, "manifest session_id"),
@@ -441,8 +456,39 @@ export function parseClipManifest(value: unknown): ClipManifest {
     },
     mapped_nearest_frame_skew_us: mappedSkew,
     views: tracks,
+    ...(androidCapture === undefined ? {} : { android_capture: androidCapture }),
     ...(hilEvidence === undefined ? {} : { hil_evidence: hilEvidence }),
     ...(pipelineProfile === undefined ? {} : { pipeline_profile: pipelineProfile }),
+  };
+}
+
+function parseAndroidCaptureMetadata(value: unknown): AndroidCaptureMetadata | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const object = asObject(value, "android_capture");
+  const localResidual = object.local_nearest_frame_residual_us;
+  return {
+    node_id: asNonemptyString(object.node_id, "android_capture.node_id"),
+    shared_session_id:
+      object.shared_session_id === undefined
+        ? null
+        : asNullableString(object.shared_session_id, "android_capture.shared_session_id"),
+    trigger_timestamp_uncertainty_ns:
+      object.trigger_timestamp_uncertainty_ns === undefined
+        ? null
+        : asNonnegativeInteger(
+            object.trigger_timestamp_uncertainty_ns,
+            "android_capture.trigger_timestamp_uncertainty_ns",
+          ),
+    ...(localResidual === undefined
+      ? {}
+      : {
+          local_nearest_frame_residual_us: asNonnegativeInteger(
+            localResidual,
+            "android_capture.local_nearest_frame_residual_us",
+          ),
+        }),
   };
 }
 
@@ -843,10 +889,10 @@ function parseClipMedia(value: unknown, role: ReviewRole): ClipMedia {
 
 function parseSourceGeometry(value: unknown, role: ReviewRole): ClipSourceGeometry {
   const object = asObject(value, `${role}.source`);
-  if (object.pixel_format !== "BayerRG8") {
-    throw new Error(`${role}.source.pixel_format must be BayerRG8`);
+  if (object.pixel_format !== "BayerRG8" && object.pixel_format !== "camera2_private") {
+    throw new Error(`${role}.source.pixel_format is unsupported`);
   }
-  return { ...parseGeometry(object, `${role}.source`), pixel_format: "BayerRG8" };
+  return { ...parseGeometry(object, `${role}.source`), pixel_format: object.pixel_format };
 }
 
 function parseGeometry(value: unknown, label: string): ClipImageGeometry {

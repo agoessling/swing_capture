@@ -1,0 +1,18 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "dual_coordination",
+    srcs = ["dual_coordination.cc"],
+    hdrs = ["dual_coordination.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "dual_coordination_test",
+    size = "small",
+    srcs = ["dual_coordination_test.cc"],
+    deps = [
+        ":dual_coordination",
+        "@nlohmann_json//:json",
+    ],
+)

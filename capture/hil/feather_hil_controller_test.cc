@@ -37,7 +37,7 @@ constexpr std::string_view kQueryFields =
     "tone_level_max_permille=125 swing_start_lead_us=20000 swing_step_us=20000 "
     "swing_pre_steps=60 swing_white_us=20000 swing_post_steps=25 "
     "swing_tone_duration_us=10000 swing_tone_frequency_hz=2000 "
-    "swing_tone_level_permille=10 swing_lateness_max_us=2000 "
+    "swing_tone_level_permille=125 swing_lateness_max_us=2000 "
     "swing_impact_delta_max_us=250 swing_color_reference_brightness=128 "
     "calibration_step_us=70000 calibration_count=8 "
     "calibration_candidates=1,2,3,4,6,8,12,16 fixture_neopixel_gpio=21 "
@@ -122,7 +122,7 @@ std::string SwingAcknowledgement(std::uint32_t request_id, std::string_view prep
          " ACK SWING accepted_us=4000000 sequence_start_scheduled_us=4020000 "
          "impact_scheduled_us=5220000 post_scheduled_us=5240000 end_scheduled_us=5740000 "
          "start_lead_us=20000 step_us=20000 pre_steps=60 white_us=20000 post_steps=25 "
-         "tone_duration_us=10000 tone_frequency_hz=2000 tone_level_permille=10 "
+         "tone_duration_us=10000 tone_frequency_hz=2000 tone_level_permille=125 "
          "tone_sample_rate_hz=32000 tone_sample_count=320 brightness=12 prepared=" +
          std::string(prepared) + " rail_powered=1 fixture_neopixel_gpio=21 shared_power_gpio=23\n";
 }
@@ -222,7 +222,7 @@ void TestExactFirmwareInfoLedAndToneReceipts() {
               "sequence_start_scheduled_us=4020000 impact_scheduled_us=5220000 "
               "post_scheduled_us=5240000 end_scheduled_us=5740000 start_lead_us=20000 "
               "step_us=20000 pre_steps=60 white_us=20000 post_steps=25 "
-              "tone_duration_us=10000 tone_frequency_hz=2000 tone_level_permille=10 "
+              "tone_duration_us=10000 tone_frequency_hz=2000 tone_level_permille=125 "
               "tone_sample_rate_hz=32000 tone_sample_count=320 brightness=12 prepared=1 "
               "rail_powered=1 fixture_neopixel_gpio=21 shared_power_gpio=23\n");
     WriteLine(terminal.master(),
@@ -252,6 +252,7 @@ void TestExactFirmwareInfoLedAndToneReceipts() {
   assert(info.protocol_version == 1);
   assert(info.capabilities.contains("led"));
   assert(info.maximum_lead_microseconds == 2'000'000);
+  assert(info.swing_tone_level_permille == 125U);
   assert(info.swing_color_reference_brightness == 128U);
   assert(info.fixture_neopixel_gpio == 21U);
   assert(info.fixture_neopixel_color_order == "rgb");
@@ -349,6 +350,8 @@ void ExpectQueryRejected(std::string_view fields) {
 
 void TestRejectsIncompatibleNegotiation() {
   ExpectQueryRejected(ReplacedQueryField("prop-maker-hil-5", "prop-maker-hil-4"));
+  ExpectQueryRejected(
+      ReplacedQueryField("swing_tone_level_permille=125", "swing_tone_level_permille=10"));
   ExpectQueryRejected(ReplacedQueryField("calibration_candidates=1,2,3,4,6,8,12,16",
                                          "calibration_candidates=16,24,32,48,64,80,96,128"));
   ExpectQueryRejected(ReplacedQueryField("fixture_neopixel_gpio=21 ", ""));
@@ -561,7 +564,7 @@ void TestRejectsMalformedCalibrationAndSwingEvidence() {
                 "sequence_start_scheduled_us=4020000 impact_scheduled_us=5220000 "
                 "post_scheduled_us=5240000 end_scheduled_us=5740000 start_lead_us=20000 "
                 "step_us=20000 pre_steps=60 white_us=20000 post_steps=25 "
-                "tone_duration_us=10000 tone_frequency_hz=2000 tone_level_permille=10 "
+                "tone_duration_us=10000 tone_frequency_hz=2000 tone_level_permille=125 "
                 "tone_sample_rate_hz=32000 tone_sample_count=320 brightness=12 prepared=1 "
                 "rail_powered=1 fixture_neopixel_gpio=21 shared_power_gpio=23\n");
       WriteLine(terminal.master(),

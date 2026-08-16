@@ -2,15 +2,17 @@
 
 ## Direction
 
-The first implementation targets the two Daheng
-`MER2-160-227U3C` cameras on Linux.
+The currently qualified implementation targets the two Daheng
+`MER2-160-227U3C` cameras on Linux. It remains the behavioral reference while
+the active two-phone replacement investigation in
+[`android.md`](android.md) is developed and measured.
 
 This path already provides deterministic access to every raw frame, explicit
 exposure controls, stable device timestamps, serial-number selection, and
-electrical frame-trigger inputs. Android high-speed video remains a useful
-future capture client, but it adds phone-specific high-speed camera
-constraints, thermal behavior, opaque video pipelines, file transfer, and
-wireless clock synchronization before it solves the core simulator use case.
+electrical frame-trigger inputs. Android high-speed video adds phone-specific
+camera constraints, thermal behavior, opaque video pipelines, file transfer,
+and wireless clock synchronization. Those risks are now explicit acceptance
+gates rather than reasons to leave Android as an unspecified future client.
 
 ## Capture data path
 
@@ -271,8 +273,8 @@ for the immediately following full-rate stimulus, which uses only the selected
 level:
 
 - 60 stepped RGB states at 20 ms each, or 1.2 seconds before impact;
-- a 20 ms white optical-impact state and a 10 ms, 2 kHz Feather speaker tone
-  commanded together on the RP2040 timeline; and
+- a 20 ms white optical-impact state and a 10 ms, 2 kHz, 125-permille Feather
+  speaker tone commanded together on the RP2040 timeline; and
 - 25 more 20 ms RGB states, or 0.5 seconds after impact.
 
 The audio detector accepts the tone through the same normal capture route, so

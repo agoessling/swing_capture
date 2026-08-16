@@ -19,6 +19,7 @@ import {
   type SessionSummary,
 } from "./review_api.js";
 import { ReviewApp } from "./review_app.js";
+import { ReviewPlayer } from "./review_player.js";
 
 const dom = new JSDOM('<!doctype html><html lang="en"><body></body></html>', {
   url: "http://station.test/#review",
@@ -87,6 +88,18 @@ async function main() {
     [],
     "review fixture should have no automated accessibility violations",
   );
+  cleanup();
+
+  const singleNodeManifest = structuredClone(FIXTURE_MANIFEST);
+  const singleNodeManifestTrack = singleNodeManifest.views[0];
+  assert.ok(singleNodeManifestTrack);
+  singleNodeManifestTrack.source.pixel_format = "camera2_private";
+  singleNodeManifest.views = [singleNodeManifestTrack];
+  delete singleNodeManifest.pipeline_profile;
+  render(<ReviewPlayer manifest={singleNodeManifest} />);
+  assert.equal(screen.getAllByRole("figure").length, 1);
+  assert.equal(document.querySelectorAll("video").length, 1);
+  assert.ok(screen.getByText("Down-the-line"));
   cleanup();
 
   render(<ReviewApp api={new FakeReviewApi({ hilEnabled: false })} pollIntervalMs={60_000} />);
@@ -285,6 +298,17 @@ function testRuntimeSchemaRejection() {
   delete manifestWithoutProfile.pipeline_profile;
   assert.deepEqual(parseClipManifest(manifestWithoutProfile), manifestWithoutProfile);
 
+  const singleNode = structuredClone(manifestWithoutProfile);
+  const singleNodeTrack = singleNode.views[0];
+  assert.ok(singleNodeTrack);
+  singleNodeTrack.source.pixel_format = "camera2_private";
+  singleNode.views = [singleNodeTrack];
+  assert.deepEqual(parseClipManifest(singleNode), singleNode);
+
+  const emptyManifest = structuredClone(manifestWithoutProfile);
+  emptyManifest.views = [];
+  assert.throws(() => parseClipManifest(emptyManifest), /one or two unique camera roles/);
+
   const unsupported = structuredClone(FIXTURE_MANIFEST) as unknown as Record<string, unknown>;
   unsupported.schema_version = 2;
   assert.throws(() => parseClipManifest(unsupported), /Unsupported review schema/);
@@ -293,7 +317,7 @@ function testRuntimeSchemaRejection() {
   const duplicateView = duplicateRole.views[1];
   assert.ok(duplicateView);
   duplicateView.role = "down_the_line";
-  assert.throws(() => parseClipManifest(duplicateRole), /one view for each camera role/);
+  assert.throws(() => parseClipManifest(duplicateRole), /one or two unique camera roles/);
 
   const nonmonotonic = structuredClone(FIXTURE_MANIFEST);
   const firstView = nonmonotonic.views[0];
@@ -437,14 +461,27 @@ async function testHttpContract() {
   }) as typeof fetch;
 
   const manifestClock = [100, 112.5];
-  const api = new HttpReviewApi("http://station.test/", fetcher, () => {
-    const now = manifestClock.shift();
-    assert.ok(now !== undefined);
-    return now;
-  });
+  const api = new HttpReviewApi(
+    "http://station.test/",
+    fetcher,
+    () => {
+      const now = manifestClock.shift();
+      assert.ok(now !== undefined);
+      return now;
+    },
+    "test-control-token",
+  );
+  assert.equal(
+    api.subscribeToChanges(() => undefined),
+    undefined,
+  );
   assert.equal((await api.getCaptureStatus()).armed, true);
   await api.setArmed(false);
   assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { armed: false });
+  assert.equal(
+    new Headers(calls[1]?.init?.headers).get("Authorization"),
+    "Bearer test-control-token",
+  );
   assert.equal((await api.triggerManualCapture()).session_id, session.session_id);
   assert.equal((await api.startSyntheticSwing()).hil.enabled, false);
   assert.deepEqual(JSON.parse(String(calls[3]?.init?.body)), {});

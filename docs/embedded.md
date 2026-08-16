@@ -112,7 +112,9 @@ screw-terminal NeoPixel data line on GPIO21. Calibration raises GPIO23, sweeps
 the negotiated white levels, latches the fixture pixel off, and holds the rail
 for one immediately following swing. The swing consumes that prepared state,
 keeps the rail powered through its RGB/white/audio/RGB timeline, then turns the
-pixel off, quiesces I2S, and lowers GPIO23. A command error or the bounded
+pixel off, quiesces I2S, and lowers GPIO23. Its fixed impact stimulus is a
+10 ms, 2 kHz tone at the firmware's conservative 125-permille ceiling. A
+command error or the bounded
 preparation timeout performs the same ordered shutdown. Nothing should be
 connected to the external powered rails unless this temporary shared power-up
 is known to be safe.

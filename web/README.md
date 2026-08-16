@@ -121,6 +121,42 @@ a Bazel undeclared test output. The bridge runs only when the explicit
 default invocation remains fully hermetic and skips that one external-artifact
 case.
 
+The manual Android browser target can also qualify live retained H.264 media.
+The existing single-node path uses `SWING_CAPTURE_ANDROID_NODE_URL`. For a
+durable two-phone review, export the two node origins and their 32-character
+control tokens, then explicitly pass the variable names through Bazel:
+
+```bash
+export SWING_CAPTURE_ANDROID_DTL_NODE_URL=http://dtl-phone:4315
+export SWING_CAPTURE_ANDROID_DTL_TOKEN=replace_with_dtl_node_token
+export SWING_CAPTURE_ANDROID_FACE_NODE_URL=http://face-phone:4315
+export SWING_CAPTURE_ANDROID_FACE_TOKEN=replace_with_face_node_token
+export SWING_CAPTURE_CHROME_EXECUTABLE=/usr/bin/google-chrome
+bazel test //web:android_browser_hil_test \
+  --test_output=streamed --nocache_test_results \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_NODE_URL \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_TOKEN \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_NODE_URL \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_TOKEN \
+  --test_env=SWING_CAPTURE_CHROME_EXECUTABLE
+```
+
+All four dual-node variables are an all-or-none contract: the test skips when
+none are set and fails before either phone is contacted when the configuration
+is partial or malformed. It recovers retained pairing evidence from both
+nodes, loads a ready paired session, requires both MP4 origins to serve HTTP
+206 byte ranges, decodes and seeks exactly two H.264 views, exercises
+synchronized stepping and playback, and preserves
+`android-dual-node-review.png` at 1440×1000.
+
+Use `/usr/bin/google-chrome` for this live H.264 gate because the bundled
+Chromium headless shell lacks proprietary H.264 decoding in this environment.
+The passing two-node run is preserved at
+[`artifacts/android_browser_hil_20260815T110817Z/outputs/android-dual-node-review.png`](../artifacts/android_browser_hil_20260815T110817Z/outputs/android-dual-node-review.png).
+It exercised the concurrently captured Pixel 6 1080p240/24 Mbit/s and Pixel 5a
+720p240/12 Mbit/s session whose durable coordination record was present on
+both nodes.
+
 When a manifest contains `pipeline_profile`, the review page shows capture,
 publication, and per-view encoder timings. It also measures manifest fetch and
 the presentation time of each role's impact frame with

@@ -1,5 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
+const chromeExecutable = process.env.SWING_CAPTURE_CHROME_EXECUTABLE;
+
 export default defineConfig({
   testDir: "./src",
   testMatch: "review.e2e.spec.ts",
@@ -11,6 +13,9 @@ export default defineConfig({
   use: {
     browserName: "chromium",
     headless: true,
+    ...(chromeExecutable === undefined
+      ? {}
+      : { launchOptions: { executablePath: chromeExecutable } }),
     viewport: { width: 1440, height: 1000 },
   },
 });

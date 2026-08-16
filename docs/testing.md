@@ -254,8 +254,9 @@ Feather command and device durations. The ROI may be a reflection of the
 emitter rather than the LED package itself. This does not prove absolute
 camera-to-Feather timing or synchronization between the two cameras.
 
-It then requests a conservative 20 ms, 2 kHz speaker tone and verifies energy,
-signal-to-noise ratio, 2 kHz spectral concentration, frequency error, active
+It then requests a conservative 20 ms, 2 kHz speaker tone at the shared
+125-permille HIL level and verifies energy, signal-to-noise ratio, 2 kHz
+spectral concentration, frequency error, active
 duration, and clipping in a bounded command-relative window. Synthetic tests
 reject an ambient impulse, amplifier power-on pop, wrong-frequency tone, and
 short or overlong stimulus. This proves the expected tone was audible but is
@@ -311,9 +312,10 @@ from both roles must locate the response and produce one common level that is
 visible without clipping in either camera. Once the station reports armed, the
 Feather runs 60 scaled RGB states at 20 ms each (1.2 seconds), a 20 ms white
 impact marker with a simultaneous 10 ms 2 kHz speaker tone, and 25 more 20 ms
-states (0.5 seconds). The existing adaptive microphone detector—not the manual
-capture endpoint—must accept exactly one tone trigger and drive post-roll,
-dual-view encoding, and atomic publication.
+states (0.5 seconds). The speaker tone uses the fixed 125-permille
+synthetic-swing level. The existing adaptive microphone detector—not the
+manual capture endpoint—must accept exactly one tone trigger and drive
+post-roll, dual-view encoding, and atomic publication.
 
 Capture is one-shot: publication transitions to `ready` with capture disarmed
 and ALSA stopped, while retaining the source-ready flag, counters, adaptive

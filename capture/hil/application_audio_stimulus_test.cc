@@ -31,6 +31,7 @@ constexpr float kPassingMicrophonePeak = 0.17F;
 
 static_assert(kStimulusFrames == 320U);
 static_assert(kApplicationAudioStimulus.duration > std::chrono::microseconds(1'500));
+static_assert(kApplicationAudioStimulus.level_permille == 125U);
 
 std::int16_t Pcm(float normalized_amplitude) {
   return static_cast<std::int16_t>(std::lround(normalized_amplitude * 32767.0F));
@@ -100,7 +101,7 @@ void StimulusUsesNegotiatedFirmwareCommandShape() {
   const std::string command = BuildFeatherToneCommand(
       17, kApplicationAudioStimulus.lead.count(), kApplicationAudioStimulus.duration.count(),
       kApplicationAudioStimulus.frequency_hz, kApplicationAudioStimulus.level_permille);
-  assert(command == "SC-HIL/1 17 TONE 100000 10000 2000 10\n");
+  assert(command == "SC-HIL/1 17 TONE 100000 10000 2000 125\n");
 }
 
 }  // namespace

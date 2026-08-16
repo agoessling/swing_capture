@@ -1,0 +1,338 @@
+load("@rules_android//android:rules.bzl", "android_binary", "android_library")
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+java_library(
+    name = "capture_role",
+    srcs = ["java/com/agoessling/swingcapture/CaptureRole.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "capture_role_test",
+    srcs = ["java/com/agoessling/swingcapture/CaptureRoleTest.java"],
+    main_class = "com.agoessling.swingcapture.CaptureRoleTest",
+    use_testrunner = False,
+    deps = [":capture_role"],
+)
+
+java_library(
+    name = "capture_profile",
+    srcs = ["java/com/agoessling/swingcapture/CaptureProfile.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "capture_profile_test",
+    srcs = ["java/com/agoessling/swingcapture/CaptureProfileTest.java"],
+    main_class = "com.agoessling.swingcapture.CaptureProfileTest",
+    use_testrunner = False,
+    deps = [":capture_profile"],
+)
+
+java_library(
+    name = "probe_statistics",
+    srcs = ["java/com/agoessling/swingcapture/ProbeStatistics.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "probe_statistics_test",
+    srcs = ["java/com/agoessling/swingcapture/ProbeStatisticsTest.java"],
+    main_class = "com.agoessling.swingcapture.ProbeStatisticsTest",
+    use_testrunner = False,
+    deps = [":probe_statistics"],
+)
+
+java_library(
+    name = "camera_encoder_timestamp_alignment",
+    srcs = ["java/com/agoessling/swingcapture/CameraEncoderTimestampAlignment.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "camera_encoder_timestamp_alignment_test",
+    srcs = ["java/com/agoessling/swingcapture/CameraEncoderTimestampAlignmentTest.java"],
+    main_class = "com.agoessling.swingcapture.CameraEncoderTimestampAlignmentTest",
+    use_testrunner = False,
+    deps = [":camera_encoder_timestamp_alignment"],
+)
+
+java_library(
+    name = "streaming_timestamp_calibrator",
+    srcs = ["java/com/agoessling/swingcapture/StreamingTimestampCalibrator.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "streaming_timestamp_calibrator_test",
+    srcs = ["java/com/agoessling/swingcapture/StreamingTimestampCalibratorTest.java"],
+    main_class = "com.agoessling.swingcapture.StreamingTimestampCalibratorTest",
+    use_testrunner = False,
+    deps = [":streaming_timestamp_calibrator"],
+)
+
+java_library(
+    name = "continuous_capture_continuity_diagnostic",
+    srcs = [
+        "java/com/agoessling/swingcapture/ContinuousCaptureContinuityDiagnostic.java",
+        "java/com/agoessling/swingcapture/ContinuousCaptureContinuityException.java",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/retention:encoded_access_unit_retention",
+        ":streaming_timestamp_calibrator",
+    ],
+)
+
+java_test(
+    name = "continuous_capture_continuity_diagnostic_test",
+    size = "small",
+    srcs = [
+        "java/com/agoessling/swingcapture/ContinuousCaptureContinuityDiagnosticTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.ContinuousCaptureContinuityDiagnosticTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/retention:encoded_access_unit_retention",
+        ":continuous_capture_continuity_diagnostic",
+        ":streaming_timestamp_calibrator",
+    ],
+)
+
+java_library(
+    name = "pcm16_wav_file",
+    srcs = [
+        "java/com/agoessling/swingcapture/AudioEvidencePolicy.java",
+        "java/com/agoessling/swingcapture/Pcm16WavFile.java",
+    ],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/audio:pcm16_evidence_ring"],
+)
+
+java_test(
+    name = "pcm16_wav_file_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/Pcm16WavFileTest.java"],
+    main_class = "com.agoessling.swingcapture.Pcm16WavFileTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/audio:pcm16_evidence_ring",
+        ":pcm16_wav_file",
+    ],
+)
+
+java_library(
+    name = "http_byte_range",
+    srcs = ["java/com/agoessling/swingcapture/HttpByteRange.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "http_byte_range_test",
+    srcs = ["java/com/agoessling/swingcapture/HttpByteRangeTest.java"],
+    main_class = "com.agoessling.swingcapture.HttpByteRangeTest",
+    use_testrunner = False,
+    deps = [":http_byte_range"],
+)
+
+java_library(
+    name = "avc_codec_descriptor",
+    srcs = ["java/com/agoessling/swingcapture/AvcCodecDescriptor.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "avc_codec_descriptor_test",
+    srcs = ["java/com/agoessling/swingcapture/AvcCodecDescriptorTest.java"],
+    main_class = "com.agoessling.swingcapture.AvcCodecDescriptorTest",
+    use_testrunner = False,
+    deps = [":avc_codec_descriptor"],
+)
+
+java_library(
+    name = "single_view_manifest_timing",
+    srcs = ["java/com/agoessling/swingcapture/SingleViewManifestTiming.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "single_view_manifest_timing_test",
+    srcs = ["java/com/agoessling/swingcapture/SingleViewManifestTimingTest.java"],
+    main_class = "com.agoessling.swingcapture.SingleViewManifestTimingTest",
+    use_testrunner = False,
+    deps = [":single_view_manifest_timing"],
+)
+
+java_library(
+    name = "capture_configuration_snapshot",
+    srcs = ["java/com/agoessling/swingcapture/CaptureConfigurationSnapshot.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":capture_profile",
+        ":capture_role",
+    ],
+)
+
+java_test(
+    name = "capture_configuration_snapshot_test",
+    srcs = ["java/com/agoessling/swingcapture/CaptureConfigurationSnapshotTest.java"],
+    main_class = "com.agoessling.swingcapture.CaptureConfigurationSnapshotTest",
+    use_testrunner = False,
+    deps = [
+        ":capture_configuration_snapshot",
+        ":capture_profile",
+        ":capture_role",
+    ],
+)
+
+java_library(
+    name = "capture_configuration_policy",
+    srcs = ["java/com/agoessling/swingcapture/CaptureConfigurationPolicy.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/node:node_core"],
+)
+
+java_test(
+    name = "capture_configuration_policy_test",
+    srcs = ["java/com/agoessling/swingcapture/CaptureConfigurationPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.CaptureConfigurationPolicyTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/node:node_core",
+        ":capture_configuration_policy",
+    ],
+)
+
+java_library(
+    name = "coordination_file_text_store",
+    srcs = ["java/com/agoessling/swingcapture/CoordinationFileTextStore.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/coordination:coordination_record_store"],
+)
+
+java_test(
+    name = "coordination_file_text_store_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/CoordinationFileTextStoreTest.java"],
+    main_class = "com.agoessling.swingcapture.CoordinationFileTextStoreTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/coordination:coordination_record_store",
+        ":coordination_file_text_store",
+    ],
+)
+
+java_library(
+    name = "coordination_http_endpoint",
+    srcs = ["java/com/agoessling/swingcapture/CoordinationHttpEndpoint.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/coordination:coordination_record_store"],
+)
+
+java_test(
+    name = "coordination_http_endpoint_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/CoordinationHttpEndpointTest.java"],
+    main_class = "com.agoessling.swingcapture.CoordinationHttpEndpointTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/coordination:coordination",
+        "//android/core/coordination:coordination_record_store",
+        ":coordination_http_endpoint",
+    ],
+)
+
+java_library(
+    name = "device_audio_detector_policy",
+    srcs = ["java/com/agoessling/swingcapture/DeviceAudioDetectorPolicy.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/audio:impact_timing_core"],
+)
+
+java_test(
+    name = "device_audio_detector_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/DeviceAudioDetectorPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.DeviceAudioDetectorPolicyTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/audio:impact_timing_core",
+        ":device_audio_detector_policy",
+    ],
+)
+
+android_library(
+    name = "app_lib",
+    srcs = glob(
+        ["java/com/agoessling/swingcapture/*.java"],
+        exclude = [
+            "java/com/agoessling/swingcapture/AvcCodecDescriptor.java",
+            "java/com/agoessling/swingcapture/AvcCodecDescriptorTest.java",
+            "java/com/agoessling/swingcapture/AudioEvidencePolicy.java",
+            "java/com/agoessling/swingcapture/CaptureRole.java",
+            "java/com/agoessling/swingcapture/CaptureRoleTest.java",
+            "java/com/agoessling/swingcapture/CaptureProfile.java",
+            "java/com/agoessling/swingcapture/CaptureProfileTest.java",
+            "java/com/agoessling/swingcapture/CameraEncoderTimestampAlignment.java",
+            "java/com/agoessling/swingcapture/CameraEncoderTimestampAlignmentTest.java",
+            "java/com/agoessling/swingcapture/CaptureConfigurationPolicy.java",
+            "java/com/agoessling/swingcapture/CaptureConfigurationPolicyTest.java",
+            "java/com/agoessling/swingcapture/CaptureConfigurationSnapshot.java",
+            "java/com/agoessling/swingcapture/CaptureConfigurationSnapshotTest.java",
+            "java/com/agoessling/swingcapture/CoordinationFileTextStore.java",
+            "java/com/agoessling/swingcapture/CoordinationFileTextStoreTest.java",
+            "java/com/agoessling/swingcapture/CoordinationHttpEndpoint.java",
+            "java/com/agoessling/swingcapture/CoordinationHttpEndpointTest.java",
+            "java/com/agoessling/swingcapture/ContinuousCaptureContinuityDiagnostic.java",
+            "java/com/agoessling/swingcapture/ContinuousCaptureContinuityDiagnosticTest.java",
+            "java/com/agoessling/swingcapture/ContinuousCaptureContinuityException.java",
+            "java/com/agoessling/swingcapture/DeviceAudioDetectorPolicy.java",
+            "java/com/agoessling/swingcapture/DeviceAudioDetectorPolicyTest.java",
+            "java/com/agoessling/swingcapture/HttpByteRange.java",
+            "java/com/agoessling/swingcapture/HttpByteRangeTest.java",
+            "java/com/agoessling/swingcapture/ProbeStatistics.java",
+            "java/com/agoessling/swingcapture/ProbeStatisticsTest.java",
+            "java/com/agoessling/swingcapture/Pcm16WavFile.java",
+            "java/com/agoessling/swingcapture/Pcm16WavFileTest.java",
+            "java/com/agoessling/swingcapture/StreamingTimestampCalibrator.java",
+            "java/com/agoessling/swingcapture/StreamingTimestampCalibratorTest.java",
+            "java/com/agoessling/swingcapture/SingleViewManifestTiming.java",
+            "java/com/agoessling/swingcapture/SingleViewManifestTimingTest.java",
+        ],
+    ),
+    manifest = "AndroidManifest.xml",
+    deps = [
+        "//android/core/audio:impact_timing_core",
+        "//android/core/audio:pcm16_evidence_ring",
+        "//android/core/coordination:coordination_record_store",
+        "//android/core/node:node_core",
+        "//android/core/retention:encoded_access_unit_retention",
+        ":avc_codec_descriptor",
+        ":camera_encoder_timestamp_alignment",
+        ":capture_configuration_policy",
+        ":capture_configuration_snapshot",
+        ":capture_profile",
+        ":capture_role",
+        ":coordination_file_text_store",
+        ":coordination_http_endpoint",
+        ":continuous_capture_continuity_diagnostic",
+        ":device_audio_detector_policy",
+        ":http_byte_range",
+        ":pcm16_wav_file",
+        ":probe_statistics",
+        ":streaming_timestamp_calibrator",
+        ":single_view_manifest_timing",
+    ],
+)
+
+android_binary(
+    name = "swing_capture",
+    manifest = "AndroidManifest.xml",
+    tags = ["manual"],
+    visibility = [
+        "//android/dual_hil:__pkg__",
+        "//android/hil:__pkg__",
+    ],
+    deps = [":app_lib"],
+)

@@ -30,6 +30,7 @@
 #include "capture/core/pooled_raw_frame_ring.h"
 #include "capture/core/robust_device_clock_mapping.h"
 #include "capture/daheng/daheng_camera.h"
+#include "capture/hil/application_audio_stimulus.h"
 #include "capture/hil/feather_hil_controller.h"
 #include "capture/hil/feather_hil_serial.h"
 #include "capture/image/bayer_rg8.h"
@@ -77,6 +78,7 @@ using swing_capture::hil::FeatherHilSerial;
 using swing_capture::hil::FeatherHilTransactionError;
 using swing_capture::hil::FeatherHilTransactionStageName;
 using swing_capture::hil::FeatherStimulusReceipt;
+using swing_capture::hil::kApplicationAudioStimulus;
 using swing_capture::image::DemosaicBayerRg8;
 using swing_capture::image::EncodePng;
 using swing_capture::image::ImageQualityMetrics;
@@ -126,7 +128,7 @@ constexpr auto kBetweenStimuli = std::chrono::milliseconds(100);
 constexpr auto kToneLead = std::chrono::microseconds(100000);
 constexpr auto kToneDuration = std::chrono::microseconds(20000);
 constexpr std::uint32_t kToneFrequencyHz = 2000;
-constexpr std::uint32_t kToneLevelPermille = 10;
+constexpr std::uint32_t kToneLevelPermille = kApplicationAudioStimulus.level_permille;
 constexpr auto kCameraPostStimulus = std::chrono::milliseconds(600);
 
 void RequireAudioWait(const AudioCaptureWaitResult &result, std::string_view operation) {

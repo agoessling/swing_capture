@@ -1,6 +1,16 @@
 common --enable_bzlmod
 common --announce_rc
+common --enable_platform_specific_config
+common --repo_env=ACCEPTED_ANDROID_SDK_LICENSE_VERSION=36
+common --java_language_version=17
+common --java_runtime_version=remotejdk_21
+common --tool_java_language_version=17
+common --tool_java_runtime_version=remotejdk_21
 try-import %workspace%/.bazelrc.local
+
+mobile-install:linux --adb=external/+android+androidsdk_linux/platform-tools/linux/adb
+mobile-install:macos --adb=external/+android+androidsdk_darwin/platform-tools/darwin/adb
+mobile-install:windows --adb=external/+android+androidsdk_windows/platform-tools/windows/adb.exe
 
 build --incompatible_strict_action_env
 build --show_timestamps
@@ -8,6 +18,10 @@ build --compilation_mode=opt
 build --copt=-g
 build --cxxopt=-std=c++23
 build --strip=never
+# Android core libraries use Java 17 records. Package the D8 global synthetics
+# and desugared JDK runtime required on-device, rather than only desugaring each
+# dependency jar in isolation.
+build --desugar_java8_libs
 
 test --test_output=errors
 

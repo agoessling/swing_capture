@@ -1,0 +1,204 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "android_probe_hil_support",
+    srcs = ["android_probe_hil_support.cc"],
+    hdrs = ["android_probe_hil_support.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "android_probe_hil_support_test",
+    size = "small",
+    srcs = ["android_probe_hil_support_test.cc"],
+    deps = [":android_probe_hil_support"],
+)
+
+cc_test(
+    name = "android_high_speed_probe_hil_test",
+    size = "medium",
+    srcs = ["android_probe_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_retained_capture_hil_test",
+    size = "medium",
+    srcs = ["android_probe_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--retain",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_continuous_capture_hil_test",
+    size = "medium",
+    srcs = ["android_probe_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--continuous",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_audio_trigger_hil_test",
+    size = "medium",
+    srcs = ["android_probe_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--continuous-audio",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_audio_trigger_screen_off_hil_test",
+    size = "medium",
+    srcs = ["android_probe_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--continuous-audio-screen-off",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-phone",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_continuous_15_minute_soak_hil_test",
+    size = "enormous",
+    srcs = ["android_probe_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--continuous-audio-soak-15m",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "eternal",
+    deps = [
+        ":android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)

@@ -5,6 +5,8 @@ Linux-first dual high-speed camera capture and golf swing review.
 Design and validation details live in
 [`docs/architecture.md`](docs/architecture.md) and
 [`docs/testing.md`](docs/testing.md).
+The active two-phone replacement investigation is documented in
+[`docs/android.md`](docs/android.md).
 For provisioning a fresh Linux capture host, follow
 [`docs/headless_setup.md`](docs/headless_setup.md).
 
@@ -63,6 +65,66 @@ The repository uses Bazel 9.2, Bzlmod, and C++23. Bazelisk reads
 ```bash
 bazel test //...
 ```
+
+The Android replacement path is also built entirely through Bazel:
+
+```bash
+bazel build //android/app:swing_capture
+bazel run //tools/android:adb -- devices -l
+```
+
+This is now a production-shaped continuous capture node rather than a
+visible-activity or synthetic-trigger-only probe. An armed foreground service
+owns Camera2, the microphone, a hardware H.264 encoder, and a bounded encoded
+pre-roll ring; a local audio impact freezes a real MP4 plus timestamped manifest
+without depending on the activity or browser lifecycle. Roles and capture
+profiles are configured independently. The Pixel 6 keeps the detector default
+floor of 0.015, while an isolated exact-model Pixel 5a policy uses 0.012; the
+Pixel 5a accommodation does not change Pixel 6 tuning.
+
+Each phone serves its sessions to the existing browser over bounded HTTP. The
+browser also has a two-node coordinator that assigns one shared session ID,
+estimates clock-offset bounds, admits exactly one `down_the_line` and one
+`face_on` trigger, combines both clips, and replicates an immutable coordination
+record to both phones. Short physical milestones are preserved under
+[`artifacts/android_dual_hil_20260815T1744Z`](artifacts/android_dual_hil_20260815T1744Z)
+and
+[`artifacts/android_screen_off_hil_20260815T1745Z`](artifacts/android_screen_off_hil_20260815T1745Z).
+The sequential run remains useful local-pipeline evidence, and the subsequent
+[`artifacts/android_dual_hil_concurrent_20260815T105807Z/report.json`](artifacts/android_dual_hil_concurrent_20260815T105807Z/report.json)
+passed the one-event concurrent gate: one Feather swing drove Pixel 6
+1080p240/24 Mbit/s and Pixel 5a 720p240/12 Mbit/s captures, with 6.377 ms and
+14.100 ms optical/audio timing bounds, persistent `tag36h11` ID 0, and the
+durable coordination record verified on both phones. The paired live H.264
+browser path also passed; its preserved screenshot is
+[`artifacts/android_browser_hil_20260815T110817Z/outputs/android-dual-node-review.png`](artifacts/android_browser_hil_20260815T110817Z/outputs/android-dual-node-review.png).
+That live H.264 gate uses
+`--test_env=SWING_CAPTURE_CHROME_EXECUTABLE=/usr/bin/google-chrome` because the
+bundled Chromium headless shell lacks proprietary H.264 decoding.
+A requested 15-minute Pixel 6 1080p240 isolation completed 215,817 encoded
+frames at 239.077 fps and published a valid terminal clip, but failed thermal
+acceptance after reaching Android status `SEVERE`; evidence is preserved at
+[`artifacts/android_soak_20260815T193311Z`](artifacts/android_soak_20260815T193311Z).
+A controlled 720p240/12 Mbit/s comparison then passed the same 15-minute gate
+at 239.064 fps without exceeding `MODERATE`; it delayed the first `LIGHT` and
+`MODERATE` samples from 150/390 seconds to 300/630 seconds and halved the
+encoded-ring footprint. Evidence is preserved at
+[`artifacts/android_soak_720p_20260815T135742Z`](artifacts/android_soak_720p_20260815T135742Z).
+New installations and Android HIL now use 720p240/12 Mbit/s as the standard on
+both roles; 1080p240 remains an explicit option. Normal operation leaves the
+display free to sleep while the foreground service holds only a partial CPU
+wake lock.
+The standard Pixel 6 screen-off gate and a concurrent one-event two-phone gate
+then passed at 720p240 on both nodes. The latter retained persistent AprilTag
+ID 0, localized Feather LED/tone evidence, 5.659/16.394 ms conservative local
+timing bounds, and the durable replicated coordination record; evidence is at
+[`artifacts/android_dual_hil_concurrent_720p_20260815T142302Z`](artifacts/android_dual_hil_concurrent_720p_20260815T142302Z).
+A publication-heavy precursor also exposed a one-frame Camera2/encoder ordinal
+shift after 5 minutes 27 seconds. Five-minute qualification and a 30-minute
+soak remain unclaimed. Commands, contracts, metrics, and remaining risks are
+documented in [`docs/android.md`](docs/android.md). All phone HIL targets are
+manual, local, and exclusive, so the ordinary software-only suite does not
+select them.
 
 This runs the hardware-independent C++, Python, and TypeScript/UI suite. It
 covers the station doctor, SDK extractor, unattended HIL runner, synthetic
@@ -314,8 +376,8 @@ and the complete window must pass aggregate signal gates. Partial free-running
 exposure-edge frames may fall below support. Whole-frame room-light variation
 is corrected and a local background ring is subtracted in both stages. It also
 verifies that the same AprilTag identity is present in both views and checks
-that a conservative 20 ms, 2 kHz speaker tone has the expected energy,
-frequency content, and duration above the microphone noise floor. It retains
+that a conservative 20 ms, 2 kHz, 125-permille speaker tone has the expected
+energy, frequency content, and duration above the microphone noise floor. It retains
 an incremental JSON report, a WAV, clean tag/locator/qualification PNGs, ROI
 overlays, and averaged red-difference images for both roles, including partial
 evidence on failure. The selected ROI can be an optically useful reflection
@@ -351,9 +413,9 @@ bazel test //capture/hil:application_flow_hil_test \
 It has an internal 15-second workflow deadline. Through
 `POST /api/v1/hil/synthetic-swing`, it first sweeps eight shared brightness
 candidates for both views, then runs 1.2 seconds of stepped pre-impact color, a
-20 ms white impact marker with a simultaneous 10 ms 2 kHz tone, and 0.5 seconds
-of stepped follow-through color. The application must finish `ready` and
-unarmed after exactly one accepted audio trigger. Automated acceptance checks
+20 ms white impact marker with a simultaneous 10 ms 2 kHz tone at 125 permille,
+and 0.5 seconds of stepped follow-through color. The application must finish
+`ready` and unarmed after exactly one accepted audio trigger. Automated acceptance checks
 the white marker in both cameras, the audio trigger, retained-frame continuity,
 encoded media, HTTP byte ranges, and the camera-to-Feather timestamp correction.
 The surrounding colors are deliberately a human playback cue for watching and

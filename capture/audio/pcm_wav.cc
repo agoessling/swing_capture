@@ -30,6 +30,25 @@ void WriteLittleEndian(std::span<std::byte> output, std::size_t offset, Integer 
   }
 }
 
+bool MatchesText(std::span<const std::byte> input, std::size_t offset, std::string_view expected) {
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    if (input[offset + index] != static_cast<std::byte>(expected[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename Integer>
+Integer ReadLittleEndian(std::span<const std::byte> input, std::size_t offset) {
+  static_assert(std::is_unsigned_v<Integer>);
+  Integer value = 0;
+  for (std::size_t index = 0; index < sizeof(Integer); ++index) {
+    value |= std::to_integer<Integer>(input[offset + index]) << (index * 8U);
+  }
+  return value;
+}
+
 }  // namespace
 
 std::vector<std::byte> EncodeMonoPcmS16Wav(std::span<const std::int16_t> samples,
@@ -65,6 +84,56 @@ std::vector<std::byte> EncodeMonoPcmS16Wav(std::span<const std::int16_t> samples
                       std::bit_cast<std::uint16_t>(samples[index]));
   }
   return wav;
+}
+
+DecodedMonoPcmS16Wav DecodeMonoPcmS16Wav(std::span<const std::byte> wav) {
+  if (wav.size() > kMaximumMonoPcmS16WavBytes) {
+    throw std::length_error("WAV input exceeds the decoder size limit");
+  }
+  if (wav.size() < kWavHeaderBytes) {
+    throw std::invalid_argument("WAV input is shorter than the canonical header");
+  }
+  if (!MatchesText(wav, 0, "RIFF") || !MatchesText(wav, 8, "WAVE") ||
+      !MatchesText(wav, 12, "fmt ") || !MatchesText(wav, 36, "data")) {
+    throw std::invalid_argument("WAV input does not have the canonical chunk layout");
+  }
+
+  const auto riff_bytes = ReadLittleEndian<std::uint32_t>(wav, 4);
+  if (riff_bytes != static_cast<std::uint32_t>(wav.size() - 8U)) {
+    throw std::invalid_argument("WAV RIFF length does not match the input length");
+  }
+  if (ReadLittleEndian<std::uint32_t>(wav, 16) != 16U ||
+      ReadLittleEndian<std::uint16_t>(wav, 20) != 1U ||
+      ReadLittleEndian<std::uint16_t>(wav, 22) != 1U ||
+      ReadLittleEndian<std::uint16_t>(wav, 32) != sizeof(std::int16_t) ||
+      ReadLittleEndian<std::uint16_t>(wav, 34) != 16U) {
+    throw std::invalid_argument("WAV input is not canonical mono PCM S16");
+  }
+
+  const auto sample_rate_hz = ReadLittleEndian<std::uint32_t>(wav, 24);
+  constexpr auto kBytesPerSample = std::uint32_t{sizeof(std::int16_t)};
+  if (sample_rate_hz == 0 ||
+      sample_rate_hz > std::numeric_limits<std::uint32_t>::max() / kBytesPerSample ||
+      ReadLittleEndian<std::uint32_t>(wav, 28) != sample_rate_hz * kBytesPerSample) {
+    throw std::invalid_argument("WAV sample rate or byte rate is invalid");
+  }
+
+  const auto data_bytes = ReadLittleEndian<std::uint32_t>(wav, 40);
+  if (data_bytes != static_cast<std::uint32_t>(wav.size() - kWavHeaderBytes)) {
+    throw std::invalid_argument("WAV data length does not match the input length");
+  }
+  if (data_bytes % kBytesPerSample != 0U) {
+    throw std::invalid_argument("WAV PCM S16 data length must be even");
+  }
+
+  DecodedMonoPcmS16Wav decoded;
+  decoded.sample_rate_hz = sample_rate_hz;
+  decoded.samples.resize(data_bytes / kBytesPerSample);
+  for (std::size_t index = 0; index < decoded.samples.size(); ++index) {
+    decoded.samples[index] = std::bit_cast<std::int16_t>(
+        ReadLittleEndian<std::uint16_t>(wav, kWavHeaderBytes + index * kBytesPerSample));
+  }
+  return decoded;
 }
 
 }  // namespace swing_capture

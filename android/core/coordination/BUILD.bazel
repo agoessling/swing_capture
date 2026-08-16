@@ -1,0 +1,65 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+java_library(
+    name = "coordination",
+    srcs = [
+        "java/com/agoessling/swingcapture/core/coordination/AssociatedSwing.java",
+        "java/com/agoessling/swingcapture/core/coordination/AssociationResult.java",
+        "java/com/agoessling/swingcapture/core/coordination/AssociationStatus.java",
+        "java/com/agoessling/swingcapture/core/coordination/CaptureRole.java",
+        "java/com/agoessling/swingcapture/core/coordination/ClockExchangeEstimateResult.java",
+        "java/com/agoessling/swingcapture/core/coordination/ClockExchangeEstimateStatus.java",
+        "java/com/agoessling/swingcapture/core/coordination/ClockExchangeEstimator.java",
+        "java/com/agoessling/swingcapture/core/coordination/ClockExchangeSample.java",
+        "java/com/agoessling/swingcapture/core/coordination/ClockOffsetEstimate.java",
+        "java/com/agoessling/swingcapture/core/coordination/DualNodeSwingAssociator.java",
+        "java/com/agoessling/swingcapture/core/coordination/NodeTriggerReport.java",
+        "java/com/agoessling/swingcapture/core/coordination/ObservedNodeTrigger.java",
+        "java/com/agoessling/swingcapture/core/coordination/SubmissionResult.java",
+        "java/com/agoessling/swingcapture/core/coordination/SubmissionStatus.java",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+java_library(
+    name = "coordination_record_store",
+    srcs = [
+        "java/com/agoessling/swingcapture/core/coordination/AtomicTextStore.java",
+        "java/com/agoessling/swingcapture/core/coordination/CoordinationRecordStore.java",
+        "java/com/agoessling/swingcapture/core/coordination/PairedCoordinationRecord.java",
+        "java/com/agoessling/swingcapture/core/coordination/StrictJson.java",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [":coordination"],
+)
+
+java_test(
+    name = "clock_exchange_estimator_test",
+    srcs = ["java/com/agoessling/swingcapture/core/coordination/ClockExchangeEstimatorTest.java"],
+    main_class = "com.agoessling.swingcapture.core.coordination.ClockExchangeEstimatorTest",
+    use_testrunner = False,
+    deps = [":coordination"],
+)
+
+java_test(
+    name = "dual_node_swing_associator_test",
+    srcs = ["java/com/agoessling/swingcapture/core/coordination/DualNodeSwingAssociatorTest.java"],
+    main_class = "com.agoessling.swingcapture.core.coordination.DualNodeSwingAssociatorTest",
+    use_testrunner = False,
+    deps = [":coordination"],
+)
+
+java_test(
+    name = "coordination_record_store_test",
+    size = "small",
+    srcs = [
+        "java/com/agoessling/swingcapture/core/coordination/CoordinationRecordStoreTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.core.coordination.CoordinationRecordStoreTest",
+    use_testrunner = False,
+    deps = [
+        ":coordination",
+        ":coordination_record_store",
+    ],
+)

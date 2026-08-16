@@ -92,7 +92,10 @@ cc_library(
     name = "april_tag",
     srcs = ["april_tag.cc"],
     hdrs = ["april_tag.h"],
-    visibility = ["//capture:__subpackages__"],
+    visibility = [
+        "//android/dual_hil:__pkg__",
+        "//capture:__subpackages__",
+    ],
     deps = [
         "//capture/image:image_quality",
         "@apriltag//:apriltag",

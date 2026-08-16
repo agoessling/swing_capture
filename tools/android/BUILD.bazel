@@ -1,0 +1,6 @@
+alias(
+    name = "adb",
+    actual = "@androidsdk//:platform-tools/adb",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)

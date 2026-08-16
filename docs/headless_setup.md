@@ -233,7 +233,8 @@ an OFF baseline and the external screw-terminal fixture NeoPixel's white
 brightness candidates `1,2,3,4,6,8,12,16` in both views, selects one level visible without
 clipping in either camera, arms capture, and runs the Feather sequence. Expect
 1.2 seconds of stepped pre-impact RGB states, a 20 ms white marker accompanied
-by a 10 ms 2 kHz speaker tone, and 0.5 seconds of stepped post-impact states.
+by a 10 ms 2 kHz speaker tone at 125 permille, and 0.5 seconds of stepped
+post-impact states.
 The UI reports calibration, stimulus, capture, encoding, and ready/error
 progress, then opens the published review session.
 

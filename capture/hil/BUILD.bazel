@@ -89,7 +89,11 @@ cc_library(
     name = "feather_hil_serial",
     srcs = ["feather_hil_serial.cc"],
     hdrs = ["feather_hil_serial.h"],
-    visibility = ["//capture:__subpackages__"],
+    visibility = [
+        "//android/dual_hil:__pkg__",
+        "//android/hil:__pkg__",
+        "//capture:__subpackages__",
+    ],
     deps = [":feather_hil_protocol"],
 )
 
@@ -107,7 +111,11 @@ cc_library(
     name = "feather_hil_controller",
     srcs = ["feather_hil_controller.cc"],
     hdrs = ["feather_hil_controller.h"],
-    visibility = ["//capture:__subpackages__"],
+    visibility = [
+        "//android/dual_hil:__pkg__",
+        "//android/hil:__pkg__",
+        "//capture:__subpackages__",
+    ],
     deps = [
         ":feather_hil_protocol",
         ":feather_hil_serial",
@@ -149,6 +157,7 @@ cc_test(
     ],
     timeout = "short",
     deps = [
+        ":application_audio_stimulus",
         ":feather_hil_controller",
         ":feather_hil_serial",
         "//capture/audio:audio_capture_session",

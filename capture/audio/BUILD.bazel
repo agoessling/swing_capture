@@ -33,7 +33,10 @@ cc_library(
     name = "commanded_tone_analyzer",
     srcs = ["commanded_tone_analyzer.cc"],
     hdrs = ["commanded_tone_analyzer.h"],
-    visibility = ["//capture:__subpackages__"],
+    visibility = [
+        "//android/dual_hil:__pkg__",
+        "//capture:__subpackages__",
+    ],
     deps = [":audio_hil_metrics"],
 )
 
@@ -41,7 +44,10 @@ cc_library(
     name = "pcm_wav",
     srcs = ["pcm_wav.cc"],
     hdrs = ["pcm_wav.h"],
-    visibility = ["//capture:__subpackages__"],
+    visibility = [
+        "//android/dual_hil:__pkg__",
+        "//capture:__subpackages__",
+    ],
 )
 
 cc_binary(

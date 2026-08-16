@@ -1,0 +1,21 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+java_library(
+    name = "node_core",
+    srcs = [
+        "BearerAuthorization.java",
+        "CaptureRuntime.java",
+        "NodeCoordinationState.java",
+        "SessionRetentionPlanner.java",
+    ],
+    visibility = ["//android/app:__pkg__"],
+)
+
+java_test(
+    name = "node_core_test",
+    srcs = ["NodeCoreTest.java"],
+    main_class = "com.agoessling.swingcapture.node.NodeCoreTest",
+    use_testrunner = False,
+    deps = [":node_core"],
+)

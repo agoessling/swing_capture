@@ -1,0 +1,51 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+package(default_visibility = ["//visibility:public"])
+
+java_library(
+    name = "impact_timing_core",
+    srcs = [
+        "java/com/agoessling/swingcapture/audio/AudioTimestampMapper.java",
+        "java/com/agoessling/swingcapture/audio/ContinuousAudioImpactDetector.java",
+        "java/com/agoessling/swingcapture/audio/ImpactDetector.java",
+    ],
+)
+
+java_library(
+    name = "pcm16_evidence_ring",
+    srcs = ["java/com/agoessling/swingcapture/audio/Pcm16EvidenceRing.java"],
+)
+
+java_test(
+    name = "impact_detector_test",
+    srcs = ["java/com/agoessling/swingcapture/audio/ImpactDetectorTest.java"],
+    main_class = "com.agoessling.swingcapture.audio.ImpactDetectorTest",
+    use_testrunner = False,
+    deps = [":impact_timing_core"],
+)
+
+java_test(
+    name = "audio_timestamp_mapper_test",
+    srcs = ["java/com/agoessling/swingcapture/audio/AudioTimestampMapperTest.java"],
+    main_class = "com.agoessling.swingcapture.audio.AudioTimestampMapperTest",
+    use_testrunner = False,
+    deps = [":impact_timing_core"],
+)
+
+java_test(
+    name = "continuous_audio_impact_detector_test",
+    srcs = ["java/com/agoessling/swingcapture/audio/ContinuousAudioImpactDetectorTest.java"],
+    main_class = "com.agoessling.swingcapture.audio.ContinuousAudioImpactDetectorTest",
+    use_testrunner = False,
+    deps = [":impact_timing_core"],
+)
+
+java_test(
+    name = "pcm16_evidence_ring_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/audio/Pcm16EvidenceRingTest.java"],
+    main_class = "com.agoessling.swingcapture.audio.Pcm16EvidenceRingTest",
+    use_testrunner = False,
+    deps = [":pcm16_evidence_ring"],
+)

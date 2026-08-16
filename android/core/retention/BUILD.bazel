@@ -1,0 +1,17 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+java_library(
+    name = "encoded_access_unit_retention",
+    srcs = ["java/com/agoessling/swingcapture/retention/EncodedAccessUnitRetention.java"],
+    visibility = ["//visibility:public"],
+)
+
+java_test(
+    name = "encoded_access_unit_retention_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/retention/EncodedAccessUnitRetentionTest.java"],
+    main_class = "com.agoessling.swingcapture.retention.EncodedAccessUnitRetentionTest",
+    use_testrunner = False,
+    deps = [":encoded_access_unit_retention"],
+)

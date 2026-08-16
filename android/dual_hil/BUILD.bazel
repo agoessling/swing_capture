@@ -1,0 +1,152 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "audio_evidence_validation",
+    srcs = ["audio_evidence_validation.cc"],
+    hdrs = ["audio_evidence_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//capture/audio:commanded_tone_analyzer",
+        "//capture/audio:pcm_wav",
+        "//embedded/prop_maker:swing_sequence",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "audio_evidence_validation_test",
+    size = "small",
+    srcs = ["audio_evidence_validation_test.cc"],
+    deps = [
+        ":audio_evidence_validation",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "concurrent_hil_validation",
+    srcs = ["concurrent_hil_validation.cc"],
+    hdrs = ["concurrent_hil_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/dual_coordination_hil:dual_coordination",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "concurrent_hil_validation_test",
+    size = "small",
+    srcs = ["concurrent_hil_validation_test.cc"],
+    deps = [
+        ":concurrent_hil_validation",
+        "//android/dual_coordination_hil:dual_coordination",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "dual_session_validation",
+    srcs = ["dual_session_validation.cc"],
+    hdrs = ["dual_session_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "dual_session_validation_test",
+    size = "small",
+    srcs = ["dual_session_validation_test.cc"],
+    deps = [
+        ":dual_session_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "rgb_swing_analysis",
+    srcs = ["rgb_swing_analysis.cc"],
+    hdrs = ["rgb_swing_analysis.h"],
+    visibility = ["//visibility:private"],
+)
+
+cc_test(
+    name = "rgb_swing_analysis_test",
+    size = "small",
+    srcs = ["rgb_swing_analysis_test.cc"],
+    deps = [":rgb_swing_analysis"],
+)
+
+cc_test(
+    name = "dual_phone_sequential_hil_test",
+    size = "medium",
+    srcs = ["dual_android_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":audio_evidence_validation",
+        ":concurrent_hil_validation",
+        ":dual_session_validation",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_concurrent_hil_test",
+    size = "medium",
+    srcs = ["dual_android_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "concurrent",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":audio_evidence_validation",
+        ":concurrent_hil_validation",
+        ":dual_session_validation",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)

@@ -282,7 +282,7 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
 
   return (
     <section aria-label="Synchronized clip player" className="review-player">
-      <div className="review-video-grid">
+      <div className={`review-video-grid${tracks.length === 1 ? " single-view" : ""}`}>
         {tracks.map((track, index) => {
           const mappedFrame = nearestImpactFrame(track, frame.time_from_impact_us);
           const hilEvidence = manifest.hil_evidence;
@@ -639,12 +639,12 @@ function buildBrowserPipelineTiming(
   presentations: Partial<Record<ReviewRole, ImpactFramePresentation>>,
 ): BrowserPipelineTiming | null {
   const delivery = manifest.client_delivery_profile;
-  const downTheLine = presentations.down_the_line;
-  const faceOn = presentations.face_on;
-  if (delivery === undefined || downTheLine === undefined || faceOn === undefined) {
+  const targetPresentations = manifest.views.map((track) => presentations[track.role]);
+  if (delivery === undefined || targetPresentations.some((value) => value === undefined)) {
     return null;
   }
-  const bothPresented = Math.max(downTheLine.performance_ms, faceOn.performance_ms);
+  const completed = targetPresentations as ImpactFramePresentation[];
+  const bothPresented = Math.max(...completed.map((value) => value.performance_ms));
   const responseToPresentation = Math.max(
     0,
     bothPresented - delivery.manifest_response_received_performance_ms,
@@ -660,7 +660,10 @@ function buildBrowserPipelineTiming(
   return {
     schema_version: 1,
     session_id: manifest.session_id,
-    presentation_method: downTheLine.method === faceOn.method ? downTheLine.method : "mixed",
+    presentation_method:
+      new Set(completed.map((value) => value.method)).size === 1
+        ? requiredPresentation(completed, 0).method
+        : "mixed",
     manifest_fetch_duration_ms: delivery.manifest_fetch_duration_ms,
     manifest_response_received_performance_ms: delivery.manifest_response_received_performance_ms,
     both_impact_frames_presented_performance_ms: bothPresented,
@@ -702,13 +705,33 @@ function orderedProfileViews(views: PipelineProfile["views"]): PipelineProfile["
   return [downTheLine, faceOn];
 }
 
-function orderedTracks(tracks: ClipTrack[]): [ClipTrack, ClipTrack] {
-  const downTheLine = tracks.find((track) => track.role === "down_the_line");
-  const faceOn = tracks.find((track) => track.role === "face_on");
-  if (downTheLine === undefined || faceOn === undefined) {
-    throw new Error("A review clip requires both camera roles");
+function orderedTracks(tracks: ClipTrack[]): [ClipTrack] | [ClipTrack, ClipTrack] {
+  if (tracks.length < 1 || tracks.length > 2) {
+    throw new Error("A review clip requires one or two camera roles");
   }
-  return [downTheLine, faceOn];
+  const sorted = [...tracks].sort((left, right) => {
+    if (left.role === right.role) {
+      return 0;
+    }
+    return left.role === "down_the_line" ? -1 : 1;
+  });
+  const first = sorted[0];
+  if (first === undefined) {
+    throw new Error("A review clip requires at least one camera role");
+  }
+  const second = sorted[1];
+  return second === undefined ? [first] : [first, second];
+}
+
+function requiredPresentation(
+  presentations: ImpactFramePresentation[],
+  index: number,
+): ImpactFramePresentation {
+  const presentation = presentations[index];
+  if (presentation === undefined) {
+    throw new Error(`Presentation ${String(index)} is unavailable`);
+  }
+  return presentation;
 }
 
 function nearestImpactFrame(track: ClipTrack, timeFromImpactUs: number): ClipFrame {

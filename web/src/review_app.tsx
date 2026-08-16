@@ -358,9 +358,7 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
               <div className="clip-summary">
                 <span>{triggerLabel(manifest.trigger.source)}</span>
                 <span>{formatSessionTime(manifest.created_at_utc)}</span>
-                <span>
-                  {manifest.views[0]?.media.codec.toUpperCase()} · all-intra full resolution
-                </span>
+                <span>{mediaSummary(manifest)}</span>
                 {manifest.hil_evidence !== undefined ? <span>Synthetic HIL evidence</span> : null}
               </div>
               <ReviewPlayer manifest={manifest} />
@@ -381,6 +379,19 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
       </footer>
     </div>
   );
+}
+
+function mediaSummary(manifest: ClipManifest): string {
+  const track = manifest.views[0];
+  if (track === undefined) {
+    return "Encoded review media";
+  }
+  const frameStructure = track.media.all_frames_keyframes ? "all-intra" : "inter-frame";
+  const geometry =
+    track.source.width === track.encoded.width && track.source.height === track.encoded.height
+      ? "full resolution"
+      : `${track.encoded.width}×${track.encoded.height}`;
+  return `${track.media.codec.toUpperCase()} · ${frameStructure} · ${geometry}`;
 }
 
 const HIL_PROGRESS_STEPS: Array<{ stage: SyntheticSwingHilStage; label: string }> = [
