@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "sample_period_ms": 200,
+  "clips": [
+    {
+      "id": "IN01",
+      "title": "Golf Pre Shot Routines: Full Swing, Chipping, & Putting",
+      "creator": "Paige Spiranac",
+      "source_url": "https://www.youtube.com/watch?v=uNENyi8TxHo",
+      "source_group": "youtube-uNENyi8TxHo",
+      "source_trim_ms": [265000, 287000],
+      "media": {"path": "clips/IN01.mp4", "sha256": "ca77cb31936e9312d4f7d811b1d166756bd7b816979038b5b958f2b9c073e36f"},
+      "hitting_region": [0.35, 0.55, 0.68, 0.98],
+      "view": "atl",
+      "capture_role": "face_on",
+      "disposition": "primary_positive",
+      "split": "development",
+      "labels": {
+        "safe_arm_start_ms": 7000,
+        "preferred_arm_ms": 7000,
+        "takeaway_ms": 17600,
+        "impact_ms": 18400,
+        "reference_arm_ms": null,
+        "must_not_arm": [{"start_ms": 0, "end_ms": 7000, "reason": "upright and walk-in"}]
+      },
+      "notes": "Continuous realistic walk-in, address, and swing."
+    },
+    {
+      "id": "IN02",
+      "title": "Walk In Routine",
+      "creator": "Don Trahan / Swing Surgeon",
+      "source_url": "https://www.swingsurgeon.com/daily-video-tips/walk-routine",
+      "source_group": "swing-surgeon-walk-in-routine",
+      "source_trim_ms": [429000, 449000],
+      "media": {"path": "clips/IN02.mp4", "sha256": "f025c23b6b5f0b2749baf8f4495447a232f11ed9410da68a16111aaa784e56cf"},
+      "hitting_region": [0.38, 0.52, 0.66, 0.98],
+      "view": "atl",
+      "capture_role": "face_on",
+      "disposition": "primary_positive",
+      "split": "development",
+      "labels": {
+        "safe_arm_start_ms": 8000,
+        "preferred_arm_ms": 10000,
+        "takeaway_ms": 16200,
+        "impact_ms": null,
+        "reference_arm_ms": null,
+        "must_not_arm": [{"start_ms": 0, "end_ms": 8000, "reason": "upright and circling"}]
+      },
+      "notes": "Lower-resolution hard positive with training aid and foliage."
+    },
+    {
+      "id": "C01",
+      "title": "Kerrod Gray instructional setup and swing",
+      "creator": "Kerrod Gray",
+      "source_url": "https://www.youtube.com/watch?v=9L5o3-Nd-6k",
+      "source_group": "youtube-9L5o3-Nd-6k",
+      "source_trim_ms": [261000, 286000],
+      "media": {"path": "clips/C01.mp4", "sha256": "defe2b60ed9488adc7b6f2b1cd4f7355cd76c40b1dc78e062810e7fa7876ee74"},
+      "hitting_region": [0.18, 0.55, 0.45, 0.98],
+      "view": "dtl",
+      "capture_role": "down_the_line",
+      "disposition": "primary_positive",
+      "split": "validation",
+      "labels": {
+        "safe_arm_start_ms": 11000,
+        "preferred_arm_ms": 11000,
+        "takeaway_ms": 20100,
+        "impact_ms": 20880,
+        "reference_arm_ms": null,
+        "must_not_arm": [{"start_ms": 0, "end_ms": 11000, "reason": "upright and early setup"}]
+      },
+      "notes": "DTL long-dwell positive; arm well before the final settled address."
+    },
+    {
+      "id": "C02",
+      "title": "Rick Shiels pre-shot swing",
+      "creator": "Rick Shiels",
+      "source_url": "https://www.youtube.com/watch?v=vaTEBm33_Yo",
+      "source_group": "youtube-vaTEBm33_Yo",
+      "source_trim_ms": [88000, 112200],
+      "media": {"path": "clips/C02.mp4", "sha256": "9be4638be6426dbd8d8cf68c3ea09c94b4170c4c8297572cb963d5fdfd3a117a"},
+      "hitting_region": null,
+      "view": "unsupported_45_degree",
+      "capture_role": null,
+      "disposition": "geometry_rejection",
+      "split": "challenge",
+      "labels": {
+        "safe_arm_start_ms": null,
+        "preferred_arm_ms": null,
+        "takeaway_ms": 18160,
+        "impact_ms": 18980,
+        "reference_arm_ms": 10000,
+        "must_not_arm": [{"start_ms": 0, "end_ms": 24200, "reason": "unsupported camera view"}]
+      },
+      "notes": "Roughly 45 degrees between ATL and DTL; reject as a primary station view."
+    },
+    {
+      "id": "D01",
+      "title": "Annika Sorenstam walk-in and swing",
+      "creator": "Annika Sorenstam / LET Tour Tips",
+      "source_url": "https://www.youtube.com/watch?v=NOVG_ewByxY",
+      "source_group": "youtube-NOVG_ewByxY",
+      "source_trim_ms": [75000, 96000],
+      "media": {"path": "clips/D01.mp4", "sha256": "75b7dce5144894be1527620a44b44fdf63b5c918bfb3fc40515df674ea4f9e0d"},
+      "hitting_region": [0.38, 0.65, 0.46, 0.90],
+      "view": "dtl",
+      "capture_role": "down_the_line",
+      "disposition": "primary_positive",
+      "split": "validation",
+      "labels": {
+        "safe_arm_start_ms": 10000,
+        "preferred_arm_ms": 10000,
+        "takeaway_ms": 14800,
+        "impact_ms": 15400,
+        "reference_arm_ms": null,
+        "must_not_arm": [{"start_ms": 0, "end_ms": 10000, "reason": "upright and walk-in"}]
+      },
+      "notes": "Human-reviewed DTL positive."
+    },
+    {
+      "id": "D02",
+      "title": "Mike Nokes pre-shot routine",
+      "creator": "Mike Nokes PGA",
+      "source_url": "https://www.youtube.com/watch?v=BoXC-J3xFuQ",
+      "source_group": "youtube-BoXC-J3xFuQ",
+      "source_trim_ms": [22000, 50500],
+      "media": {"path": "clips/D02.mp4", "sha256": "6e78bac7dc589e7c1df97e858a7721c434c34036df9b533a2976f8b9fd129a32"},
+      "hitting_region": null,
+      "view": "unsupported_front",
+      "capture_role": null,
+      "disposition": "geometry_rejection",
+      "split": "challenge",
+      "labels": {
+        "safe_arm_start_ms": null,
+        "preferred_arm_ms": null,
+        "takeaway_ms": 24000,
+        "impact_ms": 24860,
+        "reference_arm_ms": 14000,
+        "must_not_arm": [{"start_ms": 0, "end_ms": 28500, "reason": "front view opposite DTL"}]
+      },
+      "notes": "Retained only to test rejection of an unsupported front view."
+    },
+    {
+      "id": "D03",
+      "title": "Ballantyne Golf Academy pre-shot routine",
+      "creator": "Ballantyne Golf Academy",
+      "source_url": "https://www.youtube.com/watch?v=LdEWEG01R_U",
+      "source_group": "youtube-LdEWEG01R_U",
+      "source_trim_ms": [68000, 98000],
+      "media": {"path": "clips/D03.mp4", "sha256": "a3325ad5df342c1a7696fac8a3ce929d9d4c3372cff6c7e07b8633d691e6ad63"},
+      "hitting_region": [0.40, 0.50, 0.62, 0.98],
+      "view": "atl",
+      "capture_role": "face_on",
+      "disposition": "primary_positive",
+      "split": "validation",
+      "labels": {
+        "safe_arm_start_ms": 19000,
+        "preferred_arm_ms": 19000,
+        "takeaway_ms": 24600,
+        "impact_ms": 25500,
+        "reference_arm_ms": null,
+        "must_not_arm": [{"start_ms": 12000, "end_ms": 19000, "reason": "narrow stance before intended setup"}]
+      },
+      "notes": "ATL positive with a narrow-stance false-arm challenge beginning near 12 seconds."
+    },
+    {
+      "id": "D04",
+      "title": "Aurorateachesgolf DTL routine",
+      "creator": "Aurorateachesgolf",
+      "source_url": "https://www.youtube.com/watch?v=2_Yp2gl2oHc",
+      "source_group": "youtube-2_Yp2gl2oHc",
+      "source_trim_ms": [1000, 25000],
+      "media": {"path": "clips/D04.mp4", "sha256": "98f73d4db9e79862adbe64d4c69a0988ee6f0b47b05055b9525247710df47df9"},
+      "hitting_region": [0.34, 0.52, 0.44, 0.80],
+      "view": "dtl",
+      "capture_role": "down_the_line",
+      "disposition": "secondary_positive",
+      "split": "challenge",
+      "labels": {
+        "safe_arm_start_ms": 13000,
+        "preferred_arm_ms": 13000,
+        "takeaway_ms": 18800,
+        "impact_ms": 19570,
+        "reference_arm_ms": null,
+        "must_not_arm": [
+          {"start_ms": 0, "end_ms": 6800, "reason": "upright and practice swing"},
+          {"start_ms": 6800, "end_ms": 13000, "reason": "walk-in before desired arm"}
+        ]
+      },
+      "notes": "Shaky-camera DTL robustness case with an early practice swing."
+    },
+    {
+      "id": "ED01",
+      "title": "Smash Factor pre-shot routine",
+      "creator": "Smash Factor Golf Coaching",
+      "source_url": "https://www.youtube.com/watch?v=QhLsXsJk-RA",
+      "source_group": "youtube-QhLsXsJk-RA",
+      "source_trim_ms": [160000, 190000],
+      "media": {"path": "clips/ED01.mp4", "sha256": "d7e6a4fb7e29ddbf81846d6cc44ae2b6613a88e61c504e3a381f28ea5dd9e714"},
+      "hitting_region": null,
+      "view": "unsupported_45_degree",
+      "capture_role": null,
+      "disposition": "geometry_rejection",
+      "split": "challenge",
+      "labels": {
+        "safe_arm_start_ms": null,
+        "preferred_arm_ms": null,
+        "takeaway_ms": 20800,
+        "impact_ms": 21870,
+        "reference_arm_ms": 14000,
+        "must_not_arm": [{"start_ms": 0, "end_ms": 30000, "reason": "unsupported 45-degree camera view"}]
+      },
+      "notes": "Human review overrides the automated DTL classification; geometry rejection only."
+    },
+    {
+      "id": "EE01",
+      "title": "Help Your Golf Consistency By Improving Your Pre-Shot Routine!",
+      "creator": "Ben Emerson Golf",
+      "source_url": "https://www.youtube.com/watch?v=SX7Mn0xf2kY",
+      "source_group": "youtube-SX7Mn0xf2kY",
+      "source_trim_ms": [108000, 138000],
+      "media": {"path": "clips/EE01.mp4", "sha256": "4d38875d8d6bbf0942db98949e1b0bb9badf1aa3f99aa8b165a5a3f96988375f"},
+      "hitting_region": [0.36, 0.48, 0.60, 0.92],
+      "view": "atl",
+      "capture_role": "face_on",
+      "disposition": "primary_positive",
+      "split": "challenge",
+      "labels": {
+        "safe_arm_start_ms": 12000,
+        "preferred_arm_ms": 12000,
+        "takeaway_ms": 25080,
+        "impact_ms": 25940,
+        "reference_arm_ms": null,
+        "must_not_arm": [
+          {"start_ms": 0, "end_ms": 5200, "reason": "off-ball setup and complete practice swing"},
+          {"start_ms": 5200, "end_ms": 12000, "reason": "upright reset and early final setup"}
+        ]
+      },
+      "notes": "ATL positive with a complete earlier practice swing that must not arm the final shot."
+    },
+    {
+      "id": "TI02",
+      "title": "Consistency in the Prelude to the Hit",
+      "creator": "Titleist / Justin Parsons",
+      "source_url": "https://www.youtube.com/watch?v=3AHg7JtSHl8",
+      "source_group": "youtube-3AHg7JtSHl8",
+      "source_trim_ms": [0, 130287],
+      "media": {"path": "clips/TI02.mp4", "sha256": "78424946fd8c59bc4b9f1dd20ba35286ed5bedd2dbfced97cac70a0472c160e9"},
+      "hitting_region": null,
+      "view": "unknown",
+      "capture_role": null,
+      "disposition": "transition_only",
+      "split": "challenge",
+      "labels": {
+        "safe_arm_start_ms": null,
+        "preferred_arm_ms": null,
+        "takeaway_ms": null,
+        "impact_ms": null,
+        "reference_arm_ms": 70000,
+        "must_not_arm": []
+      },
+      "notes": "Address-transition reference only; no complete timing-positive sequence."
+    },
+    {
+      "id": "WC03",
+      "title": "Suvichaya Vinijchaitham Golf Swing Slow Mo 2026",
+      "creator": "Hut2026",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Suvichaya_Vinijchaitham_Golf_Swing_Slow_Mo_2026.webm",
+      "source_group": "commons-suvichaya-2026",
+      "source_trim_ms": [0, 68075],
+      "media": {"path": "clips/WC03.webm", "sha256": "7b748b86b794790bd079b629fb124b71e446d228aeabf12ddfe11b46a1406c44"},
+      "hitting_region": null,
+      "view": "unknown",
+      "capture_role": null,
+      "disposition": "diagnostic",
+      "split": "challenge",
+      "labels": {
+        "safe_arm_start_ms": null,
+        "preferred_arm_ms": null,
+        "takeaway_ms": null,
+        "impact_ms": null,
+        "reference_arm_ms": null,
+        "must_not_arm": []
+      },
+      "notes": "Starts at address; useful only for pose, swing, finish, and cooldown behavior."
+    }
+  ]
+}

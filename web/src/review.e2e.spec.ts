@@ -1,5 +1,5 @@
-import { createServer, type Server } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 
@@ -52,6 +52,16 @@ test.afterAll(async () => {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => (error === undefined ? resolve() : reject(error)));
   });
+});
+
+test("production document uses root-relative bundle assets", async () => {
+  const staticRoot = process.env.SWING_CAPTURE_STATIC_APP;
+  if (staticRoot === undefined) {
+    throw new Error("SWING_CAPTURE_STATIC_APP is not set");
+  }
+  const document = await readFile(path.join(path.resolve(staticRoot), "index.html"), "utf8");
+  expect(document).toContain('href="/app.css"');
+  expect(document).toContain('src="/app.js"');
 });
 
 test("plays and steps a synchronized fixture clip", async ({ page }) => {
@@ -194,6 +204,44 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
   expect(viewport).toEqual({ width: 1440, height: 1000 });
 });
 
+test("keeps post-capture diagnostics usable on a phone viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(stationUrl);
+
+  const diagnostics = page.getByRole("region", { name: "Capture diagnostics" });
+  await diagnostics.scrollIntoViewIfNeeded();
+  await expect(diagnostics).toBeVisible();
+  await expect(diagnostics.getByRole("option")).toHaveCount(7);
+  await diagnostics.getByRole("combobox", { name: "Result" }).selectOption("missed_shot");
+  await diagnostics
+    .getByRole("textbox", { name: "Note (optional)" })
+    .fill("Impact sound was not detected");
+  await diagnostics.getByText("Timing marks (optional)").click();
+  await diagnostics
+    .getByRole("spinbutton", { name: "Desired high-speed start (ms)" })
+    .fill("-1200");
+  await diagnostics.getByRole("button", { name: "Save diagnostic feedback" }).click();
+  await expect(diagnostics.getByText("Diagnostic feedback saved.")).toBeVisible();
+  await expect(diagnostics.getByRole("button", { name: "Download diagnostic ZIP" })).toBeVisible();
+
+  expect(
+    await page.evaluate(() => ({
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: document.documentElement.clientWidth,
+    })),
+  ).toEqual({ documentWidth: 390, viewportWidth: 390 });
+
+  const screenshot = await page.screenshot({ animations: "disabled", fullPage: false });
+  expect({ width: screenshot.readUInt32BE(16), height: screenshot.readUInt32BE(20) }).toEqual({
+    width: 390,
+    height: 844,
+  });
+  const outputDirectory = process.env.TEST_UNDECLARED_OUTPUTS_DIR;
+  if (outputDirectory !== undefined) {
+    await writeFile(path.join(outputDirectory, "review-phone-diagnostics.png"), screenshot);
+  }
+});
+
 test("keeps camera setup available and exposes accessible review controls", async ({ page }) => {
   await page.goto(stationUrl);
   await page.getByRole("button", { name: "Camera setup" }).click();
@@ -202,20 +250,20 @@ test("keeps camera setup available and exposes accessible review controls", asyn
   await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
 
   await expect(page.getByRole("button", { name: "Disarm capture" })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Manual diagnostic capture" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Save missed shot" })).toBeEnabled();
   await page.getByRole("button", { name: "Disarm capture" }).click();
   await expect(page.getByRole("heading", { name: "Not armed" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Manual diagnostic capture" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save missed shot" })).toBeDisabled();
   await page.getByRole("button", { name: "Arm audio capture" }).click();
   await expect(page.getByRole("heading", { name: "Listening for an audio trigger" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Manual diagnostic capture" })).toBeEnabled();
-  await page.getByRole("button", { name: "Manual diagnostic capture" }).click();
+  await expect(page.getByRole("button", { name: "Save missed shot" })).toBeEnabled();
+  await page.getByRole("button", { name: "Save missed shot" }).click();
   await expect(page.getByRole("heading", { name: "Audio trigger detected" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Arm audio capture" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Manual diagnostic capture" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save missed shot" })).toBeDisabled();
   await expect(page.getByRole("heading", { name: "Ready" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Arm audio capture" })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Manual diagnostic capture" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save missed shot" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Run synthetic swing HIL" })).toBeEnabled();
   await page.evaluate(() => {
     const heading = document.querySelector("#synthetic-hil-heading");
@@ -320,7 +368,7 @@ test("loads the supplied physical HIL session artifact", async ({ page }) => {
     await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Ready" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Arm audio capture" })).toBeEnabled();
-    await expect(page.getByRole("button", { name: "Manual diagnostic capture" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Save missed shot" })).toBeDisabled();
     await expect(
       page.getByText(`Frame ${manifest.impactFrameIndex + 1} of ${manifest.frameCount}`),
     ).toBeVisible();

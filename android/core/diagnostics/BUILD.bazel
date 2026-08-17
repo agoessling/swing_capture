@@ -1,0 +1,43 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+package(default_visibility = ["//visibility:public"])
+
+java_library(
+    name = "diagnostics_core",
+    srcs = [
+        "java/com/agoessling/swingcapture/diagnostics/DiagnosticAudioRing.java",
+        "java/com/agoessling/swingcapture/diagnostics/DiagnosticFeedbackRequest.java",
+        "java/com/agoessling/swingcapture/diagnostics/DiagnosticIncident.java",
+        "java/com/agoessling/swingcapture/diagnostics/PreviewEvidence.java",
+        "java/com/agoessling/swingcapture/diagnostics/PreviewEvidenceRing.java",
+        "java/com/agoessling/swingcapture/diagnostics/StrictJson.java",
+    ],
+)
+
+java_test(
+    name = "diagnostic_audio_ring_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/diagnostics/DiagnosticAudioRingTest.java"],
+    main_class = "com.agoessling.swingcapture.diagnostics.DiagnosticAudioRingTest",
+    use_testrunner = False,
+    deps = [":diagnostics_core"],
+)
+
+java_test(
+    name = "preview_evidence_ring_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/diagnostics/PreviewEvidenceRingTest.java"],
+    main_class = "com.agoessling.swingcapture.diagnostics.PreviewEvidenceRingTest",
+    use_testrunner = False,
+    deps = [":diagnostics_core"],
+)
+
+java_test(
+    name = "diagnostic_incident_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/diagnostics/DiagnosticIncidentTest.java"],
+    main_class = "com.agoessling.swingcapture.diagnostics.DiagnosticIncidentTest",
+    use_testrunner = False,
+    deps = [":diagnostics_core"],
+)

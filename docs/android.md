@@ -156,9 +156,19 @@ path with independent profiles:
   500 ms after impact, extending the start to the preceding IDR;
 - `MediaMuxer` writes real-time AVC/MP4 and per-frame metadata into an
   application-private sibling directory, then atomically publishes the pair;
-- audio HIL additionally detaches a bounded PCM window and publishes canonical
-  mono 48 kHz PCM16LE evidence; ordinary production and manual captures do not
-  allocate or publish that WAV;
+- audio HIL retains its exact two-second canonical PCM contract for timing
+  qualification. Independently, production keeps a fixed 60-second/5.8 MiB
+  mono PCM16 flight recorder on the existing `AudioRecord` stream. A published
+  capture detaches up to ten seconds before and two seconds after its marker as
+  `diagnostic_audio.wav`; no second microphone recorder is opened;
+- each session atomically publishes a canonical diagnostic incident alongside
+  its MP4, manifest, and optional WAV. User classification, a bounded note, and
+  signed desired-start/visual-impact/audio-impact labels update that incident
+  with a temp-write, fsync, and rename;
+- a normal arm cycle accepts exactly one swing. After publication the service
+  stops capture, and the browser must arm both nodes again with a fresh shared
+  session ID. This prevents a later swing from inheriting the first swing's
+  cross-phone clock and trigger evidence;
 - storage expiry is bounded by count, bytes, and minimum free space and refuses
   to traverse symbolic links or noncanonical session paths; and
 - the browser reader accepts one or two canonical roles and frame-steps the
@@ -178,12 +188,47 @@ manifest. The manifest derives its AVC RFC 6381 codec string from the encoder's
 actual profile, level, and codec-specific data rather than hard-coding a Pixel
 codec value.
 
+The APK hermetically packages `//web:static_app`, and the foreground service
+serves it at `/` on the same port as the node API. The setup activity displays
+a selectable single-node review URL containing the local control credential;
+the capture phone's display may then remain off while a PC, tablet, or another
+phone reviews the clips. Both capture phones ship the same assets. A dual-node
+browser URL still supplies both explicit node origins and credentials; peer
+discovery and a station setup wizard remain future work.
+
+Until that wizard exists, a dual-node review bookmark has this shape (URL-encode
+the two origin values in a real bookmark):
+
+```text
+http://<leader-phone>:8088/?dtl_node=http://<dtl-phone>:8088&dtl_token=<dtl-token>&face_node=http://<face-phone>:8088&face_token=<face-token>#review
+```
+
 The foreground service exposes a bounded HTTP/1.1 API on port 8088. Mutating
 requests require a per-installation 192-bit Bearer credential displayed only
 on the phone. Request headers/bodies, client concurrency, paths, storage, and
 media ranges are bounded. Read-only metadata and media remain unauthenticated
 and cleartext on the trusted LAN so browser `<video>` range requests work;
-production pairing, encrypted transport, and read authorization remain open.
+diagnostic ZIP export is credentialed because it includes microphone evidence.
+Production pairing, encrypted transport, and general read authorization remain
+open.
+
+The field-diagnostic routes are:
+
+- `POST /api/v1/capture/missed-shot` freezes the currently armed video ring and
+  marks the session as an operator-reported miss;
+- `POST /api/v1/sessions/{id}/feedback` strictly accepts one classification,
+  an optional 500-code-unit note, and optional signed impact-relative timing
+  marks; and
+- `GET /api/v1/sessions/{id}/diagnostics.zip` creates a bounded, checksummed,
+  uncompressed ZIP containing the immutable session artifacts, current
+  diagnostic incident, and the durable paired coordination record when one is
+  available. The archive never contains the control credential.
+
+The pure diagnostics core also implements a 60-second, 300-entry, 32 MiB ring
+for exact compressed 5 Hz preview inputs plus pose/controller decisions. That
+ring is not yet populated on device because the low-rate pose model has not
+been integrated into the foreground service; manifests state this explicitly
+instead of claiming absent preview evidence.
 A live Pixel 6 check passed monotonic clock exchange, 401 unauthorized control,
 400 malformed authenticated JSON, session/manifest retrieval, and MP4 byte
 ranges.

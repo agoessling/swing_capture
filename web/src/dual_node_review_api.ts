@@ -1,16 +1,20 @@
 import {
   CAPTURE_SCHEMA_VERSION,
-  HttpReviewApi,
-  REVIEW_SCHEMA_VERSION,
-  parseCaptureStatus,
   type CaptureState,
   type CaptureStatus,
   type ClipManifest,
   type ClipTrack,
+  type DiagnosticArchive,
+  type DiagnosticFeedback,
+  type DiagnosticTimingMarks,
+  HttpReviewApi,
+  parseCaptureStatus,
+  REVIEW_SCHEMA_VERSION,
   type ReviewApi,
   type ReviewRole,
   type SessionList,
   type SessionSummary,
+  validateDiagnosticFeedback,
 } from "./review_api.js";
 
 const CLOCK_SAMPLE_COUNT = 3;
@@ -239,6 +243,20 @@ export class DualNodeReviewApi implements ReviewApi {
     };
   }
 
+  async saveMissedShot(): Promise<SessionSummary> {
+    if (this.#activeSharedSessionId === null) {
+      throw new Error("Both Android nodes must be armed before saving a missed shot");
+    }
+    const results = await Promise.allSettled(this.#nodes.map((node) => node.saveMissedShot()));
+    throwRejectedNodeOperation(results, "save missed shot");
+    return {
+      session_id: this.#activeSharedSessionId,
+      state: "waiting_post_roll",
+      created_at_utc: new Date().toISOString(),
+      error: "",
+    };
+  }
+
   startSyntheticSwing(): Promise<CaptureStatus> {
     return Promise.reject(
       new Error("The Android dual-node coordinator does not expose the host synthetic HIL action"),
@@ -277,6 +295,65 @@ export class DualNodeReviewApi implements ReviewApi {
       );
     }
     return composeDualManifest(pair.downTheLine, pair.faceOn, alignment);
+  }
+
+  async submitDiagnosticFeedback(sessionId: string, feedback: DiagnosticFeedback): Promise<void> {
+    validateDiagnosticFeedback(feedback);
+    const pair = await this.#completeSessionPair(sessionId);
+    const alignment = await this.#ensureAlignment(sessionId);
+    if (alignment === null) {
+      throw new Error(
+        `Coordinated session ${sessionId} has two clips but no retained clock/trigger evidence`,
+      );
+    }
+    if (
+      pair.downTheLine.session_id !== alignment.down_the_line.local_session_id ||
+      pair.faceOn.session_id !== alignment.face_on.local_session_id
+    ) {
+      throw new Error("Diagnostic feedback session IDs disagree with the trigger association");
+    }
+    const shifts = triggerShiftsFromCommon(alignment);
+    await Promise.all([
+      this.#nodes[0].submitDiagnosticFeedback(
+        pair.downTheLine.session_id,
+        localizeDiagnosticFeedback(feedback, shifts.downTheLine),
+      ),
+      this.#nodes[1].submitDiagnosticFeedback(
+        pair.faceOn.session_id,
+        localizeDiagnosticFeedback(feedback, shifts.faceOn),
+      ),
+    ]);
+  }
+
+  async getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]> {
+    const pair = await this.#completeSessionPair(sessionId);
+    const [downTheLine, faceOn] = await Promise.all([
+      this.#nodes[0].getDiagnosticArchives(pair.downTheLine.session_id),
+      this.#nodes[1].getDiagnosticArchives(pair.faceOn.session_id),
+    ]);
+    return [
+      ...downTheLine.map((archive) => ({
+        ...archive,
+        filename: `down-the-line-${archive.filename}`,
+      })),
+      ...faceOn.map((archive) => ({ ...archive, filename: `face-on-${archive.filename}` })),
+    ];
+  }
+
+  async #completeSessionPair(
+    sessionId: string,
+  ): Promise<SessionPair & { downTheLine: ClipManifest; faceOn: ClipManifest }> {
+    const pair = (await this.#sessionPairs()).get(sessionId);
+    if (pair === undefined) {
+      throw new Error(`Coordinated Android session ${sessionId} was not found`);
+    }
+    if (pair.error !== undefined) {
+      throw new Error(pair.error);
+    }
+    if (pair.downTheLine === undefined || pair.faceOn === undefined) {
+      throw new Error(missingRoleDiagnostic(pair));
+    }
+    return { ...pair, downTheLine: pair.downTheLine, faceOn: pair.faceOn };
   }
 
   async #ensureDescriptors(): Promise<readonly [NodeDescriptor, NodeDescriptor]> {
@@ -544,6 +621,18 @@ class AndroidNodeClient {
       created_at_utc: asTimestamp(value.created_at_utc, "created_at_utc"),
       error: asString(value.error, "error"),
     };
+  }
+
+  saveMissedShot(): Promise<SessionSummary> {
+    return this.#reviewApi.saveMissedShot();
+  }
+
+  submitDiagnosticFeedback(sessionId: string, feedback: DiagnosticFeedback): Promise<void> {
+    return this.#reviewApi.submitDiagnosticFeedback(sessionId, feedback);
+  }
+
+  getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]> {
+    return this.#reviewApi.getDiagnosticArchives(sessionId);
   }
 
   sessions(): Promise<SessionList> {
@@ -826,11 +915,18 @@ export function composeDualManifest(
   ) {
     throw new Error("Dual manifest local session IDs disagree with the trigger association");
   }
-  const downTrigger = BigInt(alignment.down_the_line.mapped_coordinator_timestamp_ns);
-  const faceTrigger = BigInt(alignment.face_on.mapped_coordinator_timestamp_ns);
-  const commonTrigger = downTrigger + (faceTrigger - downTrigger) / 2n;
-  const shiftedDown = shiftTrack(downTrack, downTrigger - commonTrigger);
-  const shiftedFace = shiftTrack(faceTrack, faceTrigger - commonTrigger);
+  if (downTheLine.trigger.source !== faceOn.trigger.source) {
+    throw new Error("Dual manifest trigger sources disagree");
+  }
+  if (
+    downTheLine.trigger.source !== alignment.down_the_line.source ||
+    faceOn.trigger.source !== alignment.face_on.source
+  ) {
+    throw new Error("Dual manifest trigger sources disagree with the trigger association");
+  }
+  const shifts = triggerShiftsFromCommon(alignment);
+  const shiftedDown = shiftTrack(downTrack, shifts.downTheLine);
+  const shiftedFace = shiftTrack(faceTrack, shifts.faceOn);
   const downImpact = shiftedDown.frames[shiftedDown.impact_frame_index];
   const faceImpact = shiftedFace.frames[shiftedFace.impact_frame_index];
   if (downImpact === undefined || faceImpact === undefined) {
@@ -844,8 +940,8 @@ export function composeDualManifest(
         ? downTheLine.created_at_utc
         : faceOn.created_at_utc,
     trigger: {
-      source: "dual_local_audio",
-      host_monotonic_time_ns: commonTrigger.toString(),
+      source: downTheLine.trigger.source === "missed_shot" ? "missed_shot" : "dual_local_audio",
+      host_monotonic_time_ns: shifts.commonTrigger.toString(),
       confirmation_host_monotonic_time_ns: null,
       sample_rate_hz: 48_000,
       peak_amplitude: null,
@@ -857,6 +953,48 @@ export function composeDualManifest(
     ),
     views: [shiftedDown, shiftedFace],
     dual_node_alignment: alignment,
+  };
+}
+
+export function localizeDiagnosticFeedback(
+  feedback: DiagnosticFeedback,
+  localTriggerShiftFromCommonNs: bigint,
+): DiagnosticFeedback {
+  if (feedback.timing_marks_us === undefined) {
+    return { ...feedback };
+  }
+  const triggerShiftUs = triggerShiftMicros(localTriggerShiftFromCommonNs);
+  const localized: DiagnosticTimingMarks = {};
+  const keys = ["desired_high_speed_start_us", "visual_impact_us", "audio_impact_us"] as const;
+  for (const key of keys) {
+    const commonRelativeUs = feedback.timing_marks_us[key];
+    if (commonRelativeUs === undefined) {
+      continue;
+    }
+    if (!Number.isSafeInteger(commonRelativeUs)) {
+      throw new Error(`Diagnostic timing mark ${key} must be a safe integer`);
+    }
+    const localRelativeUs = commonRelativeUs - triggerShiftUs;
+    if (!Number.isSafeInteger(localRelativeUs)) {
+      throw new Error(`Localized diagnostic timing mark ${key} is outside the safe integer range`);
+    }
+    localized[key] = localRelativeUs;
+  }
+  return { ...feedback, timing_marks_us: localized };
+}
+
+function triggerShiftsFromCommon(alignment: DualNodeAlignment): {
+  commonTrigger: bigint;
+  downTheLine: bigint;
+  faceOn: bigint;
+} {
+  const downTrigger = BigInt(alignment.down_the_line.mapped_coordinator_timestamp_ns);
+  const faceTrigger = BigInt(alignment.face_on.mapped_coordinator_timestamp_ns);
+  const commonTrigger = downTrigger + (faceTrigger - downTrigger) / 2n;
+  return {
+    commonTrigger,
+    downTheLine: downTrigger - commonTrigger,
+    faceOn: faceTrigger - commonTrigger,
   };
 }
 
@@ -881,10 +1019,7 @@ function serializeObserved(
 }
 
 function shiftTrack(track: ClipTrack, triggerShiftNs: bigint): ClipTrack {
-  const shiftUs = Number(triggerShiftNs / 1_000n);
-  if (!Number.isSafeInteger(shiftUs)) {
-    throw new Error("Dual-node trigger shift cannot be represented in manifest microseconds");
-  }
+  const shiftUs = triggerShiftMicros(triggerShiftNs);
   const frames = track.frames.map((frame) => ({
     ...frame,
     time_from_impact_us: frame.time_from_impact_us + shiftUs,
@@ -901,6 +1036,14 @@ function shiftTrack(track: ClipTrack, triggerShiftNs: bigint): ClipTrack {
     }
   }
   return { ...track, impact_frame_index: impactFrameIndex, frames };
+}
+
+function triggerShiftMicros(triggerShiftNs: bigint): number {
+  const shiftUs = Number(triggerShiftNs / 1_000n);
+  if (!Number.isSafeInteger(shiftUs)) {
+    throw new Error("Dual-node trigger shift cannot be represented in safe microseconds");
+  }
+  return shiftUs;
 }
 
 function onlyTrack(manifest: ClipManifest, role: ReviewRole): ClipTrack {

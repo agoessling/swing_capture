@@ -1,0 +1,2 @@
+# Resolved by Bazel's rules_python integration; never install this with host pip.
+mediapipe==0.10.35

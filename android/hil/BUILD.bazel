@@ -77,6 +77,37 @@ cc_test(
 )
 
 cc_test(
+    name = "android_warm_high_speed_transition_hil_test",
+    size = "medium",
+    srcs = ["android_probe_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--warm-transition",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
     name = "android_continuous_capture_hil_test",
     size = "medium",
     srcs = ["android_probe_hil_test.cc"],

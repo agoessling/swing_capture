@@ -10,7 +10,10 @@
   wrappers enforce `-Wall -Wextra -Wpedantic -Werror`; bypass them only for a
   documented vendor or toolchain boundary.
 - Run `bazel test //...` after software-only changes.
-- Before handing off capture, timing, retention, or encoding changes, also run:
+- Keep ASan and UBSan out of the normal iteration loop because the full builds
+  are expensive. Run them immediately before committing capture, timing,
+  retention, or encoding changes, or earlier only when investigating a
+  sanitizer-relevant failure. The pre-commit validation is:
 
   ```bash
   bazel test -c opt //...

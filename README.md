@@ -126,6 +126,30 @@ documented in [`docs/android.md`](docs/android.md). All phone HIL targets are
 manual, local, and exclusive, so the ordinary software-only suite does not
 select them.
 
+The Android APK now packages and serves the production browser review app
+directly from each phone on port 8088. New captures also carry a bounded field
+diagnostic bundle: a 60-second in-memory PCM flight recorder yields up to a
+10-second-pre/2-second-post lossless WAV, canonical user feedback and timing
+labels are stored beside the clip, and one authenticated action downloads a
+checksummed ZIP. The browser provides “Save missed shot”, classification,
+timing-label, and ZIP controls for single- and dual-node sessions. Exact 5 Hz
+preview/pose evidence has a bounded core contract but will remain explicitly
+unavailable until the pose model is running in the phone service.
+
+A separate low-rate pose-trigger prototype is underway to avoid running 240 fps
+continuously between shots. Bazel pins MediaPipe Pose Landmarker Lite and its
+Python runtime under `//tools/pose_inference`; the shared pure-Java feature,
+controller, and replay code lives at `//android/core/pose`. Recorded 5 fps
+replays now produce auditable landmark/feature evidence and annotated videos,
+and a manual Android HIL now proves that one already-open low-rate Camera2
+session can transition to 720p240 without reopening the camera. Pixel 6 reached
+its first encoded high-speed frame in 543 ms and Pixel 5a in 1.322 s in the
+latest passing runs. The pose model is not yet integrated into the phone
+foreground service, so screen-off standby-to-trigger operation remains
+unclaimed. Impact timing still belongs to the existing microphone path. The
+contract, corpus results, warm-transition evidence, and staged plan are
+documented in [`docs/pose_trigger.md`](docs/pose_trigger.md).
+
 This runs the hardware-independent C++, Python, and TypeScript/UI suite. It
 covers the station doctor, SDK extractor, unattended HIL runner, synthetic
 capture pipeline, setup-preview service, one-shot capture controller, session

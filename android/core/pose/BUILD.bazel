@@ -1,0 +1,114 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_binary.bzl", "java_binary")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+package(default_visibility = ["//visibility:public"])
+
+java_library(
+    name = "pose_trigger_core",
+    srcs = [
+        "java/com/agoessling/swingcapture/pose/PoseTriggerController.java",
+        "java/com/agoessling/swingcapture/pose/PoseTriggerReplay.java",
+    ],
+)
+
+java_library(
+    name = "pose_landmark_features",
+    srcs = [
+        "java/com/agoessling/swingcapture/pose/NormalizedHittingRegion.java",
+        "java/com/agoessling/swingcapture/pose/NormalizedPoseLandmark.java",
+        "java/com/agoessling/swingcapture/pose/PoseJoint.java",
+        "java/com/agoessling/swingcapture/pose/PoseLandmarkCsv.java",
+        "java/com/agoessling/swingcapture/pose/PoseLandmarkFrame.java",
+        "java/com/agoessling/swingcapture/pose/PoseLandmarkObservationExtractor.java",
+        "java/com/agoessling/swingcapture/pose/PoseProjection.java",
+    ],
+    deps = [":pose_trigger_core"],
+)
+
+java_library(
+    name = "pose_trigger_replay_support",
+    srcs = [
+        "java/com/agoessling/swingcapture/pose/PoseLandmarkToObservationCli.java",
+        "java/com/agoessling/swingcapture/pose/PoseObservationCsv.java",
+        "java/com/agoessling/swingcapture/pose/PoseTriggerReplayCli.java",
+    ],
+    deps = [
+        ":pose_landmark_features",
+        ":pose_trigger_core",
+    ],
+)
+
+java_binary(
+    name = "pose_landmarks_to_observations",
+    main_class = "com.agoessling.swingcapture.pose.PoseLandmarkToObservationCli",
+    runtime_deps = [":pose_trigger_replay_support"],
+)
+
+java_binary(
+    name = "pose_trigger_replay",
+    main_class = "com.agoessling.swingcapture.pose.PoseTriggerReplayCli",
+    runtime_deps = [":pose_trigger_replay_support"],
+)
+
+java_test(
+    name = "pose_trigger_controller_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/pose/PoseTriggerControllerTest.java"],
+    main_class = "com.agoessling.swingcapture.pose.PoseTriggerControllerTest",
+    use_testrunner = False,
+    deps = [":pose_trigger_core"],
+)
+
+java_test(
+    name = "pose_landmark_observation_extractor_test",
+    size = "small",
+    srcs = [
+        "java/com/agoessling/swingcapture/pose/PoseLandmarkObservationExtractorTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.pose.PoseLandmarkObservationExtractorTest",
+    use_testrunner = False,
+    deps = [
+        ":pose_landmark_features",
+        ":pose_trigger_core",
+    ],
+)
+
+java_test(
+    name = "pose_landmark_csv_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/pose/PoseLandmarkCsvTest.java"],
+    main_class = "com.agoessling.swingcapture.pose.PoseLandmarkCsvTest",
+    use_testrunner = False,
+    deps = [":pose_landmark_features"],
+)
+
+java_test(
+    name = "pose_observation_csv_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/pose/PoseObservationCsvTest.java"],
+    main_class = "com.agoessling.swingcapture.pose.PoseObservationCsvTest",
+    use_testrunner = False,
+    deps = [
+        ":pose_trigger_core",
+        ":pose_trigger_replay_support",
+    ],
+)
+
+java_test(
+    name = "pose_trigger_replay_cli_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/pose/PoseTriggerReplayCliTest.java"],
+    main_class = "com.agoessling.swingcapture.pose.PoseTriggerReplayCliTest",
+    use_testrunner = False,
+    deps = [":pose_trigger_replay_support"],
+)
+
+java_test(
+    name = "pose_trigger_replay_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/pose/PoseTriggerReplayTest.java"],
+    main_class = "com.agoessling.swingcapture.pose.PoseTriggerReplayTest",
+    use_testrunner = False,
+    deps = [":pose_trigger_core"],
+)

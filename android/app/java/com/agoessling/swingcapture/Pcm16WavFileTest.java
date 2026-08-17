@@ -98,7 +98,7 @@ public final class Pcm16WavFileTest {
   }
 
   private static void ringAllocationAndPublicationAreAudioHilOnly() {
-    check(AudioEvidencePolicy.ringForCapture(false) == null, "production allocates no PCM ring");
+    check(AudioEvidencePolicy.ringForCapture(false) == null, "production allocates no HIL ring");
     Pcm16EvidenceRing hilRing = AudioEvidencePolicy.ringForCapture(true);
     check(hilRing != null, "audio HIL allocates PCM ring");
     check(
@@ -109,7 +109,7 @@ public final class Pcm16WavFileTest {
         "audio HIL local trigger requires WAV");
     check(
         !AudioEvidencePolicy.requiresPublishedEvidence(hilRing, "manual"),
-        "manual trigger publishes no WAV");
+        "manual trigger publishes no HIL WAV");
     check(
         !AudioEvidencePolicy.requiresPublishedEvidence(null, "local_audio"),
         "ordinary local trigger publishes no WAV");

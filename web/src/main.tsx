@@ -4,6 +4,7 @@ import { Application, viewFromHash } from "./application.js";
 import { HttpStationApi } from "./api.js";
 import { DualNodeReviewApi } from "./dual_node_review_api.js";
 import { HttpReviewApi } from "./review_api.js";
+import { isAndroidReviewMode, reviewEventsSupported } from "./review_boot.js";
 import "./styles.css";
 
 const root = document.getElementById("root");
@@ -16,6 +17,7 @@ const nodeBaseUrl = parameters.get("node") ?? "";
 const nodeControlToken = parameters.get("node_token") ?? "";
 const downTheLineNode = parameters.get("dtl_node");
 const faceOnNode = parameters.get("face_node");
+const androidReviewMode = isAndroidReviewMode(parameters);
 if ((downTheLineNode === null) !== (faceOnNode === null)) {
   throw new Error("Configure both dtl_node and face_node for dual-node Android capture");
 }
@@ -33,13 +35,20 @@ const reviewApi =
           role: "face_on",
         },
       ])
-    : new HttpReviewApi(nodeBaseUrl, undefined, undefined, nodeControlToken);
+    : new HttpReviewApi(
+        nodeBaseUrl,
+        undefined,
+        undefined,
+        nodeControlToken,
+        reviewEventsSupported(parameters),
+      );
 
 createRoot(root).render(
   <StrictMode>
     <Application
       initialView={viewFromHash(window.location.hash)}
       reviewApi={reviewApi}
+      setupAvailable={!androidReviewMode}
       stationApi={new HttpStationApi()}
     />
   </StrictMode>,

@@ -5,12 +5,19 @@ import {
   composeDualManifest,
   estimateClockOffset,
   groupAndroidSessionManifests,
+  localizeDiagnosticFeedback,
   type ClockExchangeSample,
   type ClockOffsetEstimate,
   type NodeTriggerReport,
 } from "./dual_node_review_api.js";
 import { FIXTURE_MANIFEST } from "./fake_review_api.js";
-import { parseClipManifest, type ClipManifest, type ReviewRole } from "./review_api.js";
+import {
+  DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+  type DiagnosticFeedback,
+  parseClipManifest,
+  type ClipManifest,
+  type ReviewRole,
+} from "./review_api.js";
 
 async function main() {
   estimatesIntersectedClockBounds();
@@ -18,11 +25,66 @@ async function main() {
   associatesExactlyOneBoundedReportPerRole();
   rejectsUnrelatedTriggerTiming();
   composesTwoOriginPreservingTracks();
+  preservesMissedShotTriggerSemantics();
+  localizesCommonRelativeDiagnosticMarks();
+  rejectsUnsafeLocalizedDiagnosticMarks();
   parsesAndroidSingleNodeTimingEvidence();
   parsesLegacyUncoordinatedAndroidMetadata();
   isolatesDuplicateHistoricalRolesFromValidPairs();
   await provisionsOneSharedSessionAndRollsBackPartialArm();
   await persistsAndRecoversAlignmentAcrossCoordinatorInstances();
+}
+
+function localizesCommonRelativeDiagnosticMarks() {
+  const feedback: DiagnosticFeedback = {
+    schema_version: DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+    classification: "av_sync_wrong",
+    note: "Common review timeline",
+    timing_marks_us: {
+      desired_high_speed_start_us: -1_200_000,
+      visual_impact_us: 5_000,
+      audio_impact_us: 12_000,
+    },
+  };
+  assert.deepEqual(localizeDiagnosticFeedback(feedback, 3_500_999n), {
+    ...feedback,
+    timing_marks_us: {
+      desired_high_speed_start_us: -1_203_500,
+      visual_impact_us: 1_500,
+      audio_impact_us: 8_500,
+    },
+  });
+  assert.deepEqual(localizeDiagnosticFeedback(feedback, -3_500_999n), {
+    ...feedback,
+    timing_marks_us: {
+      desired_high_speed_start_us: -1_196_500,
+      visual_impact_us: 8_500,
+      audio_impact_us: 15_500,
+    },
+  });
+  assert.equal(feedback.timing_marks_us?.visual_impact_us, 5_000);
+
+  const withoutMarks: DiagnosticFeedback = {
+    schema_version: DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+    classification: "good_capture",
+  };
+  assert.deepEqual(localizeDiagnosticFeedback(withoutMarks, 10_000n), withoutMarks);
+}
+
+function rejectsUnsafeLocalizedDiagnosticMarks() {
+  const maximumMark: DiagnosticFeedback = {
+    schema_version: DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+    classification: "av_sync_wrong",
+    timing_marks_us: { visual_impact_us: Number.MAX_SAFE_INTEGER },
+  };
+  assert.throws(
+    () => localizeDiagnosticFeedback(maximumMark, -1_000n),
+    /outside the safe integer range/,
+  );
+  assert.throws(
+    () => localizeDiagnosticFeedback(maximumMark, (BigInt(Number.MAX_SAFE_INTEGER) + 1n) * 1_000n),
+    /cannot be represented in safe microseconds/,
+  );
 }
 
 async function provisionsOneSharedSessionAndRollsBackPartialArm() {
@@ -158,6 +220,25 @@ function composesTwoOriginPreservingTracks() {
   assert.equal(composed.dual_node_alignment, alignment);
 }
 
+function preservesMissedShotTriggerSemantics() {
+  const down = androidManifest("down_the_line", "node-dtl", "local-dtl");
+  const face = androidManifest("face_on", "node-face", "local-face");
+  down.trigger.source = "missed_shot";
+  face.trigger.source = "missed_shot";
+  const alignment = associateDualTriggers(
+    "shared-1",
+    [
+      report("down_the_line", "node-dtl", 1_001_000n, 100n, "missed_shot"),
+      report("face_on", "node-face", 1_003_500n, 100n, "missed_shot"),
+    ],
+    [estimate("node-dtl", 1_000n, 100n), estimate("node-face", 2_000n, 100n)],
+  );
+  assert.equal(composeDualManifest(down, face, alignment).trigger.source, "missed_shot");
+
+  face.trigger.source = "local_audio";
+  assert.throws(() => composeDualManifest(down, face, alignment), /trigger sources disagree/);
+}
+
 function parsesAndroidSingleNodeTimingEvidence() {
   const manifest = androidManifest("down_the_line", "node-dtl", "local-dtl");
   delete manifest.views[0]?.media.url;
@@ -220,6 +301,7 @@ function androidManifest(role: ReviewRole, nodeId: string, sessionId: string): C
   manifest.session_id = sessionId;
   manifest.views = [track];
   manifest.mapped_nearest_frame_skew_us = null;
+  manifest.trigger.source = "local_audio";
   delete manifest.pipeline_profile;
   delete manifest.hil_evidence;
   track.camera_serial = nodeId;
@@ -248,6 +330,7 @@ function report(
   nodeId: string,
   triggerTimestampNs: bigint,
   timestampUncertaintyNs: bigint,
+  source = "local_audio",
 ): NodeTriggerReport {
   return {
     role,
@@ -256,7 +339,7 @@ function report(
     localSessionId: role === "down_the_line" ? "local-dtl" : "local-face",
     triggerTimestampNs,
     timestampUncertaintyNs,
-    source: "local_audio",
+    source,
   };
 }
 

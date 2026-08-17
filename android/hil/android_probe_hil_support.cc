@@ -1,13 +1,19 @@
 #include "android/hil/android_probe_hil_support.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <iterator>
+#include <limits>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -20,6 +26,150 @@ RetainedSessionPaths InvalidRetainedSession(std::string diagnostic) {
   RetainedSessionPaths paths;
   paths.diagnostic = std::move(diagnostic);
   return paths;
+}
+
+ContinuousStartupTimingInspection InvalidStartupTiming(std::string diagnostic) {
+  return {.diagnostic = std::move(diagnostic)};
+}
+
+WarmTransitionTimingInspection InvalidWarmTransitionTiming(std::string diagnostic) {
+  return {.diagnostic = std::move(diagnostic)};
+}
+
+bool ParseCanonicalNonnegativeDecimal(const Json &object, std::string_view name,
+                                      std::uint64_t *destination, std::string *diagnostic) {
+  const auto field = object.find(std::string(name));
+  if (field == object.end() || !field->is_string()) {
+    *diagnostic = std::string(name) + " must be a decimal string";
+    return false;
+  }
+  const auto &text = field->get_ref<const std::string &>();
+  const bool canonical = !text.empty() && (text == "0" || text.front() != '0') &&
+                         std::ranges::all_of(text, [](const char character) {
+                           return character >= '0' && character <= '9';
+                         });
+  if (!canonical) {
+    *diagnostic = std::string(name) + " is not a canonical nonnegative decimal string";
+    return false;
+  }
+
+  std::uint64_t value = 0;
+  // std::from_chars exposes a pointer-pair interface for this bounded string buffer.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  const auto *limit = text.data() + text.size();
+  const auto [end, error] = std::from_chars(text.data(), limit, value);
+  if (error != std::errc{} || end != limit ||
+      value > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    *diagnostic = std::string(name) + " is outside the Android elapsed-realtime range";
+    return false;
+  }
+  *destination = value;
+  return true;
+}
+
+using WarmAbsoluteMilestones = std::array<std::uint64_t, 6>;
+using WarmDurations = std::array<std::uint64_t, 5>;
+
+bool ParseWarmMilestones(const Json &timing, WarmAbsoluteMilestones *absolute,
+                         WarmDurations *durations, std::string *diagnostic) {
+  constexpr std::array<std::string_view, 6> absolute_names = {
+      "transition_requested_elapsed_realtime_ns",
+      "encoder_started_elapsed_realtime_ns",
+      "standby_session_closed_elapsed_realtime_ns",
+      "high_speed_session_configured_elapsed_realtime_ns",
+      "first_high_speed_camera_frame_elapsed_realtime_ns",
+      "first_usable_encoded_frame_elapsed_realtime_ns",
+  };
+  for (std::size_t index = 0; index < absolute_names.size(); ++index) {
+    if (!ParseCanonicalNonnegativeDecimal(timing, absolute_names[index], &(*absolute)[index],
+                                          diagnostic)) {
+      return false;
+    }
+    if (index > 0U && (*absolute)[index] < (*absolute)[index - 1U]) {
+      *diagnostic = "warm transition milestones are not monotonic";
+      return false;
+    }
+  }
+
+  constexpr std::array<std::string_view, 5> duration_names = {
+      "transition_to_encoder_start_ns",
+      "transition_to_standby_session_closed_ns",
+      "transition_to_high_speed_session_configured_ns",
+      "transition_to_first_high_speed_camera_frame_ns",
+      "transition_to_first_usable_encoded_frame_ns",
+  };
+  for (std::size_t index = 0; index < duration_names.size(); ++index) {
+    if (!ParseCanonicalNonnegativeDecimal(timing, duration_names[index], &(*durations)[index],
+                                          diagnostic)) {
+      return false;
+    }
+    if ((*durations)[index] != (*absolute)[index + 1U] - (*absolute)[0]) {
+      *diagnostic = "warm transition durations do not match the absolute milestones";
+      return false;
+    }
+  }
+  return true;
+}
+
+struct TimingStatisticsRequirements {
+  std::uint64_t minimum_count;
+  double units_per_second;
+  double minimum_rate;
+  double maximum_rate;
+  std::uint64_t maximum_allowed_gap;
+};
+
+bool TimingStatisticsValid(const Json &statistics, const TimingStatisticsRequirements &requirements,
+                           std::string *diagnostic) {
+  const std::uint64_t count = statistics.value("count", 0U);
+  std::uint64_t first = 0;
+  std::uint64_t last = 0;
+  std::uint64_t maximum_gap = 0;
+  if (count < requirements.minimum_count ||
+      !ParseCanonicalNonnegativeDecimal(statistics, "first", &first, diagnostic) ||
+      !ParseCanonicalNonnegativeDecimal(statistics, "last", &last, diagnostic) ||
+      !ParseCanonicalNonnegativeDecimal(statistics, "maximum_gap", &maximum_gap, diagnostic) ||
+      last <= first || maximum_gap > requirements.maximum_allowed_gap) {
+    return false;
+  }
+  const double rate = static_cast<double>(count - 1U) * requirements.units_per_second /
+                      static_cast<double>(last - first);
+  return rate >= requirements.minimum_rate && rate <= requirements.maximum_rate;
+}
+
+bool StandbyEvidenceValid(const Json &standby, std::string *diagnostic) {
+  if (!standby.is_object() || standby.value("width", 0) <= 0 || standby.value("height", 0) <= 0 ||
+      standby.value("requested_interval_ms", 0) != 200) {
+    return false;
+  }
+  const auto timestamps = standby.find("sensor_timestamps");
+  return timestamps != standby.end() && timestamps->is_object() &&
+         TimingStatisticsValid(*timestamps,
+                               TimingStatisticsRequirements{
+                                   .minimum_count = 6U,
+                                   .units_per_second = 1'000'000'000.0,
+                                   .minimum_rate = 4.0,
+                                   .maximum_rate = 6.0,
+                                   .maximum_allowed_gap = 300'000'000U,
+                               },
+                               diagnostic);
+}
+
+bool EncoderEvidenceValid(const Json &encoder, std::string *diagnostic) {
+  if (!encoder.is_object()) {
+    return false;
+  }
+  const auto timestamps = encoder.find("acceptance_presentation_timestamps");
+  return timestamps != encoder.end() && timestamps->is_object() &&
+         TimingStatisticsValid(*timestamps,
+                               TimingStatisticsRequirements{
+                                   .minimum_count = 200U,
+                                   .units_per_second = 1'000'000.0,
+                                   .minimum_rate = 235.0,
+                                   .maximum_rate = 245.0,
+                                   .maximum_allowed_gap = 6'250U,
+                               },
+                               diagnostic);
 }
 
 bool IsSafeSessionId(std::string_view value) {
@@ -149,6 +299,17 @@ std::vector<std::string> StartContinuousActivityArguments(std::string_view seria
   return arguments;
 }
 
+std::vector<std::string> StartWarmTransitionActivityArguments(
+    std::string_view serial, std::string_view role, const ProbeRequestConfiguration &request) {
+  std::vector<std::string> arguments = StartActivityArguments(serial, role, false, request);
+  const auto run_probe = std::ranges::find(arguments, "run_probe");
+  if (run_probe == arguments.end() || std::next(run_probe) == arguments.end()) {
+    throw std::logic_error("probe activity arguments are missing run_probe");
+  }
+  *run_probe = "run_warm_transition_hil";
+  return arguments;
+}
+
 std::vector<std::string> FinishContinuousSoakActivityArguments(std::string_view serial) {
   return {
       "-s",
@@ -211,6 +372,145 @@ ContinuousSoakTelemetry InspectContinuousSoakTelemetry(std::string_view report) 
     telemetry.diagnostic =
         std::string("cannot inspect continuous soak telemetry: ") + failure.what();
     return telemetry;
+  }
+}
+
+ContinuousStartupTimingInspection InspectContinuousStartupTiming(std::string_view report) {
+  try {
+    const Json parsed = Json::parse(report);
+    if (parsed.value("report_type", "") != "android_continuous_capture") {
+      return InvalidStartupTiming("startup timing requires an Android continuous capture report");
+    }
+    const auto timing = parsed.find("startup_timing");
+    if (timing == parsed.end() || !timing->is_object()) {
+      return InvalidStartupTiming("continuous report is missing startup_timing");
+    }
+
+    std::string diagnostic;
+    std::uint64_t arm_requested = 0;
+    std::uint64_t engine_started = 0;
+    std::uint64_t first_camera_frame = 0;
+    std::uint64_t first_usable_encoded_frame = 0;
+    std::uint64_t full_pre_roll_ready = 0;
+    if (!ParseCanonicalNonnegativeDecimal(*timing, "arm_requested_elapsed_realtime_ns",
+                                          &arm_requested, &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(*timing, "engine_started_elapsed_realtime_ns",
+                                          &engine_started, &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(*timing, "first_camera_frame_elapsed_realtime_ns",
+                                          &first_camera_frame, &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(*timing, "first_usable_encoded_frame_elapsed_realtime_ns",
+                                          &first_usable_encoded_frame, &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(*timing, "full_pre_roll_ready_elapsed_realtime_ns",
+                                          &full_pre_roll_ready, &diagnostic)) {
+      return InvalidStartupTiming(std::move(diagnostic));
+    }
+    if (engine_started < arm_requested || first_camera_frame < engine_started ||
+        first_usable_encoded_frame < first_camera_frame ||
+        full_pre_roll_ready < first_usable_encoded_frame) {
+      return InvalidStartupTiming("startup timing milestones are not monotonic");
+    }
+
+    std::uint64_t arm_to_engine_start = 0;
+    std::uint64_t arm_to_first_camera_frame = 0;
+    std::uint64_t arm_to_first_usable_encoded_frame = 0;
+    std::uint64_t arm_to_full_pre_roll_ready = 0;
+    std::uint64_t first_usable_encoded_frame_to_full_pre_roll_ready = 0;
+    if (!ParseCanonicalNonnegativeDecimal(*timing, "arm_to_engine_start_ns", &arm_to_engine_start,
+                                          &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(*timing, "arm_to_first_camera_frame_ns",
+                                          &arm_to_first_camera_frame, &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(*timing, "arm_to_first_usable_encoded_frame_ns",
+                                          &arm_to_first_usable_encoded_frame, &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(*timing, "arm_to_full_pre_roll_ready_ns",
+                                          &arm_to_full_pre_roll_ready, &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(
+            *timing, "first_usable_encoded_frame_to_full_pre_roll_ready_ns",
+            &first_usable_encoded_frame_to_full_pre_roll_ready, &diagnostic)) {
+      return InvalidStartupTiming(std::move(diagnostic));
+    }
+    if (arm_to_engine_start != engine_started - arm_requested ||
+        arm_to_first_camera_frame != first_camera_frame - arm_requested ||
+        arm_to_first_usable_encoded_frame != first_usable_encoded_frame - arm_requested ||
+        arm_to_full_pre_roll_ready != full_pre_roll_ready - arm_requested ||
+        first_usable_encoded_frame_to_full_pre_roll_ready !=
+            full_pre_roll_ready - first_usable_encoded_frame) {
+      return InvalidStartupTiming("startup timing durations do not match the absolute milestones");
+    }
+
+    std::uint64_t reset_count = 0;
+    std::uint64_t maximum_gap = 0;
+    if (!ParseCanonicalNonnegativeDecimal(*timing, "startup_continuity_reset_count", &reset_count,
+                                          &diagnostic) ||
+        !ParseCanonicalNonnegativeDecimal(*timing, "maximum_startup_continuity_gap_ns",
+                                          &maximum_gap, &diagnostic)) {
+      return InvalidStartupTiming(std::move(diagnostic));
+    }
+    if ((reset_count == 0U) != (maximum_gap == 0U)) {
+      return InvalidStartupTiming(
+          "startup continuity gap must be zero if and only if reset count is zero");
+    }
+
+    return {
+        .valid = true,
+        .diagnostic = "continuous startup timing is valid",
+    };
+  } catch (const std::exception &failure) {
+    return InvalidStartupTiming(std::string("cannot inspect continuous startup timing: ") +
+                                failure.what());
+  }
+}
+
+WarmTransitionTimingInspection InspectWarmTransitionTiming(std::string_view report) {
+  try {
+    const Json parsed = Json::parse(report);
+    if (parsed.value("report_type", "") != "android_warm_high_speed_transition") {
+      return InvalidWarmTransitionTiming(
+          "warm transition timing requires an Android warm transition report");
+    }
+    const auto camera = parsed.find("high_speed_camera");
+    if (camera == parsed.end() || !camera->is_object() ||
+        camera->value("camera_open_count", 0) != 1) {
+      return InvalidWarmTransitionTiming("warm transition must use exactly one camera open");
+    }
+    const auto timing = camera->find("transition_timing");
+    if (timing == camera->end() || !timing->is_object()) {
+      return InvalidWarmTransitionTiming("warm transition report is missing transition_timing");
+    }
+
+    WarmAbsoluteMilestones absolute{};
+    WarmDurations durations{};
+    std::string diagnostic;
+    if (!ParseWarmMilestones(*timing, &absolute, &durations, &diagnostic)) {
+      return InvalidWarmTransitionTiming(std::move(diagnostic));
+    }
+
+    const auto standby = parsed.find("standby");
+    const auto high_speed_timestamps = camera->find("sensor_timestamps");
+    const auto encoder = parsed.find("encoder");
+    const bool standby_valid =
+        standby != parsed.end() && StandbyEvidenceValid(*standby, &diagnostic);
+    const bool high_speed_valid = high_speed_timestamps != camera->end() &&
+                                  high_speed_timestamps->is_object() &&
+                                  high_speed_timestamps->value("count", 0U) >= 30U;
+    const bool encoder_valid =
+        encoder != parsed.end() && EncoderEvidenceValid(*encoder, &diagnostic);
+    if (!standby_valid || !high_speed_valid || !encoder_valid) {
+      return InvalidWarmTransitionTiming(
+          "warm transition frame-count or standby evidence is invalid");
+    }
+    if (durations[3] > 2'000'000'000U || durations[4] > 2'500'000'000U) {
+      return InvalidWarmTransitionTiming("warm transition exceeded its readiness deadline");
+    }
+
+    return {
+        .valid = true,
+        .transition_to_first_camera_frame_ns = durations[3],
+        .transition_to_first_encoded_frame_ns = durations[4],
+        .diagnostic = "warm transition timing is valid",
+    };
+  } catch (const std::exception &failure) {
+    return InvalidWarmTransitionTiming(std::string("cannot inspect warm transition timing: ") +
+                                       failure.what());
   }
 }
 

@@ -11,6 +11,7 @@ export interface ApplicationProps {
   reviewApi: ReviewApi;
   initialView?: ApplicationView;
   pollIntervalMs?: number;
+  setupAvailable?: boolean;
 }
 
 export function Application({
@@ -18,8 +19,11 @@ export function Application({
   reviewApi,
   initialView = "review",
   pollIntervalMs,
+  setupAvailable = true,
 }: ApplicationProps) {
-  const [view, setView] = useState(initialView);
+  const [view, setView] = useState(
+    initialView === "setup" && !setupAvailable ? "review" : initialView,
+  );
   const polling = pollIntervalMs === undefined ? {} : { pollIntervalMs };
 
   const selectView = (nextView: ApplicationView) => {
@@ -42,14 +46,16 @@ export function Application({
           >
             Review
           </button>
-          <button
-            aria-current={view === "setup" ? "page" : undefined}
-            className={view === "setup" ? "active" : ""}
-            onClick={() => selectView("setup")}
-            type="button"
-          >
-            Camera setup
-          </button>
+          {setupAvailable ? (
+            <button
+              aria-current={view === "setup" ? "page" : undefined}
+              className={view === "setup" ? "active" : ""}
+              onClick={() => selectView("setup")}
+              type="button"
+            >
+              Camera setup
+            </button>
+          ) : null}
         </div>
       </nav>
       {view === "review" ? (

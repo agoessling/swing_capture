@@ -34,11 +34,27 @@ bazel test //web:component_test //web:review_component_test //web:browser_test
 `bazel-bin/web/static_app/` contains the deployable production asset tree.
 `bazel-bin/web/fixture_demo/` contains a directly viewable fixture asset tree.
 `//capture/service:preview_server` embeds the production tree in its Bazel
-runfiles and serves it together with the `/api/v1` station endpoints. The
-application expects capture/session endpoints for arming, manual diagnostics,
-session discovery, manifests, and media. WebM responses must implement HTTP
-byte ranges; Chromium cannot seek or step the clip from a non-range 200-only
-route.
+runfiles for the legacy host station. The Android APK also packages this exact
+tree and serves it from each phone's port 8088, so a NUC is not required for
+Android review. The phone's setup activity displays a single-node URL with its
+Bearer credential. Dual-node review uses one browser page configured with both
+phone origins and tokens.
+
+The application expects capture/session endpoints for arming, missed-shot
+preservation, session discovery, manifests, media, feedback, and diagnostic
+ZIP export. Encoded-video responses must implement HTTP byte ranges; Chromium
+cannot seek or step the clip from a non-range 200-only route.
+
+Android diagnostic controls use these authenticated routes:
+
+- `POST /api/v1/capture/missed-shot` with `{}`;
+- `POST /api/v1/sessions/{id}/feedback` with schema-v1 classification, optional
+  bounded note, and optional signed microsecond timing labels; and
+- `GET /api/v1/sessions/{id}/diagnostics.zip`.
+
+The review panel exposes those actions after playback. In dual-node mode it
+fans feedback out to both local session IDs and downloads role-prefixed ZIPs
+from both phones.
 
 The production API also exposes `/api/v1/events` as a server-sent event stream.
 Session/capture changes trigger an immediate coalesced refresh; a slow

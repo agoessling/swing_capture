@@ -1,0 +1,152 @@
+load("@pose_inference_pip//:requirements.bzl", "requirement")
+load("@rules_python//python:pip.bzl", "compile_pip_requirements")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+compile_pip_requirements(
+    name = "requirements",
+    src = "requirements.in",
+    generate_hashes = True,
+    requirements_txt = "requirements_lock.txt",
+    # Generated rules_python wrappers contain vendored sources outside this package's policy.
+    tags = [
+        "no-basedpyright",
+        "no-ruff",
+        "no-ruff-format",
+    ],
+)
+
+py_library(
+    name = "pose_inference",
+    srcs = [
+        "__init__.py",
+        "annotate.py",
+        "contract.py",
+        "corpus.py",
+        "landmark_csv.py",
+        "mediapipe_runtime.py",
+    ],
+)
+
+py_library(
+    name = "corpus_evaluation",
+    srcs = ["corpus_evaluate.py"],
+    deps = [
+        ":pose_inference",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_binary(
+    name = "validate_corpus",
+    srcs = ["corpus.py"],
+    main = "corpus.py",
+    data = ["corpus_manifest.json"],
+    legacy_create_init = False,
+    deps = [":pose_inference"],
+)
+
+py_binary(
+    name = "evaluate_corpus",
+    srcs = ["corpus_evaluate.py"],
+    main = "corpus_evaluate.py",
+    data = [
+        ":annotate_pose_trigger",
+        ":landmark_csv",
+        ":pose_landmarker",
+        "//android/core/pose:pose_landmarks_to_observations",
+        "//android/core/pose:pose_trigger_replay",
+    ],
+    legacy_create_init = False,
+    deps = [
+        ":pose_inference",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_binary(
+    name = "annotate_pose_trigger",
+    srcs = ["annotate.py"],
+    main = "annotate.py",
+    legacy_create_init = False,
+    deps = [
+        ":pose_inference",
+        requirement("opencv-contrib-python"),
+    ],
+)
+
+py_binary(
+    name = "pose_landmarker",
+    srcs = ["cli.py"],
+    main = "cli.py",
+    data = ["@pose_landmarker_lite_task//file"],
+    legacy_create_init = False,
+    deps = [
+        ":pose_inference",
+        requirement("mediapipe"),
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_binary(
+    name = "landmark_csv",
+    srcs = ["landmark_csv.py"],
+    main = "landmark_csv.py",
+    legacy_create_init = False,
+    deps = [":pose_inference"],
+)
+
+py_test(
+    name = "contract_test",
+    size = "small",
+    srcs = ["contract_test.py"],
+    legacy_create_init = False,
+    deps = [":pose_inference"],
+)
+
+py_test(
+    name = "corpus_test",
+    size = "small",
+    srcs = ["corpus_test.py"],
+    data = ["corpus_manifest.json"],
+    legacy_create_init = False,
+    deps = [":pose_inference"],
+)
+
+py_test(
+    name = "corpus_evaluate_test",
+    size = "small",
+    srcs = ["corpus_evaluate_test.py"],
+    data = ["corpus_manifest.json"],
+    legacy_create_init = False,
+    deps = [
+        ":corpus_evaluation",
+        ":pose_inference",
+    ],
+)
+
+py_test(
+    name = "annotate_test",
+    size = "small",
+    srcs = ["annotate_test.py"],
+    legacy_create_init = False,
+    deps = [":pose_inference"],
+)
+
+py_test(
+    name = "landmark_csv_test",
+    size = "small",
+    srcs = ["landmark_csv_test.py"],
+    legacy_create_init = False,
+    deps = [":pose_inference"],
+)
+
+exports_files([
+    "DEPENDENCY_PLAN.md",
+    "corpus_manifest.json",
+    "requirements.in",
+    "requirements_lock.txt",
+])

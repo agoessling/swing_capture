@@ -34,6 +34,7 @@ import com.agoessling.swingcapture.audio.AudioTimestampMapper;
 import com.agoessling.swingcapture.audio.ContinuousAudioImpactDetector;
 import com.agoessling.swingcapture.audio.ImpactDetector;
 import com.agoessling.swingcapture.audio.Pcm16EvidenceRing;
+import com.agoessling.swingcapture.diagnostics.DiagnosticAudioRing;
 import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -44,6 +45,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -65,6 +67,9 @@ public final class ContinuousCaptureEngine {
   private static final long THREAD_STOP_TIMEOUT_MILLIS = 5_000;
   private static final long AUDIO_TIMESTAMP_BASE_UNCERTAINTY_NANOS = 250_000L;
   private static final long AUDIO_EVIDENCE_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(750);
+  private static final int DIAGNOSTIC_AUDIO_PRE_ROLL_FRAMES = 10 * AUDIO_SAMPLE_RATE_HZ;
+  private static final int DIAGNOSTIC_AUDIO_POST_ROLL_FRAMES = 2 * AUDIO_SAMPLE_RATE_HZ;
+  private static final long DIAGNOSTIC_AUDIO_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(2_500);
   private static final int RETENTION_BYTES = 48 * 1024 * 1024;
   private static final int RETENTION_BLOCK_BYTES = 16 * 1024;
   private static final int RETENTION_ACCESS_UNITS = 1_200;
@@ -147,11 +152,25 @@ public final class ContinuousCaptureEngine {
       this.threshold = threshold;
     }
 
-    private static TriggerEvidence manual(long timestampNanos) {
+    private static TriggerEvidence operator(
+        String source, long timestampNanos, long audioFramePosition) {
+      if (!source.equals("manual") && !source.equals("missed_shot")) {
+        throw new IllegalArgumentException("unsupported operator trigger source");
+      }
       return new TriggerEvidence(
-          "manual", timestampNanos, 0, 0, -1, Float.NaN, Float.NaN, Float.NaN);
+          source,
+          timestampNanos,
+          0,
+          AUDIO_SAMPLE_RATE_HZ,
+          audioFramePosition,
+          Float.NaN,
+          Float.NaN,
+          Float.NaN);
     }
   }
+
+  private record AudioTimestampAnchor(
+      long framePosition, long boottimeNanos, long uncertaintyNanos) {}
 
   private static final class PendingCapture {
     private final String sessionId;
@@ -185,6 +204,10 @@ public final class ContinuousCaptureEngine {
       new StreamingTimestampCalibrator();
   private final ContinuousAudioImpactDetector impactDetector;
   private final Pcm16EvidenceRing pcmEvidenceRing;
+  private final DiagnosticAudioRing diagnosticAudioRing =
+      new DiagnosticAudioRing(
+          DiagnosticAudioRing.recommendedCapacityFrames(
+              AUDIO_SAMPLE_RATE_HZ, DiagnosticAudioRing.RECOMMENDED_RETENTION_SECONDS));
   private final Object pcmEvidenceMonitor = new Object();
   private final Map<Long, PendingCapture> pendingCaptures = new ConcurrentHashMap<>();
   private final ExecutorService publisher = Executors.newSingleThreadExecutor();
@@ -193,12 +216,20 @@ public final class ContinuousCaptureEngine {
   private final AtomicBoolean automaticTriggersEnabled = new AtomicBoolean();
   private final AtomicLong audioFrames = new AtomicLong();
   private final AtomicLong encodedFrames = new AtomicLong();
+  private final AtomicLong firstCameraFrameElapsedRealtimeNanos = new AtomicLong();
+  private final AtomicLong firstUsableEncodedFrameElapsedRealtimeNanos = new AtomicLong();
+  private final AtomicLong startupContinuityResetCount = new AtomicLong();
+  private final AtomicLong maximumStartupContinuityGapNanos = new AtomicLong();
   private final AtomicLong rejectedAudioTimestamps = new AtomicLong();
+  private final AtomicReference<AudioTimestampAnchor> latestAudioTimestamp =
+      new AtomicReference<>();
   private volatile long firstRetainedSensorTimestampNanos;
   private volatile long lastRetainedSensorTimestampNanos;
   private volatile MediaFormat encoderOutputFormat;
   private volatile String cameraId = "";
   private volatile int cameraTimestampSource = -1;
+  private volatile long engineStartedElapsedRealtimeNanos;
+  private volatile long fullPreRollReadyElapsedRealtimeNanos;
   private volatile int audioSource = -1;
   private MediaCodec encoder;
   private Surface encoderInputSurface;
@@ -246,6 +277,7 @@ public final class ContinuousCaptureEngine {
 
   /** Starts hardware and waits until the ring contains a triggerable pre-roll and preceding IDR. */
   public void start() throws Exception {
+    engineStartedElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
     requirePermissions();
     captureConfiguration.requireAssignedRole();
     try {
@@ -260,6 +292,7 @@ public final class ContinuousCaptureEngine {
       if (!triggerReady()) {
         throw new IllegalStateException("Timed out filling a continuous encoded pre-roll");
       }
+      fullPreRollReadyElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
       listener.onReady();
       automaticTriggersEnabled.set(automaticAudioTriggersRequested);
     } catch (Throwable failure) {
@@ -272,8 +305,58 @@ public final class ContinuousCaptureEngine {
   }
 
   public TriggerAttempt triggerManual(String requestedSessionId) {
+    return triggerOperator(requestedSessionId, "manual");
+  }
+
+  public TriggerAttempt triggerMissedShot(String requestedSessionId) {
+    return triggerOperator(requestedSessionId, "missed_shot");
+  }
+
+  private TriggerAttempt triggerOperator(String requestedSessionId, String source) {
     long now = SystemClock.elapsedRealtimeNanos();
-    return trigger(requestedSessionId, now, TriggerEvidence.manual(now));
+    long audioFramePosition = -1;
+    AudioTimestampAnchor anchor = latestAudioTimestamp.get();
+    if (anchor != null) {
+      audioFramePosition =
+          AudioFrameMarker.estimate(
+                  now,
+                  anchor.framePosition(),
+                  anchor.boottimeNanos(),
+                  anchor.uncertaintyNanos(),
+                  AUDIO_SAMPLE_RATE_HZ)
+              .map(AudioFrameMarker.Marker::framePosition)
+              .orElse(-1L);
+    }
+    return trigger(
+        requestedSessionId, now, TriggerEvidence.operator(source, now, audioFramePosition));
+  }
+
+  public Optional<CaptureStartupTiming> startupTiming(long armRequestedElapsedRealtimeNanos) {
+    long engineStarted = engineStartedElapsedRealtimeNanos;
+    long firstCameraFrame = firstCameraFrameElapsedRealtimeNanos.get();
+    long firstUsableEncodedFrame = firstUsableEncodedFrameElapsedRealtimeNanos.get();
+    long fullPreRollReady = fullPreRollReadyElapsedRealtimeNanos;
+    if (engineStarted == 0
+        || firstCameraFrame == 0
+        || firstUsableEncodedFrame == 0
+        || fullPreRollReady == 0) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        new CaptureStartupTiming(
+            armRequestedElapsedRealtimeNanos,
+            engineStarted,
+            firstCameraFrame,
+            firstUsableEncodedFrame,
+            fullPreRollReady));
+  }
+
+  public long startupContinuityResetCount() {
+    return startupContinuityResetCount.get();
+  }
+
+  public long maximumStartupContinuityGapNanos() {
+    return maximumStartupContinuityGapNanos.get();
   }
 
   /** Stops automatic impacts from racing the explicit terminal trigger of a soak HIL run. */
@@ -324,6 +407,10 @@ public final class ContinuousCaptureEngine {
               + timestampCalibrator.medianOffsetNanos()
               + ")");
     }
+    // A physical arm cycle owns one swing and one shared coordination ID. Reject any later
+    // automatic impact while post-roll/publication is in flight; the service stops after a normal
+    // publication and the coordinator must arm both nodes again with a fresh shared ID.
+    automaticTriggersEnabled.set(false);
     pendingCaptures.put(
         result.captureId(),
         new PendingCapture(
@@ -426,6 +513,8 @@ public final class ContinuousCaptureEngine {
                       info.flags,
                       (info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0,
                       accessUnit);
+                  firstUsableEncodedFrameElapsedRealtimeNanos.compareAndSet(
+                      0, SystemClock.elapsedRealtimeNanos());
                 } catch (EncodedAccessUnitRetention.RetentionException discontinuity) {
                   StreamingTimestampCalibrator.DiagnosticSnapshot timestampDiagnostic = null;
                   if (discontinuity.continuityDiagnostic().isPresent()) {
@@ -437,6 +526,33 @@ public final class ContinuousCaptureEngine {
                     } catch (RuntimeException diagnosticFailure) {
                       discontinuity.addSuppressed(diagnosticFailure);
                     }
+                  }
+                  boolean retentionCaptureActive =
+                      retention.captureState()
+                          != EncodedAccessUnitRetention.CaptureState.IDLE;
+                  CaptureStartupContinuityPolicy.Action action =
+                      CaptureStartupContinuityPolicy.action(
+                          discontinuity.failure()
+                              == EncodedAccessUnitRetention.Failure.SENSOR_TIMESTAMP_GAP,
+                          fullPreRollReadyElapsedRealtimeNanos != 0, retentionCaptureActive);
+                  if (action
+                      == CaptureStartupContinuityPolicy.Action.RESET_WARMUP_AND_CONTINUE) {
+                    long gapNanos =
+                        discontinuity
+                            .continuityDiagnostic()
+                            .map(
+                                EncodedAccessUnitRetention.ContinuityDiagnostic
+                                    ::sensorTimestampGapNs)
+                            .orElse(0L);
+                    startupContinuityResetCount.incrementAndGet();
+                    maximumStartupContinuityGapNanos.accumulateAndGet(gapNanos, Math::max);
+                    Log.w(TAG, "Discarding discontinuous encoder warmup: " + discontinuity);
+                    retention.resetContinuity();
+                    firstRetainedSensorTimestampNanos = 0;
+                    lastRetainedSensorTimestampNanos = 0;
+                    firstUsableEncodedFrameElapsedRealtimeNanos.set(0);
+                    ++ordinal;
+                    continue;
                   }
                   ContinuousCaptureContinuityException.resetAndThrow(
                       discontinuity, timestampDiagnostic, retention::resetContinuity);
@@ -500,6 +616,8 @@ public final class ContinuousCaptureEngine {
   private void writeSession(
       EncodedAccessUnitRetention.Snapshot snapshot, PendingCapture pending) throws Exception {
     Pcm16EvidenceRing.Snapshot audioEvidence = awaitAudioEvidence(pending.evidence);
+    DiagnosticAudioRing.Snapshot diagnosticAudioEvidence =
+        awaitDiagnosticAudioEvidence(pending.evidence);
     MediaFormat format = encoderOutputFormat;
     if (format == null) {
       throw new IllegalStateException("Encoder output format is unavailable");
@@ -541,8 +659,63 @@ public final class ContinuousCaptureEngine {
         throw new IllegalStateException("Unable to publish PCM evidence WAV");
       }
     }
+    DiagnosticPcm16WavFile.EvidenceMetadata diagnosticAudioMetadata = null;
+    String diagnosticAudioStatus = "not_available";
+    if (diagnosticAudioEvidence != null) {
+      File temporaryAudio =
+          new File(temporaryDirectory, DiagnosticPcm16WavFile.FILE_NAME + ".tmp");
+      File publishedAudio = new File(temporaryDirectory, DiagnosticPcm16WavFile.FILE_NAME);
+      try {
+        diagnosticAudioMetadata =
+            DiagnosticPcm16WavFile.metadata(
+                diagnosticAudioEvidence, pending.evidence.strikeFramePosition);
+        try (FileOutputStream fileOutput = new FileOutputStream(temporaryAudio);
+            BufferedOutputStream output = new BufferedOutputStream(fileOutput)) {
+          DiagnosticPcm16WavFile.write(diagnosticAudioEvidence, output);
+          output.flush();
+          fileOutput.getFD().sync();
+        }
+        if (temporaryAudio.length() != diagnosticAudioMetadata.bytes()) {
+          throw new IllegalStateException(
+              "Diagnostic PCM byte count disagrees with WAV metadata");
+        }
+        if (!temporaryAudio.renameTo(publishedAudio)) {
+          throw new IllegalStateException("Unable to publish diagnostic PCM WAV");
+        }
+        diagnosticAudioStatus = "available";
+      } catch (Throwable diagnosticFailure) {
+        diagnosticAudioMetadata = null;
+        diagnosticAudioStatus = "publication_failed";
+        Log.e(TAG, "Unable to publish auxiliary diagnostic PCM", diagnosticFailure);
+        if (temporaryAudio.exists() && !temporaryAudio.delete()) {
+          Log.w(TAG, "Unable to remove failed diagnostic PCM temporary file");
+        }
+      }
+    }
+    String diagnosticIncidentStatus = "available";
+    try {
+      new SessionDiagnosticStore(AndroidDirectorySync::synchronize)
+          .initialize(
+              temporaryDirectory,
+              pending.sessionId,
+              captureConfiguration.nodeId(),
+              pending.evidence.source,
+              System.currentTimeMillis());
+    } catch (Throwable diagnosticFailure) {
+      diagnosticIncidentStatus = "publication_failed";
+      Log.e(TAG, "Unable to publish auxiliary diagnostic incident", diagnosticFailure);
+    }
     JSONObject manifest =
-        sessionManifest(snapshot, pending, mediaName, media.length(), codec, audioMetadata);
+        sessionManifest(
+            snapshot,
+            pending,
+            mediaName,
+            media.length(),
+            codec,
+            audioMetadata,
+            diagnosticAudioMetadata,
+            diagnosticAudioStatus,
+            diagnosticIncidentStatus);
     File temporaryManifest = new File(temporaryDirectory, "manifest.json.tmp");
     File publishedManifest = new File(temporaryDirectory, "manifest.json");
     try (FileOutputStream output = new FileOutputStream(temporaryManifest)) {
@@ -556,11 +729,13 @@ public final class ContinuousCaptureEngine {
     if (!temporaryDirectory.renameTo(publishedDirectory)) {
       throw new IllegalStateException("Unable to atomically publish session " + pending.sessionId);
     }
+    AndroidDirectorySync.synchronize(sessions);
   }
 
   private Pcm16EvidenceRing.Snapshot awaitAudioEvidence(TriggerEvidence evidence)
       throws InterruptedException {
-    if (!AudioEvidencePolicy.requiresPublishedEvidence(pcmEvidenceRing, evidence.source)) {
+    if (!AudioEvidencePolicy.requiresPublishedEvidence(pcmEvidenceRing, evidence.source)
+        || evidence.strikeFramePosition < 0) {
       return null;
     }
     long deadline = SystemClock.elapsedRealtimeNanos() + AUDIO_EVIDENCE_WAIT_NANOS;
@@ -577,6 +752,37 @@ public final class ContinuousCaptureEngine {
         long remaining = deadline - SystemClock.elapsedRealtimeNanos();
         if (remaining <= 0) {
           return pcmEvidenceRing.snapshot(evidence.strikeFramePosition);
+        }
+        TimeUnit.NANOSECONDS.timedWait(pcmEvidenceMonitor, remaining);
+      }
+    }
+  }
+
+  private DiagnosticAudioRing.Snapshot awaitDiagnosticAudioEvidence(TriggerEvidence evidence)
+      throws InterruptedException {
+    if (evidence.strikeFramePosition < 0) {
+      return null;
+    }
+    long deadline = SystemClock.elapsedRealtimeNanos() + DIAGNOSTIC_AUDIO_WAIT_NANOS;
+    synchronized (pcmEvidenceMonitor) {
+      while (true) {
+        DiagnosticAudioWindow.Selection selection =
+            DiagnosticAudioWindow.select(
+                evidence.strikeFramePosition,
+                diagnosticAudioRing.oldestRetainedFramePosition(),
+                diagnosticAudioRing.endRetainedFramePosition(),
+                DIAGNOSTIC_AUDIO_PRE_ROLL_FRAMES,
+                DIAGNOSTIC_AUDIO_POST_ROLL_FRAMES);
+        if (selection.state() == DiagnosticAudioWindow.State.AVAILABLE) {
+          return diagnosticAudioRing.snapshot(
+              selection.firstFramePosition(), selection.endFramePosition());
+        }
+        if (selection.state() == DiagnosticAudioWindow.State.MARKER_EVICTED) {
+          return null;
+        }
+        long remaining = deadline - SystemClock.elapsedRealtimeNanos();
+        if (remaining <= 0) {
+          return null;
         }
         TimeUnit.NANOSECONDS.timedWait(pcmEvidenceMonitor, remaining);
       }
@@ -633,7 +839,10 @@ public final class ContinuousCaptureEngine {
       String mediaName,
       long mediaBytes,
       AvcCodecDescriptor codec,
-      Pcm16WavFile.EvidenceMetadata audioEvidence)
+      Pcm16WavFile.EvidenceMetadata audioEvidence,
+      DiagnosticPcm16WavFile.EvidenceMetadata diagnosticAudioEvidence,
+      String diagnosticAudioStatus,
+      String diagnosticIncidentStatus)
       throws Exception {
     long triggerNs = snapshot.triggerSensorTimestampNs();
     long firstPtsUs = snapshot.metadata(0).presentationTimeUs();
@@ -756,6 +965,36 @@ public final class ContinuousCaptureEngine {
               .put("sample_count", audioEvidence.sampleCount())
               .put("strike_sample_index", audioEvidence.strikeSampleIndex()));
     }
+    JSONObject diagnosticEvidence =
+        new JSONObject()
+            .put("schema_version", 1)
+            .put("audio", JSONObject.NULL)
+            .put("audio_status", diagnosticAudioStatus)
+            .put("incident_status", diagnosticIncidentStatus)
+            .put("preview", JSONObject.NULL)
+            .put(
+                "preview_status",
+                "unavailable_until_low_rate_pose_capture_is_integrated");
+    if (diagnosticAudioEvidence != null) {
+      diagnosticEvidence.put(
+          "audio",
+          new JSONObject()
+              .put("path", diagnosticAudioEvidence.relativePath())
+              .put("bytes", diagnosticAudioEvidence.bytes())
+              .put("sample_rate_hz", diagnosticAudioEvidence.sampleRateHz())
+              .put(
+                  "first_frame_position",
+                  Long.toString(diagnosticAudioEvidence.firstFramePosition()))
+              .put(
+                  "end_frame_position",
+                  Long.toString(diagnosticAudioEvidence.endFramePosition()))
+              .put(
+                  "marker_frame_position",
+                  Long.toString(diagnosticAudioEvidence.markerFramePosition()))
+              .put("sample_count", diagnosticAudioEvidence.sampleCount())
+              .put("marker_sample_index", diagnosticAudioEvidence.markerSampleIndex()));
+    }
+    androidCapture.put("diagnostic_evidence", diagnosticEvidence);
     return new JSONObject()
         .put("schema_version", 1)
         .put("session_id", pending.sessionId)
@@ -843,7 +1082,11 @@ public final class ContinuousCaptureEngine {
           AudioTimestampMapper.ObservationResult observation =
               impactDetector.observeAudioTimestamp(
                   timestamp.framePosition, timestamp.nanoTime, uncertainty);
-          if (!observation.accepted()) {
+          if (observation.accepted()) {
+            latestAudioTimestamp.set(
+                new AudioTimestampAnchor(
+                    timestamp.framePosition, timestamp.nanoTime, uncertainty));
+          } else {
             long rejected = rejectedAudioTimestamps.incrementAndGet();
             if (rejected == 1 || rejected % 100 == 0) {
               Log.w(
@@ -857,6 +1100,9 @@ public final class ContinuousCaptureEngine {
         }
         if (pcmEvidenceRing != null && frameCount > 0) {
           pcmEvidenceRing.append(samples, 0, frameCount, firstFramePosition);
+        }
+        if (frameCount > 0) {
+          diagnosticAudioRing.append(samples, 0, frameCount, firstFramePosition);
           synchronized (pcmEvidenceMonitor) {
             pcmEvidenceMonitor.notifyAll();
           }
@@ -942,8 +1188,10 @@ public final class ContinuousCaptureEngine {
                       public void onCaptureStarted(
                           CameraCaptureSession ignoredSession,
                           CaptureRequest ignoredRequest,
-                          long ignoredTimestamp,
+                          long captureTimestamp,
                           long ignoredFrameNumber) {
+                        firstCameraFrameElapsedRealtimeNanos.compareAndSet(
+                            0, captureTimestamp);
                         firstCameraFrame.countDown();
                       }
 

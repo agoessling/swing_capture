@@ -1,24 +1,28 @@
 import assert from "node:assert/strict";
-import { JSDOM, type DOMWindow } from "jsdom";
+import { type DOMWindow, JSDOM } from "jsdom";
 import { Application } from "./application.js";
 import { FakeStationApi } from "./fake_api.js";
 import {
+  FakeReviewApi,
   FIXTURE_MANIFEST,
   FIXTURE_SYNTHETIC_HIL_EVIDENCE,
-  FakeReviewApi,
 } from "./fake_review_api.js";
 import {
   CAPTURE_SCHEMA_VERSION,
+  type CaptureStatus,
+  type ClipManifest,
+  DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+  type DiagnosticArchive,
+  type DiagnosticFeedback,
   HttpReviewApi,
   parseCaptureStatus,
   parseClipManifest,
-  type CaptureStatus,
-  type ClipManifest,
   type ReviewApi,
   type SessionList,
   type SessionSummary,
 } from "./review_api.js";
 import { ReviewApp } from "./review_app.js";
+import { isAndroidReviewMode, reviewEventsSupported } from "./review_boot.js";
 import { ReviewPlayer } from "./review_player.js";
 
 const dom = new JSDOM('<!doctype html><html lang="en"><body></body></html>', {
@@ -27,12 +31,14 @@ const dom = new JSDOM('<!doctype html><html lang="en"><body></body></html>', {
 
 installDomGlobals(dom.window);
 installMediaFixture(dom.window);
+const downloadedArchiveNames = installDownloadFixture(dom.window);
 
 async function main() {
   const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
   const { default: axe } = await import("axe-core");
 
-  const rendered = render(<ReviewApp api={new FakeReviewApi()} pollIntervalMs={60_000} />);
+  const diagnosticsApi = new RecordingReviewApi();
+  const rendered = render(<ReviewApp api={diagnosticsApi} pollIntervalMs={60_000} />);
   assert.ok(await screen.findByRole("heading", { name: "Swing review" }));
   assert.ok(await screen.findByText("Listening for an audio trigger"));
   assert.equal(rendered.container.querySelectorAll("video").length, 2);
@@ -80,6 +86,45 @@ async function main() {
   fireEvent.click(screen.getByRole("button", { name: "Pause" }));
   assert.ok(screen.getByRole("button", { name: "Play" }));
 
+  assert.ok(screen.getByRole("region", { name: "Capture diagnostics" }));
+  fireEvent.change(screen.getByRole("combobox", { name: "Result" }), {
+    target: { value: "av_sync_wrong" },
+  });
+  const note = screen.getByRole("textbox", { name: "Note (optional)" }) as HTMLTextAreaElement;
+  assert.equal(note.maxLength, 500);
+  fireEvent.change(note, { target: { value: "  Audio trails the club strike  " } });
+  fireEvent.click(screen.getByText("Timing marks (optional)"));
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Desired high-speed start (ms)" }), {
+    target: { value: "-1200" },
+  });
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Visual impact (ms)" }), {
+    target: { value: "4.5" },
+  });
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Audio impact (ms)" }), {
+    target: { value: "12" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save diagnostic feedback" }));
+  assert.ok(await screen.findByText("Diagnostic feedback saved."));
+  assert.deepEqual(diagnosticsApi.feedback, [
+    {
+      sessionId: FIXTURE_MANIFEST.session_id,
+      feedback: {
+        schema_version: DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+        classification: "av_sync_wrong",
+        note: "Audio trails the club strike",
+        timing_marks_us: {
+          desired_high_speed_start_us: -1_200_000,
+          visual_impact_us: 4_500,
+          audio_impact_us: 12_000,
+        },
+      },
+    },
+  ]);
+  fireEvent.click(screen.getByRole("button", { name: "Download diagnostic ZIP" }));
+  assert.ok(await screen.findByText("Diagnostic ZIP download started."));
+  assert.deepEqual(diagnosticsApi.archiveRequests, [FIXTURE_MANIFEST.session_id]);
+  assert.deepEqual(downloadedArchiveNames, ["fixture-diagnostics.zip"]);
+
   const accessibility = await axe.run(rendered.container, {
     rules: { "color-contrast": { enabled: false } },
   });
@@ -88,6 +133,28 @@ async function main() {
     [],
     "review fixture should have no automated accessibility violations",
   );
+  cleanup();
+
+  const missedShotApi = new MissedShotReviewApi();
+  render(<ReviewApp api={missedShotApi} pollIntervalMs={60_000} />);
+  const missedShotClassification = (await screen.findByRole("combobox", {
+    name: "Result",
+  })) as HTMLSelectElement;
+  assert.equal(missedShotClassification.value, "missed_shot");
+  fireEvent.click(screen.getByText("Timing marks (optional)"));
+  const missedShotAudioMark = screen.getByRole("spinbutton", {
+    name: "Audio impact (ms)",
+  }) as HTMLInputElement;
+  assert.equal(missedShotAudioMark.min, "-10000");
+  assert.equal(missedShotAudioMark.max, "2000");
+  fireEvent.change(missedShotAudioMark, { target: { value: "-9000" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save diagnostic feedback" }));
+  assert.ok(await screen.findByText("Diagnostic feedback saved."));
+  assert.deepEqual(missedShotApi.feedback[0]?.feedback, {
+    schema_version: DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+    classification: "missed_shot",
+    timing_marks_us: { audio_impact_us: -9_000_000 },
+  });
   cleanup();
 
   const singleNodeManifest = structuredClone(FIXTURE_MANIFEST);
@@ -154,17 +221,30 @@ async function main() {
   assert.ok(await screen.findByRole("heading", { name: "Swing review" }));
   cleanup();
 
+  render(
+    <Application
+      initialView="setup"
+      pollIntervalMs={60_000}
+      reviewApi={new FakeReviewApi()}
+      setupAvailable={false}
+      stationApi={new FakeStationApi()}
+    />,
+  );
+  assert.ok(await screen.findByRole("heading", { name: "Swing review" }));
+  assert.equal(screen.queryByRole("button", { name: "Camera setup" }), null);
+  cleanup();
+
   render(<ReviewApp api={new FakeReviewApi()} pollIntervalMs={5} />);
   assert.ok(await screen.findByText("Listening for an audio trigger"));
-  fireEvent.click(screen.getByRole("button", { name: "Manual diagnostic capture" }));
+  assert.ok(screen.getByText(/1\.4 seconds of preceding video.*10 seconds before this action/));
+  fireEvent.click(screen.getByRole("button", { name: "Save missed shot" }));
   assert.ok(await screen.findByRole("heading", { name: "Audio trigger detected" }));
   assert.equal(
     (screen.getByRole("button", { name: "Arm audio capture" }) as HTMLButtonElement).disabled,
     true,
   );
   assert.equal(
-    (screen.getByRole("button", { name: "Manual diagnostic capture" }) as HTMLButtonElement)
-      .disabled,
+    (screen.getByRole("button", { name: "Save missed shot" }) as HTMLButtonElement).disabled,
     true,
   );
   await waitFor(() => {
@@ -172,8 +252,7 @@ async function main() {
     assert.ok(screen.getByText("Frame 46 of 90"));
     assert.ok(screen.getByRole("button", { name: "Arm audio capture" }));
     assert.equal(
-      (screen.getByRole("button", { name: "Manual diagnostic capture" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Save missed shot" }) as HTMLButtonElement).disabled,
       true,
     );
   });
@@ -185,9 +264,12 @@ async function main() {
     getCaptureStatus: () => Promise.reject(new Error("capture service unavailable")),
     setArmed: () => Promise.reject(new Error("capture service unavailable")),
     triggerManualCapture: () => Promise.reject(new Error("capture service unavailable")),
+    saveMissedShot: () => Promise.reject(new Error("capture service unavailable")),
     startSyntheticSwing: () => Promise.reject(new Error("capture service unavailable")),
     getSessions: () => Promise.reject(new Error("capture service unavailable")),
     getManifest: () => Promise.reject(new Error("capture service unavailable")),
+    submitDiagnosticFeedback: () => Promise.reject(new Error("capture service unavailable")),
+    getDiagnosticArchives: () => Promise.reject(new Error("capture service unavailable")),
   };
   render(<ReviewApp api={unavailableApi} pollIntervalMs={60_000} />);
   assert.ok(await screen.findByRole("alert"));
@@ -217,9 +299,12 @@ async function main() {
       }),
     setArmed: () => Promise.reject(new Error("not used")),
     triggerManualCapture: () => Promise.reject(new Error("not used")),
+    saveMissedShot: () => Promise.reject(new Error("not used")),
     startSyntheticSwing: () => Promise.reject(new Error("not used")),
     getSessions: () => Promise.resolve({ schema_version: 1, sessions: [] }),
     getManifest: () => Promise.reject(new Error("not used")),
+    submitDiagnosticFeedback: () => Promise.reject(new Error("not used")),
+    getDiagnosticArchives: () => Promise.reject(new Error("not used")),
   };
   render(<ReviewApp api={hilFailureApi} pollIntervalMs={60_000} />);
   assert.ok(await screen.findByRole("heading", { name: "Synthetic swing HIL failed" }));
@@ -228,7 +313,24 @@ async function main() {
   cleanup();
 
   testRuntimeSchemaRejection();
+  testReviewBootMode();
   await testHttpContract();
+}
+
+function testReviewBootMode() {
+  const host = new URLSearchParams();
+  assert.equal(isAndroidReviewMode(host), false);
+  assert.equal(reviewEventsSupported(host), true);
+
+  const phoneHosted = new URLSearchParams("node_token=phone-control-token");
+  assert.equal(isAndroidReviewMode(phoneHosted), true);
+  assert.equal(reviewEventsSupported(phoneHosted), false);
+
+  const dual = new URLSearchParams(
+    "dtl_node=http%3A%2F%2Fdtl.test&face_node=http%3A%2F%2Fface.test",
+  );
+  assert.equal(isAndroidReviewMode(dual), true);
+  assert.equal(reviewEventsSupported(dual), false);
 }
 
 function testRuntimeSchemaRejection() {
@@ -449,12 +551,23 @@ async function testHttpContract() {
     if (url.endsWith("/capture/manual")) {
       return Response.json(session);
     }
+    if (url.endsWith("/capture/missed-shot")) {
+      return Response.json(session);
+    }
     if (url.endsWith("/hil/synthetic-swing")) {
       return Response.json(capture);
     }
     if (url.endsWith("/manifest")) {
       return Response.json(FIXTURE_MANIFEST, {
         headers: { "X-Swing-Capture-Server-Monotonic-Ns": "458500000000" },
+      });
+    }
+    if (url.endsWith("/feedback")) {
+      return new Response(null, { status: 204 });
+    }
+    if (url.endsWith("/diagnostics.zip")) {
+      return new Response(new Blob(["diagnostic evidence"], { type: "application/zip" }), {
+        headers: { "Content-Disposition": 'attachment; filename="station-evidence.zip"' },
       });
     }
     return Response.json(sessions);
@@ -483,8 +596,9 @@ async function testHttpContract() {
     "Bearer test-control-token",
   );
   assert.equal((await api.triggerManualCapture()).session_id, session.session_id);
+  assert.equal((await api.saveMissedShot()).session_id, session.session_id);
   assert.equal((await api.startSyntheticSwing()).hil.enabled, false);
-  assert.deepEqual(JSON.parse(String(calls[3]?.init?.body)), {});
+  assert.deepEqual(JSON.parse(String(calls[4]?.init?.body)), {});
   assert.equal((await api.getSessions()).sessions.length, 1);
   const manifest = await api.getManifest(session.session_id);
   assert.equal(
@@ -496,15 +610,47 @@ async function testHttpContract() {
     manifest_response_received_performance_ms: 112.5,
     server_response_host_monotonic_ns: "458500000000",
   });
+  await assert.rejects(
+    () =>
+      api.submitDiagnosticFeedback(session.session_id, {
+        schema_version: DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+        classification: "other",
+        note: "x".repeat(501),
+      }),
+    /1 to 500 characters/,
+  );
+  const feedback = {
+    schema_version: DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+    classification: "av_sync_wrong",
+    note: "Audio follows visual impact",
+    timing_marks_us: { visual_impact_us: 4_500, audio_impact_us: 12_000 },
+  } as const;
+  await api.submitDiagnosticFeedback(session.session_id, feedback);
+  assert.deepEqual(JSON.parse(String(calls[7]?.init?.body)), feedback);
+  assert.equal(
+    new Headers(calls[7]?.init?.headers).get("Authorization"),
+    "Bearer test-control-token",
+  );
+  const archives = await api.getDiagnosticArchives(session.session_id);
+  assert.equal(archives.length, 1);
+  assert.equal(archives[0]?.filename, "station-evidence.zip");
+  assert.equal(await archives[0]?.data.text(), "diagnostic evidence");
+  assert.equal(
+    new Headers(calls[8]?.init?.headers).get("Authorization"),
+    "Bearer test-control-token",
+  );
   assert.deepEqual(
     calls.map((call) => call.url),
     [
       "http://station.test/api/v1/capture/status",
       "http://station.test/api/v1/capture/arm",
       "http://station.test/api/v1/capture/manual",
+      "http://station.test/api/v1/capture/missed-shot",
       "http://station.test/api/v1/hil/synthetic-swing",
       "http://station.test/api/v1/sessions",
       `http://station.test/api/v1/sessions/${session.session_id}/manifest`,
+      `http://station.test/api/v1/sessions/${session.session_id}/feedback`,
+      `http://station.test/api/v1/sessions/${session.session_id}/diagnostics.zip`,
     ],
   );
 }
@@ -542,6 +688,55 @@ function installMediaFixture(window: DOMWindow) {
       this.dispatchEvent(new window.Event("pause"));
     },
   });
+}
+
+function installDownloadFixture(window: DOMWindow): string[] {
+  const names: string[] = [];
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: () => "blob:fixture-diagnostics",
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    value: () => undefined,
+  });
+  Object.defineProperty(window.HTMLAnchorElement.prototype, "click", {
+    configurable: true,
+    value(this: HTMLAnchorElement) {
+      names.push(this.download);
+    },
+  });
+  return names;
+}
+
+class RecordingReviewApi extends FakeReviewApi {
+  readonly feedback: Array<{ sessionId: string; feedback: DiagnosticFeedback }> = [];
+  readonly archiveRequests: string[] = [];
+
+  override async submitDiagnosticFeedback(
+    sessionId: string,
+    feedback: DiagnosticFeedback,
+  ): Promise<void> {
+    this.feedback.push({ sessionId, feedback: structuredClone(feedback) });
+  }
+
+  override async getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]> {
+    this.archiveRequests.push(sessionId);
+    return [
+      {
+        filename: "fixture-diagnostics.zip",
+        data: new Blob(["diagnostics"], { type: "application/zip" }),
+      },
+    ];
+  }
+}
+
+class MissedShotReviewApi extends RecordingReviewApi {
+  override async getManifest(sessionId: string): Promise<ClipManifest> {
+    const manifest = await super.getManifest(sessionId);
+    manifest.trigger.source = "missed_shot";
+    return manifest;
+  }
 }
 
 void main().catch((caught: unknown) => {

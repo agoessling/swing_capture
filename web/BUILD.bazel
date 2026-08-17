@@ -24,12 +24,14 @@ APP_SRCS = [
     "src/app.tsx",
     "src/application.tsx",
     "src/assets.d.ts",
+    "src/diagnostic_feedback.tsx",
     "src/dual_node_review_api.ts",
     "src/fake_api.ts",
     "src/fake_review_api.ts",
     "src/paired_preview.ts",
     "src/review_api.ts",
     "src/review_app.tsx",
+    "src/review_boot.ts",
     "src/review_player.tsx",
 ]
 

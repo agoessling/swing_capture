@@ -1,6 +1,38 @@
 export const REVIEW_SCHEMA_VERSION = 1 as const;
 export const PIPELINE_PROFILE_SCHEMA_VERSION = 3 as const;
 export const CAPTURE_SCHEMA_VERSION = 2 as const;
+export const DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION = 1 as const;
+export const MAX_DIAGNOSTIC_NOTE_LENGTH = 500;
+
+export const DIAGNOSTIC_CLASSIFICATIONS = [
+  "good_capture",
+  "armed_too_early",
+  "armed_too_late",
+  "missed_shot",
+  "false_impact",
+  "av_sync_wrong",
+  "other",
+] as const;
+
+export type DiagnosticClassification = (typeof DIAGNOSTIC_CLASSIFICATIONS)[number];
+
+export interface DiagnosticTimingMarks {
+  desired_high_speed_start_us?: number;
+  visual_impact_us?: number;
+  audio_impact_us?: number;
+}
+
+export interface DiagnosticFeedback {
+  schema_version: typeof DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION;
+  classification: DiagnosticClassification;
+  note?: string;
+  timing_marks_us?: DiagnosticTimingMarks;
+}
+
+export interface DiagnosticArchive {
+  filename: string;
+  data: Blob;
+}
 
 export type CaptureState =
   | "setup"
@@ -231,9 +263,12 @@ export interface ReviewApi {
   getCaptureStatus(): Promise<CaptureStatus>;
   setArmed(armed: boolean): Promise<CaptureStatus>;
   triggerManualCapture(): Promise<SessionSummary>;
+  saveMissedShot(): Promise<SessionSummary>;
   startSyntheticSwing(): Promise<CaptureStatus>;
   getSessions(): Promise<SessionList>;
   getManifest(sessionId: string): Promise<ClipManifest>;
+  submitDiagnosticFeedback(sessionId: string, feedback: DiagnosticFeedback): Promise<void>;
+  getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]>;
   subscribeToChanges?(onChange: () => void): (() => void) | undefined;
   impactPreviewUrl?(sessionId: string, role: ReviewRole, revision: number): string;
 }
@@ -278,6 +313,14 @@ export class HttpReviewApi implements ReviewApi {
     return this.#request("/api/v1/capture/manual", parseSessionSummary, {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
+    });
+  }
+
+  async saveMissedShot(): Promise<SessionSummary> {
+    return this.#request("/api/v1/capture/missed-shot", parseSessionSummary, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: "{}",
     });
   }
 
@@ -331,6 +374,33 @@ export class HttpReviewApi implements ReviewApi {
     };
   }
 
+  async submitDiagnosticFeedback(sessionId: string, feedback: DiagnosticFeedback): Promise<void> {
+    validateDiagnosticFeedback(feedback);
+    const encodedId = encodeURIComponent(sessionId);
+    await this.#requestWithoutResponse(`/api/v1/sessions/${encodedId}/feedback`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(feedback),
+    });
+  }
+
+  async getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]> {
+    const encodedId = encodeURIComponent(sessionId);
+    const response = await this.#fetcher(
+      this.#absoluteUrl(`/api/v1/sessions/${encodedId}/diagnostics.zip`),
+      { headers: this.#authorizedHeaders({ Accept: "application/zip" }) },
+    );
+    if (!response.ok) {
+      throw await reviewRequestError(response);
+    }
+    return [
+      {
+        filename: diagnosticArchiveFilename(response, sessionId),
+        data: await response.blob(),
+      },
+    ];
+  }
+
   subscribeToChanges(onChange: () => void): (() => void) | undefined {
     if (!this.#eventsSupported || typeof EventSource === "undefined") {
       return undefined;
@@ -357,10 +427,7 @@ export class HttpReviewApi implements ReviewApi {
   }
 
   async #request<T>(path: string, parser: (value: unknown) => T, init: RequestInit): Promise<T> {
-    const headers = new Headers(init.headers);
-    if (this.#controlToken.length > 0) {
-      headers.set("Authorization", `Bearer ${this.#controlToken}`);
-    }
+    const headers = this.#authorizedHeaders(init.headers);
     const response = await this.#fetcher(this.#absoluteUrl(path), { ...init, headers });
     if (!response.ok) {
       throw await reviewRequestError(response);
@@ -368,9 +435,71 @@ export class HttpReviewApi implements ReviewApi {
     return parser(await response.json());
   }
 
+  async #requestWithoutResponse(path: string, init: RequestInit): Promise<void> {
+    const headers = this.#authorizedHeaders(init.headers);
+    const response = await this.#fetcher(this.#absoluteUrl(path), { ...init, headers });
+    if (!response.ok) {
+      throw await reviewRequestError(response);
+    }
+  }
+
+  #authorizedHeaders(init: HeadersInit | undefined): Headers {
+    const headers = new Headers(init);
+    if (this.#controlToken.length > 0) {
+      headers.set("Authorization", `Bearer ${this.#controlToken}`);
+    }
+    return headers;
+  }
+
   #absoluteUrl(path: string): string {
     return `${this.#baseUrl}${path}`;
   }
+}
+
+export function validateDiagnosticFeedback(feedback: DiagnosticFeedback): void {
+  if (feedback.schema_version !== DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION) {
+    throw new Error(`Unsupported diagnostic feedback schema: ${String(feedback.schema_version)}`);
+  }
+  if (!DIAGNOSTIC_CLASSIFICATIONS.includes(feedback.classification)) {
+    throw new Error(`Unsupported diagnostic classification: ${String(feedback.classification)}`);
+  }
+  if (feedback.note !== undefined) {
+    if (feedback.note.length === 0 || feedback.note.length > MAX_DIAGNOSTIC_NOTE_LENGTH) {
+      throw new Error(`Diagnostic note must contain 1 to ${MAX_DIAGNOSTIC_NOTE_LENGTH} characters`);
+    }
+    if (feedback.note.trim() !== feedback.note) {
+      throw new Error("Diagnostic note must be trimmed");
+    }
+  }
+  if (feedback.timing_marks_us !== undefined) {
+    const marks = Object.entries(feedback.timing_marks_us);
+    if (marks.length === 0) {
+      throw new Error("Diagnostic timing marks must not be empty");
+    }
+    for (const [name, value] of marks) {
+      if (
+        name !== "desired_high_speed_start_us" &&
+        name !== "visual_impact_us" &&
+        name !== "audio_impact_us"
+      ) {
+        throw new Error(`Unsupported diagnostic timing mark: ${name}`);
+      }
+      if (!Number.isSafeInteger(value)) {
+        throw new Error(`Diagnostic timing mark ${name} must be a safe integer`);
+      }
+    }
+  }
+}
+
+function diagnosticArchiveFilename(response: Response, sessionId: string): string {
+  const disposition = response.headers.get("Content-Disposition");
+  const match = disposition?.match(/filename="?([^";]+)"?/i);
+  const candidate = match?.[1]?.trim();
+  if (candidate !== undefined && /^[a-zA-Z0-9][a-zA-Z0-9._-]*\.zip$/i.test(candidate)) {
+    return candidate;
+  }
+  const safeSessionId = sessionId.replaceAll(/[^a-zA-Z0-9._-]/g, "_");
+  return `swing-capture-${safeSessionId}-diagnostics.zip`;
 }
 
 export function parseCaptureStatus(value: unknown): CaptureStatus {

@@ -1,12 +1,14 @@
 import {
   CAPTURE_SCHEMA_VERSION,
-  REVIEW_SCHEMA_VERSION,
-  PIPELINE_PROFILE_SCHEMA_VERSION,
   type CaptureStatus,
   type ClipFrame,
   type ClipManifest,
   type ClipTrack,
+  type DiagnosticArchive,
+  type DiagnosticFeedback,
+  PIPELINE_PROFILE_SCHEMA_VERSION,
   type PipelineProfile,
+  REVIEW_SCHEMA_VERSION,
   type ReviewApi,
   type ReviewRole,
   type SessionList,
@@ -212,6 +214,10 @@ export class FakeReviewApi implements ReviewApi {
     return structuredClone(session);
   }
 
+  saveMissedShot(): Promise<SessionSummary> {
+    return this.triggerManualCapture();
+  }
+
   async startSyntheticSwing(): Promise<CaptureStatus> {
     if (!this.#captureStatus.hil.enabled) {
       throw new Error("Synthetic swing HIL is not enabled on this station");
@@ -282,6 +288,20 @@ export class FakeReviewApi implements ReviewApi {
       server_response_host_monotonic_ns: "458500000000",
     };
     return manifest;
+  }
+
+  async submitDiagnosticFeedback(
+    _sessionId: string,
+    _feedback: DiagnosticFeedback,
+  ): Promise<void> {}
+
+  async getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]> {
+    return [
+      {
+        filename: `swing-capture-${sessionId}-diagnostics.zip`,
+        data: new Blob([`fixture diagnostics for ${sessionId}`], { type: "application/zip" }),
+      },
+    ];
   }
 
   impactPreviewUrl(_sessionId: string, role: ReviewRole, revision: number): string {

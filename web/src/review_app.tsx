@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DiagnosticFeedbackPanel } from "./diagnostic_feedback.js";
 import type {
   CaptureStatus,
   ClipManifest,
@@ -160,10 +161,10 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
     }
   };
 
-  const triggerManual = async () => {
+  const saveMissedShot = async () => {
     setActionPending(true);
     try {
-      const session = await api.triggerManualCapture();
+      const session = await api.saveMissedShot();
       setCapture((current) =>
         current === null
           ? current
@@ -246,19 +247,22 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
               {capture?.armed === true ? "Disarm capture" : "Arm audio capture"}
             </button>
             <button
-              className="secondary"
+              className="save-missed-shot"
               disabled={
                 capture?.armed !== true ||
                 capture.state !== "armed" ||
                 capture.hil.busy ||
                 actionPending
               }
-              onClick={() => void triggerManual()}
+              onClick={() => void saveMissedShot()}
               type="button"
             >
-              Manual diagnostic capture
+              Save missed shot
             </button>
-            <small>Manual capture is available only while an armed pre-roll buffer is full.</small>
+            <small>
+              Act quickly: saves up to 1.4 seconds of preceding video; diagnostic audio can include
+              up to 10 seconds before this action.
+            </small>
           </div>
           {error !== null ? (
             <p className="review-error capture-error" role="alert">
@@ -362,6 +366,7 @@ export function ReviewApp({ api, pollIntervalMs = 1_000 }: ReviewAppProps) {
                 {manifest.hil_evidence !== undefined ? <span>Synthetic HIL evidence</span> : null}
               </div>
               <ReviewPlayer manifest={manifest} />
+              <DiagnosticFeedbackPanel api={api} key={manifest.session_id} manifest={manifest} />
             </>
           ) : null}
           {sessions.length === 0 && error === null ? (

@@ -38,6 +38,7 @@ public final class MainActivity extends Activity {
   private Button refreshButton;
   private Button probeButton;
   private Button retainedCaptureButton;
+  private Button warmTransitionButton;
   private Button armButton;
   private Button disarmButton;
   private Button manualTriggerButton;
@@ -45,6 +46,7 @@ public final class MainActivity extends Activity {
   private boolean configurationEditsLocallyEnabled = true;
   private boolean initialProbeRequested;
   private boolean initialRetainedCaptureRequested;
+  private boolean initialWarmTransitionRequested;
   private boolean initialContinuousHilRequested;
   private boolean initialAudioHilRequested;
   private boolean initialSoakHilRequested;
@@ -57,6 +59,8 @@ public final class MainActivity extends Activity {
     applyIntentConfiguration(getIntent());
     initialProbeRequested = getIntent().getBooleanExtra("run_probe", false);
     initialRetainedCaptureRequested = getIntent().getBooleanExtra("retain_clip", false);
+    initialWarmTransitionRequested =
+        getIntent().getBooleanExtra("run_warm_transition_hil", false);
     initialContinuousHilRequested = getIntent().getBooleanExtra("run_continuous_hil", false);
     initialAudioHilRequested = getIntent().getBooleanExtra("run_audio_hil", false);
     initialSoakHilRequested = getIntent().getBooleanExtra("run_audio_soak_hil", false);
@@ -74,6 +78,7 @@ public final class MainActivity extends Activity {
     applyIntentConfiguration(intent);
     initialProbeRequested = intent.getBooleanExtra("run_probe", false);
     initialRetainedCaptureRequested = intent.getBooleanExtra("retain_clip", false);
+    initialWarmTransitionRequested = intent.getBooleanExtra("run_warm_transition_hil", false);
     initialContinuousHilRequested = intent.getBooleanExtra("run_continuous_hil", false);
     initialAudioHilRequested = intent.getBooleanExtra("run_audio_hil", false);
     initialSoakHilRequested = intent.getBooleanExtra("run_audio_soak_hil", false);
@@ -148,6 +153,7 @@ public final class MainActivity extends Activity {
 
     networkStatus = new TextView(this);
     networkStatus.setTextSize(13.0f);
+    networkStatus.setTextIsSelectable(true);
     networkStatus.setText("Node service has not started");
     root.addView(networkStatus);
 
@@ -215,6 +221,12 @@ public final class MainActivity extends Activity {
     retainedCaptureButton.setOnClickListener(
         ignored -> runRetainedCapture(selectedCaptureRequest()));
     root.addView(retainedCaptureButton);
+
+    warmTransitionButton = new Button(this);
+    warmTransitionButton.setText("Measure 5 fps standby to 720p240 transition");
+    warmTransitionButton.setOnClickListener(
+        ignored -> runWarmHighSpeedTransition(selectedCaptureRequest()));
+    root.addView(warmTransitionButton);
 
     status = new TextView(this);
     status.setTypeface(Typeface.MONOSPACE);
@@ -311,12 +323,18 @@ public final class MainActivity extends Activity {
           getIntent().getStringExtra("shared_session_id"));
       return;
     }
-    if ((initialProbeRequested || initialRetainedCaptureRequested)
+    if ((initialProbeRequested
+            || initialRetainedCaptureRequested
+            || initialWarmTransitionRequested)
         && capturePermissionsGranted()) {
       initialProbeRequested = false;
       boolean retain = initialRetainedCaptureRequested;
+      boolean warmTransition = initialWarmTransitionRequested;
       initialRetainedCaptureRequested = false;
-      if (retain) {
+      initialWarmTransitionRequested = false;
+      if (warmTransition) {
+        runWarmHighSpeedTransition(requestFromIntent(getIntent()));
+      } else if (retain) {
         runRetainedCapture(requestFromIntent(getIntent()));
       } else {
         runHighSpeedProbe(requestFromIntent(getIntent()));
@@ -324,6 +342,7 @@ public final class MainActivity extends Activity {
     } else {
       initialProbeRequested = false;
       initialRetainedCaptureRequested = false;
+      initialWarmTransitionRequested = false;
       refreshCapabilities();
     }
   }
@@ -411,6 +430,57 @@ public final class MainActivity extends Activity {
     runCapture(request, true);
   }
 
+  private void runWarmHighSpeedTransition(HighSpeedProbe.Request request) {
+    if (status == null) {
+      return;
+    }
+    if (!capturePermissionsGranted()) {
+      status.setText("Camera permission is required for the warm transition probe.");
+      requestRuntimePermissions();
+      return;
+    }
+    setControlsEnabled(false);
+    CaptureConfigurationSnapshot captureConfiguration;
+    try {
+      captureConfiguration = configuration.captureSnapshot();
+      captureConfiguration.requireAssignedRole();
+    } catch (RuntimeException invalidConfiguration) {
+      status.setText("Capture configuration is invalid: " + invalidConfiguration.getMessage());
+      setControlsEnabled(true);
+      return;
+    }
+    status.setText(
+        "Measuring warm 5 fps standby to "
+            + request.width()
+            + "x"
+            + request.height()
+            + " / "
+            + request.framesPerSecond()
+            + " fps…");
+    worker.execute(
+        () -> {
+          try {
+            JSONObject report =
+                WarmHighSpeedTransitionProbe.run(this, captureConfiguration, request);
+            String json = report.toString(2) + "\n";
+            File file = ReportStore.writeLatest(this, json);
+            Log.i(TAG, "Warm transition report written to " + file);
+            runOnUiThread(
+                () -> {
+                  status.setText(json);
+                  setControlsEnabled(true);
+                });
+          } catch (Exception failure) {
+            Log.e(TAG, "Warm transition probe failed before producing a report", failure);
+            runOnUiThread(
+                () -> {
+                  status.setText("Warm transition probe failed: " + failure);
+                  setControlsEnabled(true);
+                });
+          }
+        });
+  }
+
   private void runCapture(HighSpeedProbe.Request request, boolean retainSession) {
     if (status == null) {
       return;
@@ -469,6 +539,7 @@ public final class MainActivity extends Activity {
     refreshButton.setEnabled(enabled);
     probeButton.setEnabled(enabled);
     retainedCaptureButton.setEnabled(enabled);
+    warmTransitionButton.setEnabled(enabled);
     updateConfigurationControls();
   }
 
@@ -510,8 +581,18 @@ public final class MainActivity extends Activity {
         urls.isEmpty()
             ? "HTTP API starting on port " + NodeHttpServer.DEFAULT_PORT
             : "HTTP API " + String.join(" · ", urls);
+    String reviewUrls =
+        urls.isEmpty()
+            ? ""
+            : "\nReview URL "
+                + String.join(
+                    " · ",
+                    urls.stream()
+                        .map(url -> url + "/?node_token=" + configuration.controlToken() + "#review")
+                        .toList());
     networkStatus.setText(
         endpoint
+            + reviewUrls
             + "\nControl credential (keep private): "
             + configuration.controlToken()
             + "\nState: "

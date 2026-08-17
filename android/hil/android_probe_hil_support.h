@@ -76,6 +76,18 @@ struct ContinuousSoakTelemetry {
   std::string diagnostic;
 };
 
+struct ContinuousStartupTimingInspection {
+  bool valid = false;
+  std::string diagnostic;
+};
+
+struct WarmTransitionTimingInspection {
+  bool valid = false;
+  std::uint64_t transition_to_first_camera_frame_ns = 0;
+  std::uint64_t transition_to_first_encoded_frame_ns = 0;
+  std::string diagnostic;
+};
+
 [[nodiscard]] bool IsCaptureRole(std::string_view role) noexcept;
 
 [[nodiscard]] std::vector<std::string> StartActivityArguments(
@@ -86,10 +98,18 @@ struct ContinuousSoakTelemetry {
     std::string_view serial, std::string_view role, const ProbeRequestConfiguration &request = {},
     bool audio_trigger = false, bool soak = false);
 
+[[nodiscard]] std::vector<std::string> StartWarmTransitionActivityArguments(
+    std::string_view serial, std::string_view role, const ProbeRequestConfiguration &request = {});
+
 [[nodiscard]] std::vector<std::string> FinishContinuousSoakActivityArguments(
     std::string_view serial);
 
 [[nodiscard]] ContinuousSoakTelemetry InspectContinuousSoakTelemetry(std::string_view report);
+
+[[nodiscard]] ContinuousStartupTimingInspection InspectContinuousStartupTiming(
+    std::string_view report);
+
+[[nodiscard]] WarmTransitionTimingInspection InspectWarmTransitionTiming(std::string_view report);
 
 [[nodiscard]] ProbeReportStatus InspectProbeReport(const ProbeReportInspection &inspection);
 

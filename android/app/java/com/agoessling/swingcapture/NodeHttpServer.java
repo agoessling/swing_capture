@@ -3,6 +3,10 @@ package com.agoessling.swingcapture;
 import android.content.Context;
 import android.os.SystemClock;
 import com.agoessling.swingcapture.core.coordination.CoordinationRecordStore;
+import com.agoessling.swingcapture.core.coordination.PairedCoordinationRecord;
+import com.agoessling.swingcapture.diagnostics.DiagnosticFeedbackRequest;
+import com.agoessling.swingcapture.diagnostics.DiagnosticIncident.TimingMark;
+import com.agoessling.swingcapture.diagnostics.DiagnosticIncident.TimingMarkKind;
 import com.agoessling.swingcapture.node.BearerAuthorization;
 import com.agoessling.swingcapture.node.CaptureRuntime;
 import com.agoessling.swingcapture.node.NodeCoordinationState;
@@ -10,6 +14,7 @@ import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -21,6 +26,8 @@ import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -29,10 +36,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -49,13 +58,18 @@ public final class NodeHttpServer {
     void setArmed(boolean armed, String sharedSessionId);
 
     String triggerManual();
+
+    String triggerMissedShot();
   }
 
   private final Context context;
   private final NodeConfiguration configuration;
   private final CaptureRuntime runtime;
   private final NodeCoordinationState coordination;
+  private final CoordinationRecordStore coordinationRecords;
   private final CoordinationHttpEndpoint coordinationEndpoint;
+  private final SessionDiagnosticStore diagnosticStore;
+  private final ReentrantLock diagnosticIoLock = new ReentrantLock();
   private final CaptureControl captureControl;
   private final int port;
   private final AtomicBoolean stopping = new AtomicBoolean();
@@ -75,7 +89,10 @@ public final class NodeHttpServer {
     this.configuration = configuration;
     this.runtime = runtime;
     this.coordination = coordination;
+    this.coordinationRecords = coordinationRecords;
     this.coordinationEndpoint = new CoordinationHttpEndpoint(coordinationRecords);
+    this.diagnosticStore =
+        new SessionDiagnosticStore(AndroidDirectorySync::synchronize);
     this.captureControl = captureControl;
     this.port = port;
   }
@@ -240,8 +257,430 @@ public final class NodeHttpServer {
         serveFile(request, output, new File(session, artifact), "video/mp4", head);
         return;
       }
+      if (artifact.equals("diagnostics.zip")) {
+        if (!requireAuthentication(request, output, head)) {
+          return;
+        }
+        if (!new File(session, "manifest.json").isFile()) {
+          writeJson(output, 404, "Not Found", errorJson("session not found"), head);
+          return;
+        }
+        if (!diagnosticIoLock.tryLock()) {
+          writeJson(
+              output,
+              409,
+              "Conflict",
+              errorJson("another diagnostic operation is in progress"),
+              head,
+              Map.of("Retry-After", "1"));
+          return;
+        }
+        File workspace = null;
+        try {
+          final File archive;
+          try {
+            workspace = createDiagnosticExportWorkspace(session, sessionId);
+            archive = new File(workspace, "diagnostics.zip");
+            SessionDiagnosticArchive.create(
+                new File(workspace, sessionId), archive, Instant.now());
+          } catch (IOException | IllegalArgumentException exportFailure) {
+            writeJson(
+                output,
+                500,
+                "Internal Server Error",
+                errorJson("diagnostic export failed"),
+                head);
+            return;
+          }
+          serveWholeFile(
+              output,
+              archive,
+              "application/zip",
+              head,
+              Map.of(
+                  "Content-Disposition",
+                  diagnosticContentDisposition(sessionId),
+                  "Cache-Control",
+                  "no-store"));
+        } finally {
+          try {
+            if (workspace != null) {
+              deleteDiagnosticExportWorkspace(workspace);
+            }
+          } finally {
+            diagnosticIoLock.unlock();
+          }
+        }
+        return;
+      }
+    }
+    if (serveStaticAsset(request, output, head)) {
+      return;
     }
     writeJson(output, 404, "Not Found", errorJson("not found"), head);
+  }
+
+  private boolean serveStaticAsset(HttpRequest request, OutputStream output, boolean head)
+      throws IOException {
+    StaticWebAssetRoute.Result route = StaticWebAssetRoute.resolve(request.path);
+    if (route == null) {
+      return false;
+    }
+
+    final byte[] body;
+    try (InputStream input = context.getAssets().open(route.assetPath())) {
+      body = input.readAllBytes();
+    } catch (FileNotFoundException missingAsset) {
+      return false;
+    }
+    writeHeaders(
+        output,
+        200,
+        "OK",
+        route.contentType(),
+        body.length,
+        Map.of(
+            "Cache-Control", route.cacheControl(),
+            "X-Content-Type-Options", "nosniff"));
+    if (!head) {
+      output.write(body);
+    }
+    return true;
+  }
+
+  private File createDiagnosticExportWorkspace(File session, String sessionId)
+      throws IOException {
+    File exportRoot = new File(context.getCacheDir(), "diagnostic_exports");
+    if (Files.isSymbolicLink(exportRoot.toPath())) {
+      throw new IOException("diagnostic export root cannot be a symbolic link");
+    }
+    if (!exportRoot.isDirectory() && !exportRoot.mkdir()) {
+      throw new IOException("unable to create diagnostic export root");
+    }
+    if (!exportRoot
+        .getCanonicalFile()
+        .getParentFile()
+        .equals(context.getCacheDir().getCanonicalFile())) {
+      throw new IOException("diagnostic export root escapes the app cache");
+    }
+
+    File workspace = Files.createTempDirectory(exportRoot.toPath(), "request-").toFile();
+    File stagedSession = new File(workspace, sessionId);
+    if (!stagedSession.mkdir()) {
+      throw new IOException("unable to create diagnostic export staging directory");
+    }
+    try {
+      ensureDiagnosticIncident(session, sessionId);
+      stageDiagnosticTree(session, session, stagedSession);
+      stageCoordinationRecord(session, sessionId, stagedSession);
+      return workspace;
+    } catch (IOException | RuntimeException failure) {
+      try {
+        deleteDiagnosticExportWorkspace(workspace);
+      } catch (IOException cleanupFailure) {
+        failure.addSuppressed(cleanupFailure);
+      }
+      throw failure;
+    }
+  }
+
+  private static void stageDiagnosticTree(File root, File source, File destination)
+      throws IOException {
+    if (Files.isSymbolicLink(source.toPath())) {
+      throw new IOException("diagnostic session contains a symbolic link");
+    }
+    if (!source.getCanonicalPath().startsWith(root.getCanonicalPath() + File.separator)
+        && !source.getCanonicalFile().equals(root.getCanonicalFile())) {
+      throw new IOException("diagnostic session entry escapes its root");
+    }
+    if (source.isDirectory()) {
+      File[] children = source.listFiles();
+      if (children == null) {
+        throw new IOException("unable to enumerate diagnostic session");
+      }
+      for (File child : children) {
+        File stagedChild = new File(destination, child.getName());
+        if (child.isDirectory() && !stagedChild.mkdir()) {
+          throw new IOException("unable to create diagnostic staging directory");
+        }
+        stageDiagnosticTree(root, child, stagedChild);
+      }
+      return;
+    }
+    if (!source.isFile()) {
+      throw new IOException("diagnostic session contains a non-file entry");
+    }
+    try {
+      Files.createLink(destination.toPath(), source.toPath());
+    } catch (IOException | UnsupportedOperationException hardLinkUnavailable) {
+      Files.copy(source.toPath(), destination.toPath());
+    }
+  }
+
+  private void stageCoordinationRecord(File session, String sessionId, File stagedSession)
+      throws IOException {
+    final JSONObject manifest;
+    try {
+      manifest = new JSONObject(readFile(new File(session, "manifest.json")));
+      if (!sessionId.equals(manifest.getString("session_id"))) {
+        throw new IOException("diagnostic manifest belongs to another session");
+      }
+    } catch (org.json.JSONException malformed) {
+      throw new IOException("diagnostic manifest is malformed", malformed);
+    }
+    JSONObject androidCapture = manifest.optJSONObject("android_capture");
+    if (androidCapture == null
+        || !androidCapture.has("shared_session_id")
+        || androidCapture.isNull("shared_session_id")) {
+      return;
+    }
+    String sharedSessionId;
+    try {
+      sharedSessionId = androidCapture.getString("shared_session_id");
+    } catch (org.json.JSONException malformed) {
+      throw new IOException("diagnostic shared session identifier is malformed", malformed);
+    }
+    Optional<CoordinationRecordStore.VersionedRecord> stored =
+        coordinationRecords.read(sharedSessionId);
+    if (stored.isEmpty()) {
+      return;
+    }
+    PairedCoordinationRecord record = stored.orElseThrow().record();
+    String sourceNodeId;
+    try {
+      sourceNodeId = androidCapture.getString("node_id");
+    } catch (org.json.JSONException malformed) {
+      throw new IOException("diagnostic node identifier is malformed", malformed);
+    }
+    boolean matchesLocalEvidence =
+        matchesLocalEvidence(record.downTheLine(), sessionId, sourceNodeId)
+            || matchesLocalEvidence(record.faceOn(), sessionId, sourceNodeId);
+    if (!matchesLocalEvidence) {
+      throw new IOException("coordination record does not contain the exported local session");
+    }
+    File supplemental = new File(stagedSession, "coordination_record.json");
+    if (supplemental.exists()) {
+      throw new IOException("diagnostic session contains a reserved coordination artifact");
+    }
+    Files.write(
+        supplemental.toPath(), (record.toJson() + "\n").getBytes(StandardCharsets.UTF_8));
+  }
+
+  private static boolean matchesLocalEvidence(
+      PairedCoordinationRecord.NodeEvidence evidence, String sessionId, String nodeId) {
+    return evidence.localSessionId().equals(sessionId) && evidence.nodeId().equals(nodeId);
+  }
+
+  private void ensureDiagnosticIncident(File session, String sessionId) throws IOException {
+    File incident = new File(session, SessionDiagnosticStore.FILE_NAME);
+    if (incident.isFile()) {
+      return;
+    }
+    final JSONObject manifest;
+    try {
+      manifest = new JSONObject(readFile(new File(session, "manifest.json")));
+      if (!sessionId.equals(manifest.getString("session_id"))) {
+        throw new IOException("diagnostic manifest belongs to another session");
+      }
+      JSONObject androidCapture = manifest.optJSONObject("android_capture");
+      String sourceNodeId =
+          androidCapture == null
+              ? configuration.nodeId()
+              : androidCapture.optString("node_id", configuration.nodeId());
+      diagnosticStore.initialize(
+          session,
+          sessionId,
+          sourceNodeId,
+          manifest.getJSONObject("trigger").getString("source"),
+          Instant.parse(manifest.getString("created_at_utc")).toEpochMilli());
+    } catch (IOException failure) {
+      throw failure;
+    } catch (Exception malformed) {
+      throw new IOException(
+          "unable to initialize diagnostics from the session manifest", malformed);
+    }
+  }
+
+  private static void validateDiagnosticFeedbackTiming(
+      File session, DiagnosticFeedbackRequest feedback) throws IOException {
+    if (feedback.timingMarks().isEmpty()) {
+      return;
+    }
+    final JSONObject manifest;
+    try {
+      manifest = new JSONObject(readFile(new File(session, "manifest.json")));
+    } catch (org.json.JSONException malformed) {
+      throw new IOException("diagnostic manifest is malformed", malformed);
+    }
+
+    DiagnosticTimingBounds videoBounds = null;
+    DiagnosticTimingBounds audioBounds = null;
+    boolean audioBoundsLoaded = false;
+    for (TimingMark mark : feedback.timingMarks()) {
+      if (mark.kind() == TimingMarkKind.HIGH_SPEED_SHOULD_START
+          || mark.kind() == TimingMarkKind.VISUAL_BALL_IMPACT) {
+        if (videoBounds == null) {
+          videoBounds = diagnosticVideoTimingBounds(manifest);
+        }
+        videoBounds.requireContains(mark.offsetMicros(), mark.kind().wireName());
+      } else if (mark.kind() == TimingMarkKind.AUDIO_IMPACT_TRANSIENT) {
+        if (!audioBoundsLoaded) {
+          audioBounds = diagnosticAudioTimingBounds(manifest);
+          audioBoundsLoaded = true;
+        }
+        if (audioBounds == null) {
+          throw new IllegalArgumentException(
+              "audio_impact_us requires retained diagnostic audio evidence");
+        }
+        audioBounds.requireContains(mark.offsetMicros(), mark.kind().wireName());
+      }
+    }
+  }
+
+  private static DiagnosticTimingBounds diagnosticVideoTimingBounds(JSONObject manifest)
+      throws IOException {
+    try {
+      JSONArray views = manifest.getJSONArray("views");
+      if (views.length() == 0) {
+        throw new IOException("diagnostic manifest has no video views");
+      }
+      long commonMinimum = Long.MIN_VALUE;
+      long commonMaximum = Long.MAX_VALUE;
+      for (int viewIndex = 0; viewIndex < views.length(); ++viewIndex) {
+        JSONArray frames = views.getJSONObject(viewIndex).getJSONArray("frames");
+        if (frames.length() == 0) {
+          throw new IOException("diagnostic manifest video view has no frames");
+        }
+        long viewMinimum = Long.MAX_VALUE;
+        long viewMaximum = Long.MIN_VALUE;
+        for (int frameIndex = 0; frameIndex < frames.length(); ++frameIndex) {
+          long offset =
+              strictManifestInteger(
+                  frames.getJSONObject(frameIndex).get("time_from_impact_us"),
+                  "time_from_impact_us");
+          viewMinimum = Math.min(viewMinimum, offset);
+          viewMaximum = Math.max(viewMaximum, offset);
+        }
+        commonMinimum = Math.max(commonMinimum, viewMinimum);
+        commonMaximum = Math.min(commonMaximum, viewMaximum);
+      }
+      if (commonMinimum > commonMaximum) {
+        throw new IOException("diagnostic video views have no common timing window");
+      }
+      return new DiagnosticTimingBounds(commonMinimum, commonMaximum);
+    } catch (org.json.JSONException malformed) {
+      throw new IOException("diagnostic video timing metadata is malformed", malformed);
+    }
+  }
+
+  private static DiagnosticTimingBounds diagnosticAudioTimingBounds(JSONObject manifest)
+      throws IOException {
+    try {
+      JSONObject androidCapture = manifest.optJSONObject("android_capture");
+      if (androidCapture == null) {
+        return null;
+      }
+      JSONObject diagnosticEvidence = androidCapture.optJSONObject("diagnostic_evidence");
+      if (diagnosticEvidence == null
+          || !diagnosticEvidence.has("audio")
+          || diagnosticEvidence.isNull("audio")) {
+        return null;
+      }
+      JSONObject audio = diagnosticEvidence.getJSONObject("audio");
+      long firstFrame = strictManifestDecimal(audio.getString("first_frame_position"));
+      long endFrame = strictManifestDecimal(audio.getString("end_frame_position"));
+      long markerFrame = strictManifestDecimal(audio.getString("marker_frame_position"));
+      long sampleRate = strictManifestInteger(audio.get("sample_rate_hz"), "sample_rate_hz");
+      if (sampleRate <= 0
+          || firstFrame < 0
+          || endFrame <= firstFrame
+          || markerFrame < firstFrame
+          || markerFrame >= endFrame) {
+        throw new IOException("diagnostic audio timing metadata is invalid");
+      }
+      long firstOffsetNumerator =
+          Math.multiplyExact(Math.subtractExact(firstFrame, markerFrame), 1_000_000L);
+      long endOffsetNumerator =
+          Math.multiplyExact(Math.subtractExact(endFrame, markerFrame), 1_000_000L);
+      long minimumOffsetUs = ceilingDivide(firstOffsetNumerator, sampleRate);
+      long endOffsetUs = ceilingDivide(endOffsetNumerator, sampleRate);
+      return new DiagnosticTimingBounds(minimumOffsetUs, Math.subtractExact(endOffsetUs, 1));
+    } catch (org.json.JSONException | ArithmeticException malformed) {
+      throw new IOException("diagnostic audio timing metadata is malformed", malformed);
+    }
+  }
+
+  private static long strictManifestInteger(Object value, String name) throws IOException {
+    if (!(value instanceof Integer) && !(value instanceof Long)) {
+      throw new IOException(name + " must be a JSON integer");
+    }
+    return ((Number) value).longValue();
+  }
+
+  private static long strictManifestDecimal(String value) throws IOException {
+    if (!value.matches("-?(0|[1-9][0-9]*)") || value.equals("-0")) {
+      throw new IOException("diagnostic audio position is not a canonical decimal integer");
+    }
+    try {
+      return Long.parseLong(value);
+    } catch (NumberFormatException outOfRange) {
+      throw new IOException("diagnostic audio position exceeds signed 64-bit range", outOfRange);
+    }
+  }
+
+  private static long ceilingDivide(long numerator, long positiveDenominator) {
+    long quotient = Math.floorDiv(numerator, positiveDenominator);
+    return Math.floorMod(numerator, positiveDenominator) == 0 ? quotient : quotient + 1;
+  }
+
+  private record DiagnosticTimingBounds(long minimumUs, long maximumUs) {
+    private DiagnosticTimingBounds {
+      if (minimumUs > maximumUs) {
+        throw new IllegalArgumentException("diagnostic timing bounds are inverted");
+      }
+    }
+
+    private void requireContains(long offsetUs, String label) {
+      if (offsetUs < minimumUs || offsetUs > maximumUs) {
+        throw new IllegalArgumentException(
+            label
+                + " must be within retained evidence ["
+                + minimumUs
+                + ", "
+                + maximumUs
+                + "] us");
+      }
+    }
+  }
+
+  private void deleteDiagnosticExportWorkspace(File workspace) throws IOException {
+    File exportRoot = new File(context.getCacheDir(), "diagnostic_exports").getCanonicalFile();
+    File canonicalWorkspace = workspace.getCanonicalFile();
+    if (!canonicalWorkspace.getParentFile().equals(exportRoot)
+        || !canonicalWorkspace.getName().startsWith("request-")) {
+      throw new IOException("refusing to delete an unexpected diagnostic export path");
+    }
+    deleteDiagnosticExportEntry(workspace);
+  }
+
+  private static void deleteDiagnosticExportEntry(File entry) throws IOException {
+    if (Files.isSymbolicLink(entry.toPath())) {
+      throw new IOException("refusing to delete a linked diagnostic export entry");
+    }
+    if (entry.isDirectory()) {
+      File[] children = entry.listFiles();
+      if (children == null) {
+        throw new IOException("unable to enumerate diagnostic export workspace");
+      }
+      for (File child : children) {
+        deleteDiagnosticExportEntry(child);
+      }
+    }
+    Files.deleteIfExists(entry.toPath());
+  }
+
+  private static String diagnosticContentDisposition(String sessionId) {
+    return "attachment; filename=\"swing-capture-" + sessionId + ".zip\"";
   }
 
   private void routeControl(HttpRequest request, OutputStream output) throws Exception {
@@ -276,6 +715,64 @@ public final class NodeHttpServer {
         summary.put("created_at_utc", java.time.Instant.now().toString());
         summary.put("error", "");
         writeJson(output, 202, "Accepted", summary, false);
+        return;
+      }
+      if (request.path.equals("/api/v1/capture/missed-shot")) {
+        JSONObject body =
+            request.body.length == 0 ? new JSONObject() : new JSONObject(request.bodyText());
+        if (body.length() != 0) {
+          throw new IllegalArgumentException("missed-shot request body must be empty");
+        }
+        String sessionId = captureControl.triggerMissedShot();
+        JSONObject summary = new JSONObject();
+        summary.put("session_id", sessionId);
+        summary.put("state", "waiting_post_roll");
+        summary.put("created_at_utc", java.time.Instant.now().toString());
+        summary.put("error", "");
+        writeJson(output, 202, "Accepted", summary, false);
+        return;
+      }
+      String[] segments = request.path.split("/");
+      if (segments.length == 6
+          && segments[1].equals("api")
+          && segments[2].equals("v1")
+          && segments[3].equals("sessions")
+          && safeSegment(segments[4])
+          && segments[5].equals("feedback")) {
+        String sessionId = segments[4];
+        File session = new File(new File(context.getFilesDir(), "sessions"), sessionId);
+        if (!new File(session, "manifest.json").isFile()) {
+          writeJson(output, 404, "Not Found", errorJson("session not found"), false);
+          return;
+        }
+        if (!diagnosticIoLock.tryLock()) {
+          writeJson(
+              output,
+              409,
+              "Conflict",
+              errorJson("another diagnostic operation is in progress"),
+              false,
+              Map.of("Retry-After", "1"));
+          return;
+        }
+        try {
+          com.agoessling.swingcapture.diagnostics.DiagnosticIncident updated;
+          DiagnosticFeedbackRequest feedback =
+              DiagnosticFeedbackRequest.parseJson(request.bodyText());
+          validateDiagnosticFeedbackTiming(session, feedback);
+          ensureDiagnosticIncident(session, sessionId);
+          updated = diagnosticStore.applyFeedback(session, sessionId, request.body);
+          writeRawJson(output, 200, "OK", updated.toCanonicalJson(), false, Map.of());
+        } catch (IOException persistenceFailure) {
+          writeJson(
+              output,
+              500,
+              "Internal Server Error",
+              errorJson("diagnostic feedback storage failed"),
+              false);
+        } finally {
+          diagnosticIoLock.unlock();
+        }
         return;
       }
       if (request.path.equals("/api/v1/hil/synthetic-swing")) {
@@ -464,12 +961,56 @@ public final class NodeHttpServer {
     return summaries;
   }
 
+  private static void serveWholeFile(
+      OutputStream output,
+      File file,
+      String contentType,
+      boolean head,
+      Map<String, String> responseHeaders)
+      throws IOException {
+    if (!file.isFile()) {
+      writeJson(output, 404, "Not Found", errorJson("artifact not found"), head);
+      return;
+    }
+    long fileLength = file.length();
+    if (fileLength <= 0) {
+      writeJson(output, 500, "Internal Server Error", errorJson("artifact is empty"), head);
+      return;
+    }
+    writeHeaders(output, 200, "OK", contentType, fileLength, responseHeaders);
+    if (head) {
+      return;
+    }
+    try (InputStream input = new BufferedInputStream(new FileInputStream(file))) {
+      byte[] buffer = new byte[64 * 1024];
+      long remaining = fileLength;
+      while (remaining > 0) {
+        int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+        if (count < 0) {
+          throw new IOException("Artifact ended before its advertised length");
+        }
+        output.write(buffer, 0, count);
+        remaining -= count;
+      }
+    }
+  }
+
   private void serveFile(
       HttpRequest request,
       OutputStream output,
       File file,
       String contentType,
       boolean head) throws IOException {
+    serveFile(request, output, file, contentType, head, Map.of());
+  }
+
+  private void serveFile(
+      HttpRequest request,
+      OutputStream output,
+      File file,
+      String contentType,
+      boolean head,
+      Map<String, String> responseHeaders) throws IOException {
     if (!file.isFile()) {
       writeJson(output, 404, "Not Found", errorJson("artifact not found"), head);
       return;
@@ -494,7 +1035,7 @@ public final class NodeHttpServer {
           Map.of("Content-Range", "bytes */" + fileLength, "Accept-Ranges", "bytes"));
       return;
     }
-    Map<String, String> extra = new HashMap<>();
+    Map<String, String> extra = new HashMap<>(responseHeaders);
     extra.put("Accept-Ranges", "bytes");
     if (partial) {
       extra.put(
@@ -650,7 +1191,8 @@ public final class NodeHttpServer {
     headers.append("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n");
     headers.append("Access-Control-Allow-Headers: Authorization, Range, Content-Type\r\n");
     headers.append(
-        "Access-Control-Expose-Headers: Accept-Ranges, Content-Length, Content-Range, Location, "
+        "Access-Control-Expose-Headers: Accept-Ranges, Content-Disposition, Content-Length, "
+            + "Content-Range, Location, "
             + "X-Swing-Capture-Coordination-Revision, "
             + "X-Swing-Capture-Coordination-Status\r\n");
     headers.append("Connection: close\r\n");

@@ -31,6 +31,66 @@ java_test(
 )
 
 java_library(
+    name = "capture_startup_timing",
+    srcs = ["java/com/agoessling/swingcapture/CaptureStartupTiming.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "capture_startup_timing_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/CaptureStartupTimingTest.java"],
+    main_class = "com.agoessling.swingcapture.CaptureStartupTimingTest",
+    use_testrunner = False,
+    deps = [":capture_startup_timing"],
+)
+
+java_library(
+    name = "warm_capture_transition_timing",
+    srcs = ["java/com/agoessling/swingcapture/WarmCaptureTransitionTiming.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_library(
+    name = "low_rate_capture_schedule",
+    srcs = ["java/com/agoessling/swingcapture/LowRateCaptureSchedule.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "low_rate_capture_schedule_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/LowRateCaptureScheduleTest.java"],
+    main_class = "com.agoessling.swingcapture.LowRateCaptureScheduleTest",
+    use_testrunner = False,
+    deps = [":low_rate_capture_schedule"],
+)
+
+java_test(
+    name = "warm_capture_transition_timing_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/WarmCaptureTransitionTimingTest.java"],
+    main_class = "com.agoessling.swingcapture.WarmCaptureTransitionTimingTest",
+    use_testrunner = False,
+    deps = [":warm_capture_transition_timing"],
+)
+
+java_library(
+    name = "capture_startup_continuity_policy",
+    srcs = ["java/com/agoessling/swingcapture/CaptureStartupContinuityPolicy.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "capture_startup_continuity_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/CaptureStartupContinuityPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.CaptureStartupContinuityPolicyTest",
+    use_testrunner = False,
+    deps = [":capture_startup_continuity_policy"],
+)
+
+java_library(
     name = "probe_statistics",
     srcs = ["java/com/agoessling/swingcapture/ProbeStatistics.java"],
     visibility = ["//visibility:private"],
@@ -110,6 +170,21 @@ java_library(
     deps = ["//android/core/audio:pcm16_evidence_ring"],
 )
 
+java_library(
+    name = "audio_frame_marker",
+    srcs = ["java/com/agoessling/swingcapture/AudioFrameMarker.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "audio_frame_marker_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/AudioFrameMarkerTest.java"],
+    main_class = "com.agoessling.swingcapture.AudioFrameMarkerTest",
+    use_testrunner = False,
+    deps = [":audio_frame_marker"],
+)
+
 java_test(
     name = "pcm16_wav_file_test",
     size = "small",
@@ -120,6 +195,40 @@ java_test(
         "//android/core/audio:pcm16_evidence_ring",
         ":pcm16_wav_file",
     ],
+)
+
+java_library(
+    name = "diagnostic_pcm16_wav_file",
+    srcs = ["java/com/agoessling/swingcapture/DiagnosticPcm16WavFile.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/diagnostics:diagnostics_core"],
+)
+
+java_test(
+    name = "diagnostic_pcm16_wav_file_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/DiagnosticPcm16WavFileTest.java"],
+    main_class = "com.agoessling.swingcapture.DiagnosticPcm16WavFileTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        ":diagnostic_pcm16_wav_file",
+    ],
+)
+
+java_library(
+    name = "diagnostic_audio_window",
+    srcs = ["java/com/agoessling/swingcapture/DiagnosticAudioWindow.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "diagnostic_audio_window_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/DiagnosticAudioWindowTest.java"],
+    main_class = "com.agoessling.swingcapture.DiagnosticAudioWindowTest",
+    use_testrunner = False,
+    deps = [":diagnostic_audio_window"],
 )
 
 java_library(
@@ -134,6 +243,55 @@ java_test(
     main_class = "com.agoessling.swingcapture.HttpByteRangeTest",
     use_testrunner = False,
     deps = [":http_byte_range"],
+)
+
+java_library(
+    name = "static_web_asset_route",
+    srcs = ["java/com/agoessling/swingcapture/StaticWebAssetRoute.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "static_web_asset_route_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/StaticWebAssetRouteTest.java"],
+    main_class = "com.agoessling.swingcapture.StaticWebAssetRouteTest",
+    use_testrunner = False,
+    deps = [":static_web_asset_route"],
+)
+
+java_library(
+    name = "session_diagnostic_archive",
+    srcs = ["java/com/agoessling/swingcapture/SessionDiagnosticArchive.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "session_diagnostic_archive_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/SessionDiagnosticArchiveTest.java"],
+    main_class = "com.agoessling.swingcapture.SessionDiagnosticArchiveTest",
+    use_testrunner = False,
+    deps = [":session_diagnostic_archive"],
+)
+
+java_library(
+    name = "session_diagnostic_store",
+    srcs = ["java/com/agoessling/swingcapture/SessionDiagnosticStore.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/diagnostics:diagnostics_core"],
+)
+
+java_test(
+    name = "session_diagnostic_store_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/SessionDiagnosticStoreTest.java"],
+    main_class = "com.agoessling.swingcapture.SessionDiagnosticStoreTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        ":session_diagnostic_store",
+    ],
 )
 
 java_library(
@@ -264,14 +422,22 @@ java_test(
 
 android_library(
     name = "app_lib",
+    assets = ["//web:static_app"],
+    assets_dir = "static_app",
     srcs = glob(
         ["java/com/agoessling/swingcapture/*.java"],
         exclude = [
             "java/com/agoessling/swingcapture/AvcCodecDescriptor.java",
             "java/com/agoessling/swingcapture/AvcCodecDescriptorTest.java",
             "java/com/agoessling/swingcapture/AudioEvidencePolicy.java",
+            "java/com/agoessling/swingcapture/AudioFrameMarker.java",
+            "java/com/agoessling/swingcapture/AudioFrameMarkerTest.java",
             "java/com/agoessling/swingcapture/CaptureRole.java",
             "java/com/agoessling/swingcapture/CaptureRoleTest.java",
+            "java/com/agoessling/swingcapture/CaptureStartupTiming.java",
+            "java/com/agoessling/swingcapture/CaptureStartupTimingTest.java",
+            "java/com/agoessling/swingcapture/CaptureStartupContinuityPolicy.java",
+            "java/com/agoessling/swingcapture/CaptureStartupContinuityPolicyTest.java",
             "java/com/agoessling/swingcapture/CaptureProfile.java",
             "java/com/agoessling/swingcapture/CaptureProfileTest.java",
             "java/com/agoessling/swingcapture/CameraEncoderTimestampAlignment.java",
@@ -289,8 +455,14 @@ android_library(
             "java/com/agoessling/swingcapture/ContinuousCaptureContinuityException.java",
             "java/com/agoessling/swingcapture/DeviceAudioDetectorPolicy.java",
             "java/com/agoessling/swingcapture/DeviceAudioDetectorPolicyTest.java",
+            "java/com/agoessling/swingcapture/DiagnosticPcm16WavFile.java",
+            "java/com/agoessling/swingcapture/DiagnosticPcm16WavFileTest.java",
+            "java/com/agoessling/swingcapture/DiagnosticAudioWindow.java",
+            "java/com/agoessling/swingcapture/DiagnosticAudioWindowTest.java",
             "java/com/agoessling/swingcapture/HttpByteRange.java",
             "java/com/agoessling/swingcapture/HttpByteRangeTest.java",
+            "java/com/agoessling/swingcapture/LowRateCaptureSchedule.java",
+            "java/com/agoessling/swingcapture/LowRateCaptureScheduleTest.java",
             "java/com/agoessling/swingcapture/ProbeStatistics.java",
             "java/com/agoessling/swingcapture/ProbeStatisticsTest.java",
             "java/com/agoessling/swingcapture/Pcm16WavFile.java",
@@ -299,6 +471,14 @@ android_library(
             "java/com/agoessling/swingcapture/StreamingTimestampCalibratorTest.java",
             "java/com/agoessling/swingcapture/SingleViewManifestTiming.java",
             "java/com/agoessling/swingcapture/SingleViewManifestTimingTest.java",
+            "java/com/agoessling/swingcapture/SessionDiagnosticArchive.java",
+            "java/com/agoessling/swingcapture/SessionDiagnosticArchiveTest.java",
+            "java/com/agoessling/swingcapture/SessionDiagnosticStore.java",
+            "java/com/agoessling/swingcapture/SessionDiagnosticStoreTest.java",
+            "java/com/agoessling/swingcapture/StaticWebAssetRoute.java",
+            "java/com/agoessling/swingcapture/StaticWebAssetRouteTest.java",
+            "java/com/agoessling/swingcapture/WarmCaptureTransitionTiming.java",
+            "java/com/agoessling/swingcapture/WarmCaptureTransitionTimingTest.java",
         ],
     ),
     manifest = "AndroidManifest.xml",
@@ -306,23 +486,34 @@ android_library(
         "//android/core/audio:impact_timing_core",
         "//android/core/audio:pcm16_evidence_ring",
         "//android/core/coordination:coordination_record_store",
+        "//android/core/diagnostics:diagnostics_core",
         "//android/core/node:node_core",
         "//android/core/retention:encoded_access_unit_retention",
+        ":audio_frame_marker",
         ":avc_codec_descriptor",
         ":camera_encoder_timestamp_alignment",
         ":capture_configuration_policy",
         ":capture_configuration_snapshot",
         ":capture_profile",
         ":capture_role",
+        ":capture_startup_continuity_policy",
+        ":capture_startup_timing",
         ":coordination_file_text_store",
         ":coordination_http_endpoint",
         ":continuous_capture_continuity_diagnostic",
         ":device_audio_detector_policy",
+        ":diagnostic_audio_window",
+        ":diagnostic_pcm16_wav_file",
         ":http_byte_range",
+        ":low_rate_capture_schedule",
         ":pcm16_wav_file",
         ":probe_statistics",
         ":streaming_timestamp_calibrator",
         ":single_view_manifest_timing",
+        ":session_diagnostic_archive",
+        ":session_diagnostic_store",
+        ":static_web_asset_route",
+        ":warm_capture_transition_timing",
     ],
 )
 

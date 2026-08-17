@@ -36,10 +36,12 @@ using swing_capture::android::hil::ContinuousSoakTelemetry;
 using swing_capture::android::hil::DisplayPowerStateDumps;
 using swing_capture::android::hil::FinishContinuousSoakActivityArguments;
 using swing_capture::android::hil::InspectContinuousSoakTelemetry;
+using swing_capture::android::hil::InspectContinuousStartupTiming;
 using swing_capture::android::hil::InspectDisplayPowerState;
 using swing_capture::android::hil::InspectProbeReport;
 using swing_capture::android::hil::InspectRetainedManifest;
 using swing_capture::android::hil::InspectRetainedSessionReport;
+using swing_capture::android::hil::InspectWarmTransitionTiming;
 using swing_capture::android::hil::IsCaptureRole;
 using swing_capture::android::hil::ProbeReportInspection;
 using swing_capture::android::hil::ProbeReportStatus;
@@ -48,6 +50,7 @@ using swing_capture::android::hil::RetainedManifestInspection;
 using swing_capture::android::hil::RetainedSessionPaths;
 using swing_capture::android::hil::StartActivityArguments;
 using swing_capture::android::hil::StartContinuousActivityArguments;
+using swing_capture::android::hil::StartWarmTransitionActivityArguments;
 
 constexpr auto kHilDeadline = 15s;
 constexpr auto kPollInterval = 100ms;
@@ -467,19 +470,21 @@ int Run(int argument_count, char **arguments) {
   if (argument_count != 3 && argument_count != 4) {
     throw std::runtime_error(
         "expected Bazel runfile arguments: <adb> <APK> "
-        "[--retain|--continuous|--continuous-audio|--continuous-audio-screen-off|"
+        "[--retain|--warm-transition|--continuous|--continuous-audio|--continuous-audio-screen-off|"
         "--continuous-audio-soak-15m]");
   }
   const std::string_view mode = argument_count == 4 ? std::string_view(arguments[3]) : "";
+  const bool warm_transition = mode == "--warm-transition";
   const bool continuous_audio_soak = mode == "--continuous-audio-soak-15m";
   const bool continuous_audio_screen_off = mode == "--continuous-audio-screen-off";
   const bool continuous_audio =
       mode == "--continuous-audio" || continuous_audio_screen_off || continuous_audio_soak;
   const bool continuous = mode == "--continuous" || continuous_audio;
   const bool retain_session = mode == "--retain" || continuous;
-  if (!mode.empty() && !retain_session) {
+  if (!mode.empty() && !retain_session && !warm_transition) {
     throw std::runtime_error(
-        "the optional runner argument must be --retain, --continuous, --continuous-audio, "
+        "the optional runner argument must be --retain, --warm-transition, --continuous, "
+        "--continuous-audio, "
         "--continuous-audio-screen-off, or --continuous-audio-soak-15m");
   }
   const std::filesystem::path adb = std::filesystem::absolute(arguments[1]);
@@ -536,18 +541,22 @@ int Run(int argument_count, char **arguments) {
       adb, serial, continuous_audio_screen_off, preserve_lifecycle ? &lifecycle_evidence : nullptr,
       lifecycle_artifact, preserve_lifecycle ? &latest_output : nullptr, latest_report_artifact);
 
-  std::cout << "Running Android "
-            << (continuous_audio_soak
-                    ? "15-minute continuous 240 fps audio-trigger soak"
-                    : (continuous_audio_screen_off
-                           ? "continuous audio-trigger capture with the screen off"
-                           : (continuous_audio
-                                  ? "continuous audio-trigger capture"
-                                  : (continuous ? "continuous retained capture"
-                                                : (retain_session ? "bounded retained capture"
-                                                                  : "bounded probe")))))
-            << " on " << serial << " as " << role << " at " << request.width << 'x'
-            << request.height << 'p' << request.frames_per_second << std::endl;
+  std::cout
+      << "Running Android "
+      << (continuous_audio_soak
+              ? "15-minute continuous 240 fps audio-trigger soak"
+              : (continuous_audio_screen_off
+                     ? "continuous audio-trigger capture with the screen off"
+                     : (continuous_audio
+                            ? "continuous audio-trigger capture"
+                            : (continuous
+                                   ? "continuous retained capture"
+                                   : (retain_session
+                                          ? "bounded retained capture"
+                                          : (warm_transition ? "warm 5 fps to high-speed transition"
+                                                             : "bounded probe"))))))
+      << " on " << serial << " as " << role << " at " << request.width << 'x' << request.height
+      << 'p' << request.frames_per_second << std::endl;
   RunRequiredAdb(adb,
                  DeviceArguments(serial, {"install", "--no-streaming", "-r", "-t", apk.string()}),
                  deadline);
@@ -567,7 +576,9 @@ int Run(int argument_count, char **arguments) {
   RunRequiredAdb(adb,
                  continuous ? StartContinuousActivityArguments(
                                   serial, role, request, continuous_audio, continuous_audio_soak)
-                            : StartActivityArguments(serial, role, retain_session, request),
+                            : (warm_transition
+                                   ? StartWarmTransitionActivityArguments(serial, role, request)
+                                   : StartActivityArguments(serial, role, retain_session, request)),
                  deadline);
 
   std::string latest_diagnostic = "probe report has not appeared";
@@ -745,8 +756,10 @@ int Run(int argument_count, char **arguments) {
           .report = result.output,
           .expected_role = role,
           .expected_request = request,
-          .expected_report_type =
-              continuous ? "android_continuous_capture" : "android_high_speed_probe",
+          .expected_report_type = continuous
+                                      ? "android_continuous_capture"
+                                      : (warm_transition ? "android_warm_high_speed_transition"
+                                                         : "android_high_speed_probe"),
       });
       latest_diagnostic = status.diagnostic;
       if (status.complete) {
@@ -758,9 +771,11 @@ int Run(int argument_count, char **arguments) {
                 ? "android-continuous-15-minute-soak-"
                 : (continuous_audio_screen_off
                        ? "android-audio-trigger-screen-off-"
-                       : (continuous_audio ? "android-audio-trigger-"
-                                           : (continuous ? "android-continuous-capture-"
-                                                         : "android-high-speed-probe-")));
+                       : (continuous_audio
+                              ? "android-audio-trigger-"
+                              : (continuous ? "android-continuous-capture-"
+                                            : (warm_transition ? "android-warm-transition-"
+                                                               : "android-high-speed-probe-"))));
         const std::filesystem::path artifact = OutputDirectory() / (artifact_stem + role + ".json");
         WriteArtifact(artifact, result.output);
         if (preserve_lifecycle) {
@@ -769,6 +784,25 @@ int Run(int argument_count, char **arguments) {
         std::cout << "Published probe report to " << artifact << '\n';
         if (!status.passed) {
           throw std::runtime_error(status.diagnostic);
+        }
+        if (continuous) {
+          const auto startup_timing = InspectContinuousStartupTiming(result.output);
+          if (!startup_timing.valid) {
+            throw std::runtime_error(startup_timing.diagnostic);
+          }
+        }
+        if (warm_transition) {
+          const auto transition_timing = InspectWarmTransitionTiming(result.output);
+          if (!transition_timing.valid) {
+            throw std::runtime_error(transition_timing.diagnostic);
+          }
+          std::cout << "Warm transition reached the first 240 fps camera frame in "
+                    << static_cast<double>(transition_timing.transition_to_first_camera_frame_ns) /
+                           1'000'000.0
+                    << " ms and the first encoded frame in "
+                    << static_cast<double>(transition_timing.transition_to_first_encoded_frame_ns) /
+                           1'000'000.0
+                    << " ms\n";
         }
         if (retain_session) {
           const RetainedSessionPaths paths = InspectRetainedSessionReport(ProbeReportInspection{

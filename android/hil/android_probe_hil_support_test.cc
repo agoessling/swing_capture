@@ -1,6 +1,7 @@
 #include "android/hil/android_probe_hil_support.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <iterator>
 #include <string>
@@ -12,16 +13,111 @@ namespace {
 using swing_capture::android::hil::DisplayPowerStateDumps;
 using swing_capture::android::hil::FinishContinuousSoakActivityArguments;
 using swing_capture::android::hil::InspectContinuousSoakTelemetry;
+using swing_capture::android::hil::InspectContinuousStartupTiming;
 using swing_capture::android::hil::InspectDisplayPowerState;
 using swing_capture::android::hil::InspectProbeReport;
 using swing_capture::android::hil::InspectRetainedManifest;
 using swing_capture::android::hil::InspectRetainedSessionReport;
+using swing_capture::android::hil::InspectWarmTransitionTiming;
 using swing_capture::android::hil::IsCaptureRole;
 using swing_capture::android::hil::ProbeReportInspection;
 using swing_capture::android::hil::ProbeRequestConfiguration;
 using swing_capture::android::hil::RetainedManifestInspection;
 using swing_capture::android::hil::StartActivityArguments;
 using swing_capture::android::hil::StartContinuousActivityArguments;
+using swing_capture::android::hil::StartWarmTransitionActivityArguments;
+
+std::string ValidContinuousStartupReport() {
+  return R"({
+    "report_type":"android_continuous_capture",
+    "complete":true,
+    "role":"face_on",
+    "passed":true,
+    "startup_timing":{
+      "arm_requested_elapsed_realtime_ns":"100",
+      "engine_started_elapsed_realtime_ns":"120",
+      "first_camera_frame_elapsed_realtime_ns":"210",
+      "first_usable_encoded_frame_elapsed_realtime_ns":"260",
+      "full_pre_roll_ready_elapsed_realtime_ns":"2800",
+      "arm_to_engine_start_ns":"20",
+      "arm_to_first_camera_frame_ns":"110",
+      "arm_to_first_usable_encoded_frame_ns":"160",
+      "arm_to_full_pre_roll_ready_ns":"2700",
+      "first_usable_encoded_frame_to_full_pre_roll_ready_ns":"2540",
+      "startup_continuity_reset_count":"0",
+      "maximum_startup_continuity_gap_ns":"0"
+    }
+  })";
+}
+
+std::string ValidWarmTransitionReport() {
+  return R"({
+    "report_type":"android_warm_high_speed_transition",
+    "complete":true,
+    "role":"face_on",
+    "passed":true,
+    "standby":{
+      "width":640,
+      "height":360,
+      "requested_interval_ms":200,
+      "sensor_timestamps":{
+        "count":6,
+        "first":"1000000000",
+        "last":"2000000000",
+        "maximum_gap":"210000000"
+      }
+    },
+    "high_speed_camera":{
+      "camera_open_count":1,
+      "sensor_timestamps":{"count":700},
+      "transition_timing":{
+        "transition_requested_elapsed_realtime_ns":"100",
+        "encoder_started_elapsed_realtime_ns":"120",
+        "standby_session_closed_elapsed_realtime_ns":"160",
+        "high_speed_session_configured_elapsed_realtime_ns":"240",
+        "first_high_speed_camera_frame_elapsed_realtime_ns":"260",
+        "first_usable_encoded_frame_elapsed_realtime_ns":"310",
+        "transition_to_encoder_start_ns":"20",
+        "transition_to_standby_session_closed_ns":"60",
+        "transition_to_high_speed_session_configured_ns":"140",
+        "transition_to_first_high_speed_camera_frame_ns":"160",
+        "transition_to_first_usable_encoded_frame_ns":"210"
+      }
+    },
+    "encoder":{
+      "acceptance_presentation_timestamps":{
+        "count":690,
+        "first":"1000000",
+        "last":"3880000",
+        "maximum_gap":"5000"
+      }
+    }
+  })";
+}
+
+std::string ReplaceFieldValue(std::string report, std::string_view field,
+                              std::string_view replacement) {
+  const std::string marker = "\"" + std::string(field) + "\":\"";
+  const std::size_t marker_position = report.find(marker);
+  assert(marker_position != std::string::npos);
+  const std::size_t value_position = marker_position + marker.size();
+  const std::size_t value_end = report.find('"', value_position);
+  assert(value_end != std::string::npos);
+  report.replace(value_position, value_end - value_position, replacement);
+  return report;
+}
+
+std::string UnquoteFieldValue(std::string report, std::string_view field) {
+  const std::string marker = "\"" + std::string(field) + "\":\"";
+  const std::size_t marker_position = report.find(marker);
+  assert(marker_position != std::string::npos);
+  const std::size_t value_position = marker_position + marker.size();
+  const std::size_t value_end = report.find('"', value_position);
+  assert(value_end != std::string::npos);
+  report.erase(value_end, 1U);
+  report.erase(value_position - 1U, 1U);
+  return report;
+}
 
 void TestCaptureRoles() {
   assert(IsCaptureRole("down_the_line"));
@@ -104,6 +200,40 @@ void TestActivityArguments() {
       FinishContinuousSoakActivityArguments("example-serial");
   assert(std::ranges::find(finish_arguments, "--activity-single-top") != finish_arguments.end());
   assert(std::ranges::find(finish_arguments, "finish_audio_soak_hil") != finish_arguments.end());
+
+  const std::vector<std::string> warm_arguments =
+      StartWarmTransitionActivityArguments("example-serial", "face_on");
+  assert(std::ranges::find(warm_arguments, "run_warm_transition_hil") != warm_arguments.end());
+  assert(std::ranges::find(warm_arguments, "run_probe") == warm_arguments.end());
+}
+
+void TestWarmTransitionTiming() {
+  const std::string valid_report = ValidWarmTransitionReport();
+  const auto valid = InspectWarmTransitionTiming(valid_report);
+  assert(valid.valid);
+  assert(valid.transition_to_first_camera_frame_ns == 160U);
+  assert(valid.transition_to_first_encoded_frame_ns == 210U);
+
+  assert(!InspectWarmTransitionTiming(
+              ReplaceFieldValue(valid_report, "encoder_started_elapsed_realtime_ns", "99"))
+              .valid);
+  assert(!InspectWarmTransitionTiming(
+              ReplaceFieldValue(valid_report, "transition_to_first_usable_encoded_frame_ns", "211"))
+              .valid);
+  assert(!InspectWarmTransitionTiming(
+              ReplaceFieldValue(valid_report, "first_usable_encoded_frame_elapsed_realtime_ns",
+                                "+310"))
+              .valid);
+
+  std::string wrong_open_count = valid_report;
+  const std::string marker = "\"camera_open_count\":1";
+  const std::size_t marker_position = wrong_open_count.find(marker);
+  assert(marker_position != std::string::npos);
+  wrong_open_count.replace(marker_position, marker.size(), "\"camera_open_count\":2");
+  assert(!InspectWarmTransitionTiming(wrong_open_count).valid);
+
+  assert(!InspectWarmTransitionTiming(ReplaceFieldValue(valid_report, "maximum_gap", "300000001"))
+              .valid);
 }
 
 void TestContinuousSoakTelemetry() {
@@ -141,6 +271,89 @@ void TestContinuousSoakTelemetry() {
     }
   })";
   assert(!InspectContinuousSoakTelemetry(missing_ring).valid);
+}
+
+void TestContinuousStartupTiming() {
+  const std::string valid_report = ValidContinuousStartupReport();
+  const auto valid = InspectContinuousStartupTiming(valid_report);
+  assert(valid.valid);
+
+  std::string reset_report = ReplaceFieldValue(valid_report, "startup_continuity_reset_count", "2");
+  reset_report = ReplaceFieldValue(reset_report, "maximum_startup_continuity_gap_ns", "20000001");
+  assert(InspectContinuousStartupTiming(reset_report).valid);
+
+  const auto missing = InspectContinuousStartupTiming(
+      R"({"report_type":"android_continuous_capture","passed":true})");
+  assert(!missing.valid);
+
+  constexpr std::array<std::string_view, 5> absolute_fields = {
+      "arm_requested_elapsed_realtime_ns",       "engine_started_elapsed_realtime_ns",
+      "first_camera_frame_elapsed_realtime_ns",  "first_usable_encoded_frame_elapsed_realtime_ns",
+      "full_pre_roll_ready_elapsed_realtime_ns",
+  };
+  for (const std::string_view field : absolute_fields) {
+    assert(
+        !InspectContinuousStartupTiming(ReplaceFieldValue(valid_report, field, "invalid")).valid);
+  }
+  assert(!InspectContinuousStartupTiming(
+              UnquoteFieldValue(valid_report, "arm_requested_elapsed_realtime_ns"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "arm_requested_elapsed_realtime_ns", "+100"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "arm_requested_elapsed_realtime_ns", "0100"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "arm_requested_elapsed_realtime_ns", "-1"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(ReplaceFieldValue(valid_report,
+                                                           "arm_requested_elapsed_realtime_ns",
+                                                           "9223372036854775808"))
+              .valid);
+
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "engine_started_elapsed_realtime_ns", "99"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "first_camera_frame_elapsed_realtime_ns", "119"))
+              .valid);
+  assert(
+      !InspectContinuousStartupTiming(
+           ReplaceFieldValue(valid_report, "first_usable_encoded_frame_elapsed_realtime_ns", "209"))
+           .valid);
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "full_pre_roll_ready_elapsed_realtime_ns", "259"))
+              .valid);
+
+  constexpr std::array<std::string_view, 5> duration_fields = {
+      "arm_to_engine_start_ns",
+      "arm_to_first_camera_frame_ns",
+      "arm_to_first_usable_encoded_frame_ns",
+      "arm_to_full_pre_roll_ready_ns",
+      "first_usable_encoded_frame_to_full_pre_roll_ready_ns",
+  };
+  for (const std::string_view field : duration_fields) {
+    assert(!InspectContinuousStartupTiming(ReplaceFieldValue(valid_report, field, "1")).valid);
+  }
+  assert(!InspectContinuousStartupTiming(UnquoteFieldValue(valid_report, "arm_to_engine_start_ns"))
+              .valid);
+
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "startup_continuity_reset_count", "1"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "maximum_startup_continuity_gap_ns", "1"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "startup_continuity_reset_count", "-1"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(
+              ReplaceFieldValue(valid_report, "maximum_startup_continuity_gap_ns", "1.0"))
+              .valid);
+  assert(!InspectContinuousStartupTiming(
+              UnquoteFieldValue(valid_report, "startup_continuity_reset_count"))
+              .valid);
 }
 
 void TestRetainedSessionInspection() {
@@ -351,6 +564,8 @@ int main() {
   TestCaptureRoles();
   TestActivityArguments();
   TestContinuousSoakTelemetry();
+  TestContinuousStartupTiming();
+  TestWarmTransitionTiming();
   TestReportInspection();
   TestRetainedSessionInspection();
   TestDisplayPowerStateInspection();

@@ -67,6 +67,7 @@ public final class CaptureForegroundService extends Service
   private volatile int soakIncidentalTriggerCount;
   private volatile String soakLastIncidentalSessionId = "";
   private volatile long lastSoakTelemetryElapsedRealtimeNanos;
+  private volatile long armRequestedElapsedRealtimeNanos;
   private volatile boolean captureReady;
   private volatile float audioPeakAmplitude;
   private volatile float audioNoiseFloor;
@@ -189,6 +190,7 @@ public final class CaptureForegroundService extends Service
       COORDINATION.armed(sharedSessionId);
       RUNTIME.starting();
       activeCaptureConfiguration = requestedConfiguration;
+      armRequestedElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
     }
     updateNotification("Starting camera, microphone, and encoded pre-roll…");
     controlExecutor.execute(this::startCapture);
@@ -196,12 +198,24 @@ public final class CaptureForegroundService extends Service
 
   @Override
   public String triggerManual() {
+    return triggerOperatorCapture(false);
+  }
+
+  @Override
+  public String triggerMissedShot() {
+    return triggerOperatorCapture(true);
+  }
+
+  private String triggerOperatorCapture(boolean missedShot) {
     ContinuousCaptureEngine current = engine;
     if (current == null || RUNTIME.snapshot().state() != CaptureRuntime.State.ARMED) {
       throw new IllegalStateException("capture is not armed with a full pre-roll");
     }
     String sessionId = newSessionId();
-    ContinuousCaptureEngine.TriggerAttempt attempt = current.triggerManual(sessionId);
+    ContinuousCaptureEngine.TriggerAttempt attempt =
+        missedShot
+            ? current.triggerMissedShot(sessionId)
+            : current.triggerManual(sessionId);
     if (!attempt.accepted()) {
       throw new IllegalStateException(attempt.diagnostic());
     }
@@ -280,6 +294,7 @@ public final class CaptureForegroundService extends Service
 
   @Override
   public void onPublished(String sessionId) {
+    boolean operatorCapture = !continuousHilRequested;
     RUNTIME.published(sessionId);
     updateNotification("Armed: last published " + sessionId);
     if (continuousHilRequested) {
@@ -301,6 +316,12 @@ public final class CaptureForegroundService extends Service
       }
     } catch (Exception failure) {
       Log.e(TAG, "Unable to enforce session retention", failure);
+    }
+    if (operatorCapture) {
+      // A shared session ID identifies exactly one physical swing. Stopping after publication
+      // forces the browser coordinator to provision a fresh ID to both nodes before the next
+      // shot instead of silently associating later clips with stale trigger evidence.
+      controlExecutor.execute(this::stopCapture);
     }
   }
 
@@ -537,7 +558,45 @@ public final class CaptureForegroundService extends Service
               .put("incidental_trigger_count", soakIncidentalTriggerCount)
               .put("last_incidental_session_id", soakLastIncidentalSessionId));
     }
+    ContinuousCaptureEngine current = engine;
+    if (current != null) {
+      CaptureStartupTiming startupTiming =
+          current.startupTiming(armRequestedElapsedRealtimeNanos).orElse(null);
+      if (startupTiming != null) {
+        report.put(
+            "startup_timing",
+            startupTimingJson(startupTiming)
+                .put(
+                    "startup_continuity_reset_count",
+                    Long.toString(current.startupContinuityResetCount()))
+                .put(
+                    "maximum_startup_continuity_gap_ns",
+                    Long.toString(current.maximumStartupContinuityGapNanos())));
+      }
+    }
     return report;
+  }
+
+  private static JSONObject startupTimingJson(CaptureStartupTiming timing) throws Exception {
+    return new JSONObject()
+        .put("arm_requested_elapsed_realtime_ns", Long.toString(timing.armRequestedNs()))
+        .put("engine_started_elapsed_realtime_ns", Long.toString(timing.engineStartedNs()))
+        .put("first_camera_frame_elapsed_realtime_ns", Long.toString(timing.firstCameraFrameNs()))
+        .put(
+            "first_usable_encoded_frame_elapsed_realtime_ns",
+            Long.toString(timing.firstUsableEncodedFrameNs()))
+        .put(
+            "full_pre_roll_ready_elapsed_realtime_ns",
+            Long.toString(timing.fullPreRollReadyNs()))
+        .put("arm_to_engine_start_ns", Long.toString(timing.armToEngineStartNs()))
+        .put("arm_to_first_camera_frame_ns", Long.toString(timing.armToFirstCameraFrameNs()))
+        .put(
+            "arm_to_first_usable_encoded_frame_ns",
+            Long.toString(timing.armToFirstUsableEncodedFrameNs()))
+        .put("arm_to_full_pre_roll_ready_ns", Long.toString(timing.armToFullPreRollReadyNs()))
+        .put(
+            "first_usable_encoded_frame_to_full_pre_roll_ready_ns",
+            Long.toString(timing.firstUsableEncodedFrameToFullPreRollReadyNs()));
   }
 
   private JSONObject runtimeTelemetry() throws Exception {

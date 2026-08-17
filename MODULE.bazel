@@ -94,6 +94,24 @@ python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.defaults(python_version = "3.11.14")
 python.toolchain(python_version = "3.11.14")
 
+pose_inference_pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pose_inference_pip.parse(
+    hub_name = "pose_inference_pip",
+    python_version = "3.11",
+    requirements_lock = "//tools/pose_inference:requirements_lock.txt",
+)
+use_repo(pose_inference_pip, "pose_inference_pip")
+
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+http_file(
+    name = "pose_landmarker_lite_task",
+    downloaded_file_path = "pose_landmarker_lite.task",
+    integrity = "sha256-WZKeHR7pUodzXd2DOxnPSsRtKbx6/du/Z1PEWWkNV0o=",
+    urls = [
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+    ],
+)
+
 register_toolchains(
     "@pico-sdk//bazel/toolchain:linux-x86_64-rp2040",
 )

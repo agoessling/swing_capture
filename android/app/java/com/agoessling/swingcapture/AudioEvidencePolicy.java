@@ -2,7 +2,7 @@ package com.agoessling.swingcapture;
 
 import com.agoessling.swingcapture.audio.Pcm16EvidenceRing;
 
-/** Pure allocation and publication policy that keeps PCM evidence exclusive to audio HIL. */
+/** Pure allocation and publication policy that keeps exact PCM evidence exclusive to audio HIL. */
 public final class AudioEvidencePolicy {
   public static final int RETENTION_SECONDS = 4;
   public static final int RETENTION_FRAMES =
