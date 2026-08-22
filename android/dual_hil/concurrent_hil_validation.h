@@ -19,11 +19,20 @@ struct ArmedStatusInspection {
   std::string_view shared_session_id;
 };
 
+struct PoseConfiguredDescriptorInspection {
+  std::string_view descriptor_json;
+  NodeApiIdentity identity;
+  std::string_view expected_mode;
+  bool expected_peer_configured = false;
+};
+
 [[nodiscard]] NodeApiIdentity ValidateNodeDescriptor(
     std::string_view descriptor_json, dual_coordination_hil::CaptureRole expected_role,
     std::string_view expected_profile);
 
 void ValidateArmedCaptureStatus(const ArmedStatusInspection &inspection);
+
+void ValidatePoseConfiguredNodeDescriptor(const PoseConfiguredDescriptorInspection &inspection);
 
 [[nodiscard]] dual_coordination_hil::TriggerReport ValidateTriggerReport(
     std::string_view trigger_report_json, const NodeApiIdentity &identity,
@@ -33,6 +42,10 @@ void ValidateArmedCaptureStatus(const ArmedStatusInspection &inspection);
 // framing newline. Replay must otherwise be byte-for-byte identical.
 void ValidateCanonicalCoordinationReplay(std::string_view response_body,
                                          std::string_view canonical_json);
+
+// Validates the transportable evidence contract emitted by the paired pose-arm HIL. The physical
+// runner calls this immediately before publishing its successful aggregate report.
+void ValidatePairedPoseHilReport(std::string_view report_json);
 
 }  // namespace swing_capture::android::dual_hil
 

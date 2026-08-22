@@ -5,9 +5,11 @@ import com.agoessling.swingcapture.node.SessionRetentionPlanner;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import org.json.JSONObject;
 
 /** Validated app-private session expiry after successful atomic publication. */
 public final class SessionStorage {
@@ -17,12 +19,15 @@ public final class SessionStorage {
 
   private SessionStorage() {}
 
-  public static List<String> enforceRetention(Context context, Set<String> protectedIds)
+  public static synchronized List<String> enforceRetention(
+      Context context, Set<String> protectedIds)
       throws IOException {
     File root = new File(context.getFilesDir(), "sessions");
     if (!root.isDirectory()) {
       return List.of();
     }
+    SessionStagingCleanup.cleanupStale(
+        root, System.currentTimeMillis(), SessionStagingCleanup.DEFAULT_STALE_AGE_MILLIS);
     List<SessionRetentionPlanner.Entry> entries = new ArrayList<>();
     long totalBytes = 0;
     File[] children = root.listFiles();
@@ -36,7 +41,8 @@ public final class SessionStorage {
       long bytes = treeBytes(child);
       totalBytes = saturatedAdd(totalBytes, bytes);
       entries.add(
-          new SessionRetentionPlanner.Entry(child.getName(), child.lastModified(), bytes));
+          new SessionRetentionPlanner.Entry(
+              child.getName(), child.lastModified(), bytes, retentionClass(child)));
     }
     long freeDeficit = Math.max(0, MINIMUM_FREE_BYTES - root.getUsableSpace());
     long spaceBudget = Math.max(1, totalBytes - freeDeficit);
@@ -54,6 +60,22 @@ public final class SessionStorage {
       deleted.add(sessionId);
     }
     return List.copyOf(deleted);
+  }
+
+  private static SessionRetentionPlanner.RetentionClass retentionClass(File session) {
+    try {
+      JSONObject manifest =
+          new JSONObject(
+              new String(
+                  Files.readAllBytes(new File(session, "manifest.json").toPath()),
+                  StandardCharsets.UTF_8));
+      if ("standby_diagnostic".equals(manifest.optString("session_kind"))) {
+        return SessionRetentionPlanner.RetentionClass.DIAGNOSTIC;
+      }
+    } catch (Exception malformed) {
+      // Unknown or legacy data is conservatively protected as a primary capture.
+    }
+    return SessionRetentionPlanner.RetentionClass.PRIMARY_CAPTURE;
   }
 
   private static boolean isPublishedSessionDirectory(File root, File candidate)

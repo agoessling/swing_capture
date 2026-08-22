@@ -1,0 +1,112 @@
+load("@rules_android//android:rules.bzl", "android_binary", "android_library")
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+package(default_visibility = ["//visibility:public"])
+
+platform(
+    name = "android_arm64",
+    constraint_values = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:android",
+    ],
+)
+
+genrule(
+    name = "pose_landmarker_lite_asset",
+    srcs = ["@pose_landmarker_lite_task//file"],
+    outs = ["assets/pose_landmarker_lite.task"],
+    cmd = "cp $(location @pose_landmarker_lite_task//file) $@",
+)
+
+java_library(
+    name = "pose_inference_core",
+    srcs = [
+        "java/com/agoessling/swingcapture/pose/inference/FiveHertzFrameGate.java",
+        "java/com/agoessling/swingcapture/pose/inference/I420Frame.java",
+        "java/com/agoessling/swingcapture/pose/inference/I420ToRgb.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseFrameInference.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseFrameSource.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseInferenceDelegate.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseInferenceDelegatePolicy.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseInferenceMetrics.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseInferencePipeline.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseInferenceTrace.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseReplayConfiguration.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseReplayEvaluation.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseReplayReport.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseReplayReportValidator.java",
+        "java/com/agoessling/swingcapture/pose/inference/RgbFrame.java",
+        "java/com/agoessling/swingcapture/pose/inference/StrideAwareYuv420ToRgb.java",
+    ],
+    deps = [
+        "//android/core/pose:pose_landmark_features",
+        "//android/core/pose:pose_trigger_core",
+    ],
+)
+
+java_test(
+    name = "pose_inference_core_test",
+    size = "small",
+    srcs = [
+        "test/com/agoessling/swingcapture/pose/inference/PoseInferenceCoreTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.pose.inference.PoseInferenceCoreTest",
+    use_testrunner = False,
+    deps = [
+        ":pose_inference_core",
+        "//android/core/pose:pose_landmark_features",
+        "//android/core/pose:pose_trigger_core",
+    ],
+)
+
+java_test(
+    name = "pose_replay_support_test",
+    size = "small",
+    srcs = [
+        "test/com/agoessling/swingcapture/pose/inference/PoseReplaySupportTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.pose.inference.PoseReplaySupportTest",
+    use_testrunner = False,
+    deps = [
+        ":pose_inference_core",
+        "//android/core/pose:pose_landmark_features",
+        "//android/core/pose:pose_trigger_core",
+    ],
+)
+
+java_test(
+    name = "media_codec_replay_frame_source_contract_test",
+    size = "small",
+    srcs = [
+        "test/com/agoessling/swingcapture/pose/inference/MediaCodecReplayFrameSourceContractTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.pose.inference.MediaCodecReplayFrameSourceContractTest",
+    use_testrunner = False,
+    deps = [":pose_inference_android"],
+)
+
+android_library(
+    name = "pose_inference_android",
+    assets = [":pose_landmarker_lite_asset"],
+    assets_dir = "assets",
+    manifest = "AndroidManifest.xml",
+    srcs = [
+        "java/com/agoessling/swingcapture/pose/inference/MediaCodecReplayFrameSource.java",
+        "java/com/agoessling/swingcapture/pose/inference/MediaPipePoseLandmarker.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseReplayHilRunner.java",
+    ],
+    deps = [
+        ":pose_inference_core",
+        "//android/core/pose:pose_landmark_features",
+        "//android/core/pose:pose_trigger_core",
+        "@mediapipe_android//:com_google_mediapipe_tasks_vision",
+    ],
+)
+
+android_binary(
+    name = "pose_inference_packaging_fixture",
+    manifest = "fixture/AndroidManifest.xml",
+    tags = ["manual"],
+    deps = [":pose_inference_android"],
+)

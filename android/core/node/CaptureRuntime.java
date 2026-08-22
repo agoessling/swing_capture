@@ -120,6 +120,19 @@ public final class CaptureRuntime {
     error = "";
   }
 
+  /** Moves an armed low-rate standby node into its high-speed startup transition. */
+  public synchronized void transitioningToHighSpeed() {
+    require(state == State.ARMED, "pose standby is not armed");
+    state = State.STARTING;
+    armed = false;
+    activeSessionId = null;
+    error = "";
+    videoFrames = 0;
+    audioFrames = 0;
+    ringBytes = 0;
+    ringDurationUs = 0;
+  }
+
   public synchronized void updateRing(
       long videoFrames, long audioFrames, long ringBytes, long ringDurationUs) {
     require(videoFrames >= 0, "videoFrames must be nonnegative");

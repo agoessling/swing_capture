@@ -1,0 +1,46 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+package(default_visibility = ["//visibility:public"])
+
+java_library(
+    name = "standby_diagnostic_core",
+    srcs = [
+        "java/com/agoessling/swingcapture/standby/StandbyDiagnosticCoordinator.java",
+        "java/com/agoessling/swingcapture/standby/StandbyDiagnosticManifest.java",
+    ],
+    deps = [
+        "//android/core/audio:impact_timing_core",
+        "//android/core/diagnostics:diagnostics_core",
+    ],
+)
+
+java_test(
+    name = "standby_diagnostic_manifest_test",
+    size = "small",
+    srcs = [
+        "java/com/agoessling/swingcapture/standby/StandbyDiagnosticManifestTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.standby.StandbyDiagnosticManifestTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/audio:impact_timing_core",
+        "//android/core/diagnostics:diagnostics_core",
+        ":standby_diagnostic_core",
+    ],
+)
+
+java_test(
+    name = "standby_diagnostic_coordinator_test",
+    size = "small",
+    srcs = [
+        "java/com/agoessling/swingcapture/standby/StandbyDiagnosticCoordinatorTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.standby.StandbyDiagnosticCoordinatorTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/audio:impact_timing_core",
+        "//android/core/diagnostics:diagnostics_core",
+        ":standby_diagnostic_core",
+    ],
+)

@@ -33,7 +33,7 @@ public final class StaticWebAssetRoute {
       if (segment.equals(".") || segment.equals("..") || !isSafeSegment(segment)) {
         return null;
       }
-      if (!normalized.isEmpty()) {
+      if (normalized.length() != 0) {
         normalized.append('/');
       }
       normalized.append(segment);

@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -134,8 +135,12 @@ public final class PoseTriggerReplayCli {
         + result.readyByTakeaway()
         + ",\"passed\":"
         + result.passed()
+        + ",\"outcome\":\""
+        + result.outcome().name().toLowerCase(Locale.ROOT)
+        + "\",\"arm_request_count\":"
+        + result.armRequestCount()
         + ",\"final_state\":\""
-        + result.finalState().name().toLowerCase()
+        + result.finalState().name().toLowerCase(Locale.ROOT)
         + "\"}";
   }
 

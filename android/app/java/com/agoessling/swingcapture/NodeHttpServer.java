@@ -1,7 +1,9 @@
 package com.agoessling.swingcapture;
 
 import android.content.Context;
+import android.os.Build;
 import android.os.SystemClock;
+import android.util.Log;
 import com.agoessling.swingcapture.core.coordination.CoordinationRecordStore;
 import com.agoessling.swingcapture.core.coordination.PairedCoordinationRecord;
 import com.agoessling.swingcapture.diagnostics.DiagnosticFeedbackRequest;
@@ -10,6 +12,8 @@ import com.agoessling.swingcapture.diagnostics.DiagnosticIncident.TimingMarkKind
 import com.agoessling.swingcapture.node.BearerAuthorization;
 import com.agoessling.swingcapture.node.CaptureRuntime;
 import com.agoessling.swingcapture.node.NodeCoordinationState;
+import com.agoessling.swingcapture.pose.NormalizedHittingRegion;
+import com.agoessling.swingcapture.pose.inference.PoseInferenceDelegatePolicy;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -19,12 +23,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Instant;
@@ -37,6 +43,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -47,19 +54,41 @@ import org.json.JSONObject;
 
 /** Foreground-service-owned HTTP API for node control, status, and byte-range media. */
 public final class NodeHttpServer {
+  private static final String TAG = "SwingCaptureHttp";
   public static final int DEFAULT_PORT = 8088;
   private static final int MAXIMUM_REQUEST_HEADER_BYTES = 16 * 1024;
   private static final int MAXIMUM_REQUEST_BODY_BYTES =
       CoordinationHttpEndpoint.MAXIMUM_REQUEST_BODY_BYTES;
   private static final String COORDINATION_PATH_PREFIX = "/api/v1/coordination/";
+  private static final int SETUP_PEER_TIMEOUT_MILLIS = 750;
+  private static final int SETUP_PEER_MAXIMUM_RESPONSE_BYTES = 16 * 1024;
 
   /** Non-blocking capture commands dispatched onto the service's serialized executor. */
   public interface CaptureControl {
+    record TriggeredSession(String sessionId, String sessionKind) {
+      public TriggeredSession {
+        if (sessionId == null || !sessionId.matches("[A-Za-z0-9._-]+")) {
+          throw new IllegalArgumentException("triggered session identifier is invalid");
+        }
+        if (!Set.of("capture", "standby_diagnostic").contains(sessionKind)) {
+          throw new IllegalArgumentException("triggered session kind is invalid");
+        }
+      }
+    }
+
     void setArmed(boolean armed, String sharedSessionId);
 
     String triggerManual();
 
-    String triggerMissedShot();
+    TriggeredSession triggerMissedShot();
+
+    void triggerPoseArm(PosePeerArmClient.Candidate candidate);
+
+    boolean poseLeaderHilEnabled();
+
+    String triggerPoseLeaderHil();
+
+    JSONObject poseStatus();
   }
 
   private final Context context;
@@ -69,6 +98,7 @@ public final class NodeHttpServer {
   private final CoordinationRecordStore coordinationRecords;
   private final CoordinationHttpEndpoint coordinationEndpoint;
   private final SessionDiagnosticStore diagnosticStore;
+  private final DiagnosticExportWorkspaceManager diagnosticExportWorkspaces;
   private final ReentrantLock diagnosticIoLock = new ReentrantLock();
   private final CaptureControl captureControl;
   private final int port;
@@ -93,6 +123,8 @@ public final class NodeHttpServer {
     this.coordinationEndpoint = new CoordinationHttpEndpoint(coordinationRecords);
     this.diagnosticStore =
         new SessionDiagnosticStore(AndroidDirectorySync::synchronize);
+    this.diagnosticExportWorkspaces =
+        new DiagnosticExportWorkspaceManager(this.context.getCacheDir());
     this.captureControl = captureControl;
     this.port = port;
   }
@@ -101,6 +133,7 @@ public final class NodeHttpServer {
     if (serverSocket != null) {
       return;
     }
+    diagnosticExportWorkspaces.cleanupStaleWorkspaces();
     ServerSocket socket = new ServerSocket();
     socket.setReuseAddress(true);
     socket.bind(new InetSocketAddress(port));
@@ -174,8 +207,10 @@ public final class NodeHttpServer {
         OutputStream output = client.getOutputStream()) {
       HttpRequest request = readRequest(input);
       route(request, output);
-    } catch (Throwable ignored) {
-      // A malformed or disconnected client must not terminate the listener.
+    } catch (Throwable failure) {
+      // A malformed or disconnected client must not terminate the listener, but retain enough
+      // evidence to diagnose device-specific failures without logging request contents or tokens.
+      Log.e(TAG, "Node HTTP client failed", failure);
     }
   }
 
@@ -189,6 +224,14 @@ public final class NodeHttpServer {
       routeControl(request, output);
       return;
     }
+    if (request.method.equals("PUT")) {
+      if (request.path.equals("/api/v1/setup")) {
+        routeSetupUpdate(request, output);
+      } else {
+        writeJson(output, 405, "Method Not Allowed", errorJson("method not allowed"), false);
+      }
+      return;
+    }
     boolean head = request.method.equals("HEAD");
     if (!request.method.equals("GET") && !head) {
       writeJson(output, 405, "Method Not Allowed", errorJson("method not allowed"), false);
@@ -198,12 +241,28 @@ public final class NodeHttpServer {
       routeCoordination(request, output, head);
       return;
     }
+    if (request.path.equals("/api/v1/setup")) {
+      if (!requireAuthentication(request, output, head)) {
+        return;
+      }
+      writeJson(output, 200, "OK", setupResponse(configuration.stationConfiguration()), head);
+      return;
+    }
     if (request.path.equals("/api/v1/node")) {
       JSONObject node = new JSONObject();
       node.put("schema_version", 1);
       node.put("node_id", configuration.nodeId());
       node.put("role", configuration.role().wireName());
       node.put("capture_profile", configuration.captureProfile().wireName());
+      PoseStationConfigurationSnapshot poseConfiguration =
+          configuration.poseConfigurationSnapshot();
+      node.put(
+          "pose",
+          new JSONObject()
+              .put("mode", poseConfiguration.mode().wireName())
+              .put("delegate", poseConfiguration.delegateWireName())
+              .put("debug_evidence_enabled", poseConfiguration.debugEvidenceEnabled())
+              .put("peer_configured", poseConfiguration.hasPeer()));
       node.put("service_urls", new JSONArray(advertisedUrls()));
       node.put("control_authentication", "bearer");
       writeJson(output, 200, "OK", node, head);
@@ -350,31 +409,18 @@ public final class NodeHttpServer {
 
   private File createDiagnosticExportWorkspace(File session, String sessionId)
       throws IOException {
-    File exportRoot = new File(context.getCacheDir(), "diagnostic_exports");
-    if (Files.isSymbolicLink(exportRoot.toPath())) {
-      throw new IOException("diagnostic export root cannot be a symbolic link");
-    }
-    if (!exportRoot.isDirectory() && !exportRoot.mkdir()) {
-      throw new IOException("unable to create diagnostic export root");
-    }
-    if (!exportRoot
-        .getCanonicalFile()
-        .getParentFile()
-        .equals(context.getCacheDir().getCanonicalFile())) {
-      throw new IOException("diagnostic export root escapes the app cache");
-    }
-
-    File workspace = Files.createTempDirectory(exportRoot.toPath(), "request-").toFile();
-    File stagedSession = new File(workspace, sessionId);
-    if (!stagedSession.mkdir()) {
-      throw new IOException("unable to create diagnostic export staging directory");
-    }
+    diagnosticExportWorkspaces.cleanupStaleWorkspaces();
+    File workspace = diagnosticExportWorkspaces.createWorkspace();
     try {
+      File stagedSession = new File(workspace, sessionId);
+      if (!stagedSession.mkdir()) {
+        throw new IOException("unable to create diagnostic export staging directory");
+      }
       ensureDiagnosticIncident(session, sessionId);
       stageDiagnosticTree(session, session, stagedSession);
       stageCoordinationRecord(session, sessionId, stagedSession);
       return workspace;
-    } catch (IOException | RuntimeException failure) {
+    } catch (IOException | RuntimeException | Error failure) {
       try {
         deleteDiagnosticExportWorkspace(workspace);
       } catch (IOException cleanupFailure) {
@@ -540,6 +586,10 @@ public final class NodeHttpServer {
   private static DiagnosticTimingBounds diagnosticVideoTimingBounds(JSONObject manifest)
       throws IOException {
     try {
+      if (manifest.optString("session_kind", "capture").equals("standby_diagnostic")) {
+        throw new IllegalArgumentException(
+            "standby diagnostic sessions do not contain high-speed video timing");
+      }
       JSONArray views = manifest.getJSONArray("views");
       if (views.length() == 0) {
         throw new IOException("diagnostic manifest has no video views");
@@ -576,6 +626,10 @@ public final class NodeHttpServer {
   private static DiagnosticTimingBounds diagnosticAudioTimingBounds(JSONObject manifest)
       throws IOException {
     try {
+      if (manifest.optString("session_kind", "capture").equals("standby_diagnostic")) {
+        JSONObject evidence = manifest.getJSONObject("evidence");
+        return diagnosticAudioObjectTimingBounds(evidence.getJSONObject("audio"));
+      }
       JSONObject androidCapture = manifest.optJSONObject("android_capture");
       if (androidCapture == null) {
         return null;
@@ -586,7 +640,15 @@ public final class NodeHttpServer {
           || diagnosticEvidence.isNull("audio")) {
         return null;
       }
-      JSONObject audio = diagnosticEvidence.getJSONObject("audio");
+      return diagnosticAudioObjectTimingBounds(diagnosticEvidence.getJSONObject("audio"));
+    } catch (org.json.JSONException | ArithmeticException malformed) {
+      throw new IOException("diagnostic audio timing metadata is malformed", malformed);
+    }
+  }
+
+  private static DiagnosticTimingBounds diagnosticAudioObjectTimingBounds(JSONObject audio)
+      throws IOException {
+    try {
       long firstFrame = strictManifestDecimal(audio.getString("first_frame_position"));
       long endFrame = strictManifestDecimal(audio.getString("end_frame_position"));
       long markerFrame = strictManifestDecimal(audio.getString("marker_frame_position"));
@@ -654,33 +716,393 @@ public final class NodeHttpServer {
   }
 
   private void deleteDiagnosticExportWorkspace(File workspace) throws IOException {
-    File exportRoot = new File(context.getCacheDir(), "diagnostic_exports").getCanonicalFile();
-    File canonicalWorkspace = workspace.getCanonicalFile();
-    if (!canonicalWorkspace.getParentFile().equals(exportRoot)
-        || !canonicalWorkspace.getName().startsWith("request-")) {
-      throw new IOException("refusing to delete an unexpected diagnostic export path");
-    }
-    deleteDiagnosticExportEntry(workspace);
-  }
-
-  private static void deleteDiagnosticExportEntry(File entry) throws IOException {
-    if (Files.isSymbolicLink(entry.toPath())) {
-      throw new IOException("refusing to delete a linked diagnostic export entry");
-    }
-    if (entry.isDirectory()) {
-      File[] children = entry.listFiles();
-      if (children == null) {
-        throw new IOException("unable to enumerate diagnostic export workspace");
-      }
-      for (File child : children) {
-        deleteDiagnosticExportEntry(child);
-      }
-    }
-    Files.deleteIfExists(entry.toPath());
+    diagnosticExportWorkspaces.releaseWorkspace(workspace);
   }
 
   private static String diagnosticContentDisposition(String sessionId) {
     return "attachment; filename=\"swing-capture-" + sessionId + ".zip\"";
+  }
+
+  private record SetupUpdate(
+      long expectedRevision,
+      CaptureRole role,
+      CaptureProfile captureProfile,
+      PoseStationConfigurationSnapshot pose) {}
+
+  private record PeerSetupProbe(
+      boolean reachable, String nodeId, String role, String poseMode, String diagnostic) {
+    private PeerSetupProbe {
+      nodeId = nodeId == null ? "" : nodeId;
+      role = role == null ? "" : role;
+      poseMode = poseMode == null ? "" : poseMode;
+      diagnostic = diagnostic == null ? "" : diagnostic;
+    }
+  }
+
+  private void routeSetupUpdate(HttpRequest request, OutputStream output) throws Exception {
+    if (!requireAuthentication(request, output, false)) {
+      return;
+    }
+    try {
+      CaptureRuntime.State captureState = runtime.snapshot().state();
+      if (!CaptureConfigurationPolicy.mayChange(captureState)) {
+        throw new IllegalStateException("Stop capture before editing phone setup");
+      }
+      NodeConfiguration.StationConfiguration current = configuration.stationConfiguration();
+      SetupUpdate update = parseSetupUpdate(request.bodyText(), current.pose());
+      PeerSetupProbe peer =
+          update.pose().hasPeer()
+              ? probePeer(update.pose().peerOrigin())
+              : new PeerSetupProbe(false, "", "", "", "peer is not configured");
+      if (update.pose().hasPeer()
+          && (isDirectSelfOrigin(update.pose().peerOrigin())
+              || NodeSetupPolicy.isSameNode(
+                  current.capture().nodeId(), peer.reachable(), peer.nodeId()))) {
+        throw new IllegalArgumentException("Peer origin resolves to this phone");
+      }
+      NodeSetupPolicy.PeerTopologyIssue topologyIssue =
+          NodeSetupPolicy.peerTopologyIssue(
+              current.capture().nodeId(),
+              update.role().wireName(),
+              update.pose().mode().wireName(),
+              update.pose().hasPeer(),
+              peer.reachable(),
+              peer.nodeId(),
+              peer.role(),
+              peer.poseMode());
+      if (topologyIssue != NodeSetupPolicy.PeerTopologyIssue.NONE) {
+        throw new IllegalArgumentException(
+            peerTopologyMessage(topologyIssue, update.pose().peerOrigin(), peer.diagnostic()));
+      }
+      NodeConfiguration.StationConfiguration committed =
+          configuration.updateSetupConfiguration(
+              update.expectedRevision(),
+              update.role(),
+              update.captureProfile(),
+              update.pose());
+      writeJson(output, 200, "OK", setupResponse(committed), false);
+    } catch (NodeConfiguration.RevisionMismatchException stale) {
+      writeJson(output, 409, "Conflict", errorJson(stale.getMessage()), false);
+    } catch (org.json.JSONException | IllegalArgumentException malformed) {
+      writeJson(output, 400, "Bad Request", errorJson(malformed.getMessage()), false);
+    } catch (IllegalStateException rejected) {
+      writeJson(output, 409, "Conflict", errorJson(rejected.getMessage()), false);
+    }
+  }
+
+  private static SetupUpdate parseSetupUpdate(
+      String bodyText, PoseStationConfigurationSnapshot currentPose) throws Exception {
+    JSONObject body = new JSONObject(bodyText);
+    requireExactFields(body, Set.of("schema_version", "expected_revision", "configuration"), "setup");
+    if (strictJsonInteger(body, "schema_version") != NodeSetupPolicy.SCHEMA_VERSION) {
+      throw new IllegalArgumentException("schema_version must be 1");
+    }
+    long expectedRevision = strictJsonInteger(body, "expected_revision");
+    if (expectedRevision < 0) {
+      throw new IllegalArgumentException("expected_revision cannot be negative");
+    }
+
+    JSONObject requested = body.getJSONObject("configuration");
+    requireExactFields(requested, Set.of("role", "capture_profile", "pose"), "configuration");
+    CaptureRole role = CaptureRole.parse(strictString(requested, "role"));
+    CaptureProfile profile = CaptureProfile.parse(strictString(requested, "capture_profile"));
+
+    JSONObject pose = requested.getJSONObject("pose");
+    requireExactFields(
+        pose,
+        Set.of(
+            "mode",
+            "inference_delegate",
+            "debug_evidence_enabled",
+            "hitting_region",
+            "peer_update"),
+        "pose configuration");
+    PoseNodeMode mode = PoseNodeMode.parse(strictString(pose, "mode"));
+    PoseInferenceDelegatePolicy delegate =
+        PoseStationConfigurationSnapshot.parseDelegatePolicy(
+            strictString(pose, "inference_delegate"));
+    boolean debugEvidence = strictBoolean(pose, "debug_evidence_enabled");
+    JSONObject region = pose.getJSONObject("hitting_region");
+    requireExactFields(region, Set.of("left", "top", "right", "bottom"), "hitting region");
+    NormalizedHittingRegion hittingRegion =
+        new NormalizedHittingRegion(
+            strictFiniteNumber(region, "left"),
+            strictFiniteNumber(region, "top"),
+            strictFiniteNumber(region, "right"),
+            strictFiniteNumber(region, "bottom"));
+
+    JSONObject peerUpdate = pose.getJSONObject("peer_update");
+    String operation = strictString(peerUpdate, "operation");
+    NodeSetupPolicy.PeerCredentials currentPeer =
+        new NodeSetupPolicy.PeerCredentials(currentPose.peerOrigin(), currentPose.peerControlToken());
+    NodeSetupPolicy.PeerCredentials updatedPeer;
+    switch (operation) {
+      case "keep" -> {
+        requireExactFields(peerUpdate, Set.of("operation"), "peer keep update");
+        updatedPeer = NodeSetupPolicy.updatePeer(currentPeer, operation, null, null);
+      }
+      case "clear" -> {
+        requireExactFields(peerUpdate, Set.of("operation"), "peer clear update");
+        updatedPeer = NodeSetupPolicy.updatePeer(currentPeer, operation, null, null);
+      }
+      case "replace" -> {
+        requireExactFields(
+            peerUpdate,
+            Set.of("operation", "origin", "control_token"),
+            "peer replacement");
+        updatedPeer =
+            NodeSetupPolicy.updatePeer(
+                currentPeer,
+                operation,
+                strictString(peerUpdate, "origin"),
+                strictString(peerUpdate, "control_token"));
+      }
+      default -> throw new IllegalArgumentException("Unknown peer update operation: " + operation);
+    }
+    NodeSetupPolicy.requireOutboundPeerAllowed(mode.wireName(), updatedPeer);
+    return new SetupUpdate(
+        expectedRevision,
+        role,
+        profile,
+        new PoseStationConfigurationSnapshot(
+            mode,
+            delegate,
+            hittingRegion,
+            debugEvidence,
+            updatedPeer.origin(),
+            updatedPeer.controlToken()));
+  }
+
+  private JSONObject setupResponse(NodeConfiguration.StationConfiguration station)
+      throws Exception {
+    CaptureConfigurationSnapshot capture = station.capture();
+    PoseStationConfigurationSnapshot pose = station.pose();
+    JSONObject response =
+        new JSONObject()
+            .put("schema_version", NodeSetupPolicy.SCHEMA_VERSION)
+            .put("revision", station.revision())
+            .put(
+                "node",
+                new JSONObject()
+                    .put("node_id", capture.nodeId())
+                    .put("service_urls", new JSONArray(advertisedUrls()))
+                    .put("device_model", Build.MODEL))
+            .put("capabilities", setupCapabilities())
+            .put("configuration", setupConfiguration(capture, pose));
+
+    CaptureRuntime.Snapshot runtimeSnapshot = runtime.snapshot();
+    boolean editable = CaptureConfigurationPolicy.mayChange(runtimeSnapshot.state());
+    JSONArray issues = new JSONArray();
+    if (!editable) {
+      issues.put("Stop capture before editing phone setup.");
+    }
+    if (capture.role() == CaptureRole.UNASSIGNED) {
+      issues.put("Assign this phone a camera role before arming capture.");
+    }
+    PeerSetupProbe peer =
+        pose.hasPeer()
+            ? probePeer(pose.peerOrigin())
+            : new PeerSetupProbe(false, "", "", "", "peer is not configured");
+    boolean directSelf = pose.hasPeer() && isDirectSelfOrigin(pose.peerOrigin());
+    NodeSetupPolicy.PeerTopologyIssue topologyIssue =
+        directSelf
+            ? NodeSetupPolicy.PeerTopologyIssue.SAME_NODE
+            : NodeSetupPolicy.peerTopologyIssue(
+                capture.nodeId(),
+                capture.role().wireName(),
+                pose.mode().wireName(),
+                pose.hasPeer(),
+                peer.reachable(),
+                peer.nodeId(),
+                peer.role(),
+                peer.poseMode());
+    if (topologyIssue != NodeSetupPolicy.PeerTopologyIssue.NONE) {
+      issues.put(peerTopologyMessage(topologyIssue, pose.peerOrigin(), peer.diagnostic()));
+    }
+    response
+        .put(
+            "readiness",
+            new JSONObject()
+                .put("editable", editable)
+                .put("capture_state", webState(runtimeSnapshot))
+                .put("issues", issues))
+        .put(
+            "preview",
+            new JSONObject().put("available", false).put("url", JSONObject.NULL));
+    return response;
+  }
+
+  private static JSONObject setupCapabilities() throws Exception {
+    JSONArray roles = new JSONArray();
+    for (CaptureRole role : CaptureRole.values()) {
+      roles.put(new JSONObject().put("value", role.wireName()).put("label", role.displayName()));
+    }
+    JSONArray profiles = new JSONArray();
+    for (CaptureProfile profile : CaptureProfile.values()) {
+      profiles.put(
+          new JSONObject()
+              .put("value", profile.wireName())
+              .put("label", profile.displayName())
+              .put("width", profile.width())
+              .put("height", profile.height())
+              .put("fps", 240));
+    }
+    JSONArray modes = new JSONArray();
+    for (PoseNodeMode mode : PoseNodeMode.values()) {
+      modes.put(new JSONObject().put("value", mode.wireName()).put("label", mode.displayName()));
+    }
+    JSONArray delegates = new JSONArray();
+    for (PoseInferenceDelegatePolicy delegate : PoseInferenceDelegatePolicy.values()) {
+      delegates.put(
+          new JSONObject()
+              .put("value", delegate.name().toLowerCase(Locale.ROOT))
+              .put("label", inferenceDelegateLabel(delegate)));
+    }
+    return new JSONObject()
+        .put("roles", roles)
+        .put("capture_profiles", profiles)
+        .put("pose_modes", modes)
+        .put("inference_delegates", delegates);
+  }
+
+  private static String inferenceDelegateLabel(PoseInferenceDelegatePolicy delegate) {
+    return switch (delegate) {
+      case CPU_ONLY -> "CPU only";
+      case GPU_PREFERRED -> "GPU preferred";
+      case GPU_REQUIRED -> "GPU required";
+    };
+  }
+
+  private static JSONObject setupConfiguration(
+      CaptureConfigurationSnapshot capture, PoseStationConfigurationSnapshot pose)
+      throws Exception {
+    NodeSetupPolicy.RedactedPeer redactedPeer =
+        NodeSetupPolicy.redact(
+                new NodeSetupPolicy.PeerCredentials(
+                    pose.peerOrigin(), pose.peerControlToken()))
+            .orElse(null);
+    JSONObject peer =
+        redactedPeer == null ? null : new JSONObject().put("origin", redactedPeer.origin());
+    return new JSONObject()
+        .put("role", capture.role().wireName())
+        .put("capture_profile", capture.profile().wireName())
+        .put(
+            "pose",
+            new JSONObject()
+                .put("mode", pose.mode().wireName())
+                .put("inference_delegate", pose.delegateWireName())
+                .put("debug_evidence_enabled", pose.debugEvidenceEnabled())
+                .put(
+                    "hitting_region",
+                    new JSONObject()
+                        .put("left", pose.hittingRegion().left())
+                        .put("top", pose.hittingRegion().top())
+                        .put("right", pose.hittingRegion().right())
+                        .put("bottom", pose.hittingRegion().bottom()))
+                .put("peer", peer == null ? JSONObject.NULL : peer));
+  }
+
+  private boolean isDirectSelfOrigin(String origin) {
+    return NodeSetupPolicy.isDirectSelfOrigin(origin, port, advertisedUrls());
+  }
+
+  private static PeerSetupProbe probePeer(String origin) {
+    HttpURLConnection connection = null;
+    try {
+      URI endpoint = URI.create(origin).resolve("/api/v1/node");
+      connection = (HttpURLConnection) endpoint.toURL().openConnection();
+      connection.setConnectTimeout(SETUP_PEER_TIMEOUT_MILLIS);
+      connection.setReadTimeout(SETUP_PEER_TIMEOUT_MILLIS);
+      connection.setRequestMethod("GET");
+      int status = connection.getResponseCode();
+      if (status != 200) {
+        return new PeerSetupProbe(false, "", "", "", "peer returned HTTP " + status);
+      }
+      try (InputStream input = connection.getInputStream()) {
+        byte[] body = input.readNBytes(SETUP_PEER_MAXIMUM_RESPONSE_BYTES + 1);
+        if (body.length > SETUP_PEER_MAXIMUM_RESPONSE_BYTES) {
+          return new PeerSetupProbe(false, "", "", "", "peer response is too large");
+        }
+        JSONObject node = new JSONObject(new String(body, StandardCharsets.UTF_8));
+        if (strictJsonInteger(node, "schema_version") != 1) {
+          return new PeerSetupProbe(false, "", "", "", "peer schema is unsupported");
+        }
+        String nodeId = strictString(node, "node_id");
+        String role = CaptureRole.parse(strictString(node, "role")).wireName();
+        JSONObject pose = node.getJSONObject("pose");
+        String poseMode = PoseNodeMode.parse(strictString(pose, "mode")).wireName();
+        return new PeerSetupProbe(true, nodeId, role, poseMode, "");
+      }
+    } catch (Exception failure) {
+      return new PeerSetupProbe(false, "", "", "", failure.getClass().getSimpleName());
+    } finally {
+      if (connection != null) {
+        connection.disconnect();
+      }
+    }
+  }
+
+  private static String peerTopologyMessage(
+      NodeSetupPolicy.PeerTopologyIssue issue, String peerOrigin, String diagnostic) {
+    return switch (issue) {
+      case NON_LEADER_HAS_PEER ->
+          "Only pose leader mode may configure an outbound peer association.";
+      case LEADER_MISSING_PEER ->
+          "Pose leader mode needs a peer phone origin and control token.";
+      case PEER_UNREACHABLE ->
+          "Pose leader peer is unavailable at "
+              + peerOrigin
+              + (diagnostic.isEmpty() ? "." : " (" + diagnostic + ").");
+      case SAME_NODE -> "Peer origin resolves to this phone.";
+      case LOCAL_ROLE_UNASSIGNED -> "Assign this pose leader a camera role.";
+      case PEER_ROLE_UNASSIGNED -> "Assign the peer phone a camera role.";
+      case SAME_ROLE -> "Pose leader and shadow phone must use distinct camera roles.";
+      case PEER_NOT_SHADOW -> "Pose leader peer must use shadow mode.";
+      case NONE -> throw new IllegalArgumentException("No peer topology error is present");
+    };
+  }
+
+  private static void requireExactFields(JSONObject object, Set<String> fields, String label) {
+    if (object.length() != fields.size()) {
+      throw new IllegalArgumentException(label + " fields do not match schema 1");
+    }
+    for (String field : fields) {
+      if (!object.has(field) || object.isNull(field)) {
+        throw new IllegalArgumentException(label + " is missing " + field);
+      }
+    }
+  }
+
+  private static String strictString(JSONObject object, String field) throws Exception {
+    Object value = object.get(field);
+    if (!(value instanceof String text) || text.isBlank()) {
+      throw new IllegalArgumentException(field + " must be a nonempty string");
+    }
+    return text;
+  }
+
+  private static long strictJsonInteger(JSONObject object, String field) throws Exception {
+    Object value = object.get(field);
+    if (!(value instanceof Integer) && !(value instanceof Long)) {
+      throw new IllegalArgumentException(field + " must be a JSON integer");
+    }
+    return ((Number) value).longValue();
+  }
+
+  private static boolean strictBoolean(JSONObject object, String field) throws Exception {
+    Object value = object.get(field);
+    if (!(value instanceof Boolean result)) {
+      throw new IllegalArgumentException(field + " must be a boolean");
+    }
+    return result;
+  }
+
+  private static double strictFiniteNumber(JSONObject object, String field) throws Exception {
+    Object value = object.get(field);
+    if (!(value instanceof Number number) || !Double.isFinite(number.doubleValue())) {
+      throw new IllegalArgumentException(field + " must be a finite number");
+    }
+    return number.doubleValue();
   }
 
   private void routeControl(HttpRequest request, OutputStream output) throws Exception {
@@ -723,13 +1145,20 @@ public final class NodeHttpServer {
         if (body.length() != 0) {
           throw new IllegalArgumentException("missed-shot request body must be empty");
         }
-        String sessionId = captureControl.triggerMissedShot();
+        CaptureControl.TriggeredSession triggered = captureControl.triggerMissedShot();
         JSONObject summary = new JSONObject();
-        summary.put("session_id", sessionId);
+        summary.put("session_id", triggered.sessionId());
         summary.put("state", "waiting_post_roll");
         summary.put("created_at_utc", java.time.Instant.now().toString());
+        summary.put("session_kind", triggered.sessionKind());
         summary.put("error", "");
         writeJson(output, 202, "Accepted", summary, false);
+        return;
+      }
+      if (request.path.equals("/api/v1/capture/pose-arm")) {
+        PosePeerArmClient.Candidate candidate = parsePoseArmCandidate(request.bodyText());
+        captureControl.triggerPoseArm(candidate);
+        writeJson(output, 202, "Accepted", captureStatus(), false);
         return;
       }
       String[] segments = request.path.split("/");
@@ -780,12 +1209,69 @@ public final class NodeHttpServer {
         writeJson(output, 202, "Accepted", captureStatus(), false);
         return;
       }
+      if (request.path.equals("/api/v1/hil/pose-arm")) {
+        PoseHilEndpointAccess.requireEnabled(captureControl.poseLeaderHilEnabled());
+        if (request.body.length != 0) {
+          throw new IllegalArgumentException("HIL pose-arm request body must be empty");
+        }
+        String sharedSessionId = captureControl.triggerPoseLeaderHil();
+        writeJson(
+            output,
+            202,
+            "Accepted",
+            new JSONObject()
+                .put("schema_version", 1)
+                .put("shared_session_id", sharedSessionId)
+                .put("state", "transitioning_to_high_speed"),
+            false);
+        return;
+      }
       writeJson(output, 404, "Not Found", errorJson("not found"), false);
     } catch (org.json.JSONException | IllegalArgumentException malformed) {
       writeJson(output, 400, "Bad Request", errorJson(malformed.getMessage()), false);
     } catch (IllegalStateException rejected) {
       writeJson(output, 409, "Conflict", errorJson(rejected.getMessage()), false);
     }
+  }
+
+  private static PosePeerArmClient.Candidate parsePoseArmCandidate(String bodyText)
+      throws org.json.JSONException {
+    JSONObject body = new JSONObject(bodyText);
+    Set<String> expected =
+        Set.of(
+            "schema_version",
+            "shared_session_id",
+            "leader_node_id",
+            "candidate_elapsed_realtime_ns",
+            "person_confidence",
+            "address_confidence");
+    if (body.length() != expected.size()) {
+      throw new IllegalArgumentException("pose-arm request fields do not match schema 1");
+    }
+    for (String field : expected) {
+      if (!body.has(field) || body.isNull(field)) {
+        throw new IllegalArgumentException("pose-arm request is missing " + field);
+      }
+    }
+    if (body.getInt("schema_version") != 1) {
+      throw new IllegalArgumentException("pose-arm schema_version must be 1");
+    }
+    String timestampText = body.getString("candidate_elapsed_realtime_ns");
+    final long timestamp;
+    try {
+      timestamp = Long.parseLong(timestampText);
+    } catch (NumberFormatException malformed) {
+      throw new IllegalArgumentException("candidate timestamp is not a signed 64-bit integer");
+    }
+    if (!Long.toString(timestamp).equals(timestampText)) {
+      throw new IllegalArgumentException("candidate timestamp is not canonical decimal");
+    }
+    return new PosePeerArmClient.Candidate(
+        body.getString("shared_session_id"),
+        body.getString("leader_node_id"),
+        timestamp,
+        body.getDouble("person_confidence"),
+        body.getDouble("address_confidence"));
   }
 
   private void routeCoordination(HttpRequest request, OutputStream output, boolean head)
@@ -881,6 +1367,7 @@ public final class NodeHttpServer {
             ? JSONObject.NULL
             : Long.toString(snapshot.lastTriggerElapsedRealtimeNanos()));
     status.put("hil", hil);
+    status.put("pose", captureControl.poseStatus());
     return status;
   }
 
@@ -924,6 +1411,7 @@ public final class NodeHttpServer {
       json.put("session_id", summary.sessionId);
       json.put("state", "ready");
       json.put("created_at_utc", summary.createdAtUtc);
+      json.put("session_kind", summary.sessionKind);
       json.put("error", "");
       summaries.put(json);
     }
@@ -950,9 +1438,23 @@ public final class NodeHttpServer {
         if (!child.getName().equals(manifest.getString("session_id"))) {
           continue;
         }
+        String sessionKind = manifest.optString("session_kind", "capture");
+        String createdAtUtc;
+        if (sessionKind.equals("standby_diagnostic")) {
+          String createdAtEpochMillis = manifest.getString("created_at_epoch_ms");
+          long epochMillis = Long.parseLong(createdAtEpochMillis);
+          if (!Long.toString(epochMillis).equals(createdAtEpochMillis) || epochMillis <= 0) {
+            continue;
+          }
+          createdAtUtc = Instant.ofEpochMilli(epochMillis).toString();
+        } else if (sessionKind.equals("capture")) {
+          createdAtUtc = Instant.parse(manifest.getString("created_at_utc")).toString();
+        } else {
+          continue;
+        }
         summaries.add(
             new SessionSummary(
-                manifest.getString("session_id"), manifest.getString("created_at_utc")));
+                manifest.getString("session_id"), createdAtUtc, sessionKind));
       } catch (Exception ignored) {
         // An incomplete or malformed directory is never advertised as ready.
       }
@@ -1188,7 +1690,7 @@ public final class NodeHttpServer {
     headers.append("Content-Type: ").append(contentType).append("\r\n");
     headers.append("Content-Length: ").append(contentLength).append("\r\n");
     headers.append("Access-Control-Allow-Origin: *\r\n");
-    headers.append("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n");
+    headers.append("Access-Control-Allow-Methods: GET, HEAD, POST, PUT, OPTIONS\r\n");
     headers.append("Access-Control-Allow-Headers: Authorization, Range, Content-Type\r\n");
     headers.append(
         "Access-Control-Expose-Headers: Accept-Ranges, Content-Disposition, Content-Length, "
@@ -1252,10 +1754,12 @@ public final class NodeHttpServer {
   private static final class SessionSummary {
     private final String sessionId;
     private final String createdAtUtc;
+    private final String sessionKind;
 
-    private SessionSummary(String sessionId, String createdAtUtc) {
+    private SessionSummary(String sessionId, String createdAtUtc, String sessionKind) {
       this.sessionId = sessionId;
       this.createdAtUtc = createdAtUtc;
+      this.sessionKind = sessionKind;
     }
   }
 }

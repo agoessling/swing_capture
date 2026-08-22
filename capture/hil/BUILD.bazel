@@ -92,6 +92,7 @@ cc_library(
     visibility = [
         "//android/dual_hil:__pkg__",
         "//android/hil:__pkg__",
+        "//android/pose_hil:__pkg__",
         "//capture:__subpackages__",
     ],
     deps = [":feather_hil_protocol"],
@@ -114,6 +115,7 @@ cc_library(
     visibility = [
         "//android/dual_hil:__pkg__",
         "//android/hil:__pkg__",
+        "//android/pose_hil:__pkg__",
         "//capture:__subpackages__",
     ],
     deps = [

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.agoessling.swingcapture.pose.inference.fixture">
+    <uses-sdk
+        android:minSdkVersion="34"
+        android:targetSdkVersion="36" />
+    <application
+        android:allowBackup="false"
+        android:label="Pose Inference Packaging Fixture" />
+</manifest>

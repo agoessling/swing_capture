@@ -18,9 +18,144 @@ public final class SessionDiagnosticArchiveTest {
 
   public static void main(String[] arguments) throws Exception {
     archiveContainsChecksummedSessionEvidenceAndExcludesTemporaryFiles();
+    traceOnlyPoseEvidencePreservesZeroBytePreview();
+    ownershipMarkerIsAbsentFromCanonicalDiagnosticExport();
+    rejectsNestedOwnershipMarker();
     exactDestinationReplacementIsDeterministic();
     rejectsUnsafeSourcesAndDestinations();
     rejectsDuplicateGeneratedPathsAndOversizedSources();
+  }
+
+  private static void traceOnlyPoseEvidencePreservesZeroBytePreview() throws Exception {
+    File root = testDirectory("trace-only-pose");
+    File session = new File(root, "session-trace-only");
+    check(session.mkdir(), "create trace-only session");
+    Files.writeString(
+        new File(session, "manifest.json").toPath(),
+        "{\"pose_preview\":{\"available\":true,\"frames_bytes\":\"0\","
+            + "\"observation_count\":3,\"jpeg_frame_count\":0}}\n",
+        StandardCharsets.UTF_8);
+    File poseDiagnostics = new File(session, "pose_diagnostics");
+    check(poseDiagnostics.mkdir(), "create trace-only pose diagnostics");
+    File emptyFrames = new File(poseDiagnostics, "preview_frames.mjpeg");
+    Files.write(emptyFrames.toPath(), new byte[0]);
+    File trace = new File(poseDiagnostics, "pose_trace.ndjson");
+    Files.writeString(
+        trace.toPath(),
+        "{\"sequence_index\":0,\"frame_available\":false}\n",
+        StandardCharsets.UTF_8);
+
+    File destination = new File(new File(root, "exports"), "trace-only.zip");
+    SessionDiagnosticArchive.Result result =
+        SessionDiagnosticArchive.create(
+            session, destination, Instant.parse("2026-08-21T23:00:00Z"));
+    check(result.fileCount() == 3, "trace-only archive retains all declared regular files");
+    check(
+        result.sourceBytes()
+            == new File(session, "manifest.json").length() + trace.length(),
+        "zero-byte preview contributes zero to source byte count");
+
+    try (ZipFile zip = new ZipFile(destination)) {
+      ZipEntry framesEntry = zip.getEntry("session-trace-only/pose_diagnostics/preview_frames.mjpeg");
+      check(framesEntry != null, "trace-only archive retains declared preview path");
+      check(framesEntry.getSize() == 0, "trace-only preview ZIP entry remains empty");
+      check(zip.getInputStream(framesEntry).readAllBytes().length == 0, "preview payload is empty");
+      String export =
+          new String(
+              zip.getInputStream(zip.getEntry("diagnostic_export.json")).readAllBytes(),
+              StandardCharsets.UTF_8);
+      check(
+          export.contains(
+              "\"path\":\"session-trace-only/pose_diagnostics/preview_frames.mjpeg\","
+                  + "\"bytes\":0,\"sha256\":"
+                  + "\"e3b0c44298fc1c149afbf4c8996fb924"
+                  + "27ae41e4649b934ca495991b7852b855\""),
+          "export manifest declares SHA-256(empty) for preview");
+      check(
+          zip.getEntry("session-trace-only/pose_diagnostics/pose_trace.ndjson") != null,
+          "trace remains exportable when every JPEG encoding failed");
+    }
+  }
+
+  private static void ownershipMarkerIsAbsentFromCanonicalDiagnosticExport() throws Exception {
+    File root = testDirectory("ownership-marker");
+    File staging = new File(root, "session-field.tmp");
+    check(staging.mkdir(), "create owned staging session");
+    SessionStagingCleanup.markOwned(root, staging);
+    Files.writeString(new File(staging, "manifest.json").toPath(), "{}\n");
+    Files.write(new File(staging, "diagnostic_audio.wav").toPath(), new byte[] {1});
+    Files.writeString(new File(staging, "diagnostic_incident.json").toPath(), "{}\n");
+    File poseDiagnostics = new File(staging, "pose_diagnostics");
+    check(poseDiagnostics.mkdir(), "create pose diagnostics directory");
+    Files.write(new File(poseDiagnostics, "preview_frames.mjpeg").toPath(), new byte[] {2});
+    Files.writeString(new File(poseDiagnostics, "pose_trace.ndjson").toPath(), "{}\n");
+
+    File session = new File(root, "session-field");
+    Files.move(staging.toPath(), session.toPath());
+    check(
+        new File(session, SessionStagingCleanup.OWNERSHIP_MARKER).isFile(),
+        "published fixture retains the real ownership marker");
+    File destination = new File(new File(root, "exports"), "session-field.zip");
+    SessionDiagnosticArchive.Result result =
+        SessionDiagnosticArchive.create(
+            session, destination, Instant.parse("2026-08-21T23:00:00Z"));
+
+    File ownershipMarker = new File(session, SessionStagingCleanup.OWNERSHIP_MARKER);
+    File publishedPoseDiagnostics = new File(session, "pose_diagnostics");
+    long expectedSourceBytes =
+        new File(session, "manifest.json").length()
+            + new File(session, "diagnostic_audio.wav").length()
+            + new File(session, "diagnostic_incident.json").length()
+            + new File(publishedPoseDiagnostics, "preview_frames.mjpeg").length()
+            + new File(publishedPoseDiagnostics, "pose_trace.ndjson").length();
+    check(result.fileCount() == 5, "only five canonical session files are exported");
+    check(ownershipMarker.isFile(), "archive creation preserves the ownership marker");
+    check(ownershipMarker.length() == 14, "real ownership marker has expected size");
+    check(result.sourceBytes() == expectedSourceBytes, "source bytes exclude ownership marker");
+    try (ZipFile zip = new ZipFile(destination)) {
+      Set<String> names = new HashSet<>();
+      zip.stream().map(ZipEntry::getName).forEach(names::add);
+      Set<String> expectedNames =
+          Set.of(
+              "diagnostic_export.json",
+              "session-field/manifest.json",
+              "session-field/diagnostic_audio.wav",
+              "session-field/diagnostic_incident.json",
+              "session-field/pose_diagnostics/preview_frames.mjpeg",
+              "session-field/pose_diagnostics/pose_trace.ndjson");
+      check(names.equals(expectedNames), "ZIP has exactly six canonical entries");
+      check(
+          !names.contains("session-field/" + SessionStagingCleanup.OWNERSHIP_MARKER),
+          "ownership marker is absent from ZIP entries");
+      String export =
+          new String(
+              zip.getInputStream(zip.getEntry("diagnostic_export.json")).readAllBytes(),
+              StandardCharsets.UTF_8);
+      check(
+          !export.contains(SessionStagingCleanup.OWNERSHIP_MARKER),
+          "ownership marker is absent from export manifest");
+      check(countOccurrences(export, "\"path\":") == 5, "export manifest lists five files");
+    }
+  }
+
+  private static void rejectsNestedOwnershipMarker() throws Exception {
+    File root = testDirectory("nested-ownership-marker");
+    File session = new File(root, "session-nested");
+    check(session.mkdir(), "create nested-marker session");
+    Files.writeString(new File(session, "manifest.json").toPath(), "{}\n");
+    File diagnostics = new File(session, "diagnostics");
+    check(diagnostics.mkdir(), "create nested-marker diagnostics");
+    File nestedMarker = new File(diagnostics, SessionStagingCleanup.OWNERSHIP_MARKER);
+    Files.writeString(nestedMarker.toPath(), "swing-capture\n", StandardCharsets.US_ASCII);
+    File destination = new File(root, "nested-marker.zip");
+
+    expectIo(
+        () ->
+            SessionDiagnosticArchive.create(
+                session, destination, Instant.parse("2026-08-21T23:00:00Z")),
+        "nested ownership marker");
+    check(nestedMarker.isFile(), "rejected nested marker is not mutated");
+    check(!destination.exists(), "nested ownership marker leaves no archive");
   }
 
   private static void archiveContainsChecksummedSessionEvidenceAndExcludesTemporaryFiles()
@@ -209,6 +344,16 @@ public final class SessionDiagnosticArchiveTest {
     File root = new File(System.getenv("TEST_TMPDIR"), name);
     check(root.mkdirs(), "create test root " + name);
     return root;
+  }
+
+  private static int countOccurrences(String text, String needle) {
+    int count = 0;
+    int offset = 0;
+    while ((offset = text.indexOf(needle, offset)) >= 0) {
+      ++count;
+      offset += needle.length();
+    }
+    return count;
   }
 
   private static void expectIo(ThrowingAction action, String label) throws Exception {

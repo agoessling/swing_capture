@@ -8,6 +8,8 @@ import {
   type DiagnosticFeedback,
   type DiagnosticTimingMarks,
   HttpReviewApi,
+  type PeerArmStatus,
+  type PoseCaptureStatus,
   parseCaptureStatus,
   REVIEW_SCHEMA_VERSION,
   type ReviewApi,
@@ -123,13 +125,12 @@ type SessionIdFactory = () => string;
  * contract after both independently published clips are ready.
  */
 export class DualNodeReviewApi implements ReviewApi {
-  readonly #nodes: readonly [AndroidNodeClient, AndroidNodeClient];
+  #nodes: [AndroidNodeClient, AndroidNodeClient];
   readonly #sessionIdFactory: SessionIdFactory;
   readonly #storage: AlignmentStorage | null;
   readonly #manifestCache = new Map<string, Promise<ClipManifest>>();
   readonly #alignmentCache = new Map<string, DualNodeAlignment>();
   readonly #durablyReplicated = new Set<string>();
-  #descriptors: Promise<readonly [NodeDescriptor, NodeDescriptor]> | null = null;
   #activeSharedSessionId: string | null = null;
   #coordinationError: string | null = null;
   #coordinationAttempt: Promise<void> | null = null;
@@ -249,11 +250,18 @@ export class DualNodeReviewApi implements ReviewApi {
     }
     const results = await Promise.allSettled(this.#nodes.map((node) => node.saveMissedShot()));
     throwRejectedNodeOperation(results, "save missed shot");
+    const summaries = results.map((result) => fulfilled(result));
+    const sessionKinds = new Set(summaries.map((summary) => summary.session_kind ?? "capture"));
+    if (sessionKinds.size !== 1) {
+      throw new Error("Android nodes disagreed on the missed-shot session kind");
+    }
+    const sessionKind = summaries[0]?.session_kind;
     return {
       session_id: this.#activeSharedSessionId,
       state: "waiting_post_roll",
       created_at_utc: new Date().toISOString(),
       error: "",
+      ...(sessionKind === undefined ? {} : { session_kind: sessionKind }),
     };
   }
 
@@ -313,12 +321,13 @@ export class DualNodeReviewApi implements ReviewApi {
       throw new Error("Diagnostic feedback session IDs disagree with the trigger association");
     }
     const shifts = triggerShiftsFromCommon(alignment);
+    const nodes = await this.#nodesForPair(pair);
     await Promise.all([
-      this.#nodes[0].submitDiagnosticFeedback(
+      nodes.downTheLine.submitDiagnosticFeedback(
         pair.downTheLine.session_id,
         localizeDiagnosticFeedback(feedback, shifts.downTheLine),
       ),
-      this.#nodes[1].submitDiagnosticFeedback(
+      nodes.faceOn.submitDiagnosticFeedback(
         pair.faceOn.session_id,
         localizeDiagnosticFeedback(feedback, shifts.faceOn),
       ),
@@ -327,9 +336,10 @@ export class DualNodeReviewApi implements ReviewApi {
 
   async getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]> {
     const pair = await this.#completeSessionPair(sessionId);
+    const nodes = await this.#nodesForPair(pair);
     const [downTheLine, faceOn] = await Promise.all([
-      this.#nodes[0].getDiagnosticArchives(pair.downTheLine.session_id),
-      this.#nodes[1].getDiagnosticArchives(pair.faceOn.session_id),
+      nodes.downTheLine.getDiagnosticArchives(pair.downTheLine.session_id),
+      nodes.faceOn.getDiagnosticArchives(pair.faceOn.session_id),
     ]);
     return [
       ...downTheLine.map((archive) => ({
@@ -356,24 +366,49 @@ export class DualNodeReviewApi implements ReviewApi {
     return { ...pair, downTheLine: pair.downTheLine, faceOn: pair.faceOn };
   }
 
+  async #nodesForPair(pair: {
+    downTheLine: ClipManifest;
+    faceOn: ClipManifest;
+  }): Promise<{ downTheLine: AndroidNodeClient; faceOn: AndroidNodeClient }> {
+    const described = await Promise.all(
+      this.#nodes.map(async (node) => ({ node, descriptor: await node.descriptor() })),
+    );
+    const downTheLineNodeId = pair.downTheLine.android_capture?.node_id;
+    const faceOnNodeId = pair.faceOn.android_capture?.node_id;
+    if (downTheLineNodeId === undefined || faceOnNodeId === undefined) {
+      throw new Error("Dual Android diagnostic routing requires both retained node IDs");
+    }
+    const downTheLine = described.find(
+      (candidate) => candidate.descriptor.nodeId === downTheLineNodeId,
+    )?.node;
+    const faceOn = described.find(
+      (candidate) => candidate.descriptor.nodeId === faceOnNodeId,
+    )?.node;
+    if (downTheLine === undefined || faceOn === undefined || downTheLine === faceOn) {
+      throw new Error("Dual Android diagnostic routing no longer matches the configured phones");
+    }
+    return { downTheLine, faceOn };
+  }
+
   async #ensureDescriptors(): Promise<readonly [NodeDescriptor, NodeDescriptor]> {
-    const descriptors =
-      this.#descriptors ??
-      Promise.all([this.#nodes[0].descriptor(), this.#nodes[1].descriptor()]).then(
-        ([downTheLine, faceOn]) => {
-          if (downTheLine.role !== "down_the_line" || faceOn.role !== "face_on") {
-            throw new Error(
-              "Phone role assignments do not match the configured down-the-line/face-on endpoints",
-            );
-          }
-          if (downTheLine.nodeId === faceOn.nodeId) {
-            throw new Error("One Android installation cannot supply both camera roles");
-          }
-          return [downTheLine, faceOn] as const;
-        },
-      );
-    this.#descriptors = descriptors;
-    return descriptors;
+    const described = await Promise.all(
+      this.#nodes.map(async (node) => ({ node, descriptor: await node.descriptor() })),
+    );
+    if (described[0]?.descriptor.nodeId === described[1]?.descriptor.nodeId) {
+      throw new Error("One Android installation cannot supply both camera roles");
+    }
+    described.sort(
+      (left, right) => roleOrder(left.descriptor.role) - roleOrder(right.descriptor.role),
+    );
+    const downTheLine = described[0];
+    const faceOn = described[1];
+    if (downTheLine?.descriptor.role !== "down_the_line" || faceOn?.descriptor.role !== "face_on") {
+      throw new Error("Dual-node capture requires one live phone for each camera role");
+    }
+    downTheLine.node.setCanonicalRole("down_the_line");
+    faceOn.node.setCanonicalRole("face_on");
+    this.#nodes = [downTheLine.node, faceOn.node];
+    return [downTheLine.descriptor, faceOn.descriptor];
   }
 
   async #coordinateTriggers(sessionId: string): Promise<void> {
@@ -411,7 +446,9 @@ export class DualNodeReviewApi implements ReviewApi {
           throw new Error("Session list does not belong to a configured Android node");
         }
         return list.sessions
-          .filter((session) => session.state === "ready")
+          .filter(
+            (session) => session.state === "ready" && session.session_kind !== "standby_diagnostic",
+          )
           .map((session) => this.#manifest(node, session.session_id));
       }),
     );
@@ -557,7 +594,7 @@ export function groupAndroidSessionManifests(
 
 class AndroidNodeClient {
   readonly baseUrl: string;
-  readonly #role: ReviewRole;
+  #canonicalRole: ReviewRole;
   readonly #controlToken: string;
   readonly #fetcher: Fetcher;
   readonly #now: MonotonicNow;
@@ -565,7 +602,7 @@ class AndroidNodeClient {
 
   constructor(endpoint: DualNodeEndpoint, fetcher: Fetcher, now: MonotonicNow) {
     this.baseUrl = endpoint.baseUrl.replace(/\/$/, "");
-    this.#role = endpoint.role;
+    this.#canonicalRole = endpoint.role;
     this.#controlToken = endpoint.controlToken;
     this.#fetcher = fetcher;
     this.#now = now;
@@ -582,6 +619,10 @@ class AndroidNodeClient {
       role: asRole(value.role, "node role"),
       captureProfile: asNonemptyString(value.capture_profile, "capture_profile"),
     };
+  }
+
+  setCanonicalRole(role: ReviewRole): void {
+    this.#canonicalRole = role;
   }
 
   async captureStatus(): Promise<DetailedCaptureStatus> {
@@ -658,8 +699,8 @@ class AndroidNodeClient {
       throw new Error(`Unsupported trigger report schema: ${String(object.schema_version)}`);
     }
     const role = asRole(object.role, "trigger role");
-    if (role !== this.#role) {
-      throw new Error(`Configured ${this.#role} node reported trigger role ${role}`);
+    if (role !== this.#canonicalRole) {
+      throw new Error(`Configured ${this.#canonicalRole} node reported trigger role ${role}`);
     }
     return {
       role,
@@ -749,7 +790,7 @@ class AndroidNodeClient {
     if (!response.ok) {
       throw new NodeRequestError(
         response.status,
-        `${this.#role} node request failed: ${response.status}`,
+        `${this.#canonicalRole} node request failed: ${response.status}`,
       );
     }
     return response.json();
@@ -1065,6 +1106,9 @@ function combineCaptureStatuses(
   const activeIds = statuses
     .map((status) => status.active_session_id)
     .filter((value): value is string => value !== null);
+  const pose = combinedPoseCaptureStatus(
+    statuses.flatMap((status) => (status.pose === undefined ? [] : [status.pose])),
+  );
   return {
     schema_version: CAPTURE_SCHEMA_VERSION,
     state,
@@ -1079,7 +1123,50 @@ function combineCaptureStatuses(
       error: "",
       last_run: null,
     },
+    ...(pose === undefined ? {} : { pose }),
   };
+}
+
+function combinedPoseCaptureStatus(
+  statuses: readonly PoseCaptureStatus[],
+): PoseCaptureStatus | undefined {
+  if (statuses.length === 0) {
+    return undefined;
+  }
+  const peerArm = combinedPeerArmStatus(statuses.map((status) => status.peer_arm));
+  if (peerArm === undefined) {
+    return undefined;
+  }
+  const modes = statuses.map((status) => status.mode);
+  const phases = statuses.map((status) => status.phase);
+  return {
+    mode: modes.includes("leader") ? "leader" : modes.includes("shadow") ? "shadow" : "disabled",
+    phase: phases.includes("high_speed")
+      ? "high_speed"
+      : phases.includes("monitoring")
+        ? "monitoring"
+        : "idle",
+    transition_requested: statuses.some((status) => status.transition_requested),
+    peer_arm: peerArm,
+  };
+}
+
+function combinedPeerArmStatus(statuses: readonly PeerArmStatus[]): PeerArmStatus | undefined {
+  const precedence: readonly PeerArmStatus["state"][] = [
+    "failed",
+    "rejected",
+    "pending",
+    "accepted",
+    "inbound_accepted",
+    "not_requested",
+  ];
+  for (const state of precedence) {
+    const status = statuses.find((candidate) => candidate.state === state);
+    if (status !== undefined) {
+      return structuredClone(status);
+    }
+  }
+  return undefined;
 }
 
 function combinedState(states: readonly CaptureState[]): CaptureState {

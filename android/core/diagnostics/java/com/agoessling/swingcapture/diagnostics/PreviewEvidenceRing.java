@@ -7,7 +7,8 @@ import java.util.Locale;
 import java.util.Objects;
 
 /**
- * Duration-, count-, and byte-bounded flight recorder for exact compressed 5 Hz preview inputs.
+ * Duration-, count-, and byte-bounded flight recorder for 5 Hz pose observations and optional
+ * lower-cadence compressed preview inputs.
  *
  * <p>The recommended initial field policy is 60 seconds, 300 observations, and 32 MiB. Construct
  * an instance explicitly with those constants; the class does not allocate a default ring.
@@ -122,6 +123,37 @@ public final class PreviewEvidenceRing {
     entries.addLast(evidence);
     compressedBytes = Math.addExact(compressedBytes, evidence.compressedFrameBytes());
     evictToBounds();
+  }
+
+  /** Attaches an asynchronously encoded frame to an already-retained observation. */
+  public synchronized boolean attachCompressedFrame(long timestampBoottimeNanos, byte[] frame) {
+    Objects.requireNonNull(frame, "frame");
+    if (frame.length == 0 || frame.length > maximumCompressedBytes) {
+      throw new AppendRejectedException(
+          RejectionKind.ENTRY_EXCEEDS_BYTE_CAPACITY,
+          "attached frame has " + frame.length + " bytes");
+    }
+    ArrayDeque<PreviewEvidence> replaced = new ArrayDeque<>(entries.size());
+    boolean found = false;
+    for (PreviewEvidence evidence : entries) {
+      if (evidence.timestampBoottimeNanos() == timestampBoottimeNanos) {
+        compressedBytes -= evidence.compressedFrameBytes();
+        PreviewEvidence attached = evidence.withCompressedFrame(frame);
+        compressedBytes = Math.addExact(compressedBytes, attached.compressedFrameBytes());
+        replaced.addLast(attached);
+        found = true;
+      } else {
+        replaced.addLast(evidence);
+      }
+    }
+    if (!found) {
+      return false;
+    }
+    entries.clear();
+    entries.addAll(replaced);
+    evictToBounds();
+    return entries.stream()
+        .anyMatch(evidence -> evidence.timestampBoottimeNanos() == timestampBoottimeNanos);
   }
 
   /** Returns every retained entry in timestamp order. */

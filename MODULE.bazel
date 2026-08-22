@@ -23,8 +23,10 @@ bazel_dep(name = "libvpx", version = "1.16.0.bcr.beta.1")
 bazel_dep(name = "libwebm", version = "1.0.0.32")
 bazel_dep(name = "nlohmann_json", version = "3.12.0.bcr.1")
 bazel_dep(name = "rules_android", version = "0.7.3", dev_dependency = True)
+bazel_dep(name = "rules_android_ndk", version = "0.1.5", dev_dependency = True)
 bazel_dep(name = "rules_cc", version = "0.2.22")
 bazel_dep(name = "rules_java", version = "9.3.0", dev_dependency = True)
+bazel_dep(name = "rules_jvm_external", version = "7.1")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")
 bazel_dep(name = "rules_playwright", version = "0.5.3")
 bazel_dep(name = "rules_python", version = "2.2.0")
@@ -41,7 +43,11 @@ android.sdk(
     build_tools_version = "36.0.0",
     version = "36",
 )
-use_repo(android, "androidsdk")
+android.ndk(
+    api_level = 34,
+    version = "r25c",
+)
+use_repo(android, "androidndk", "androidsdk")
 
 rules_android_sdk = use_extension(
     "@rules_android//rules/android_sdk_repository:rule.bzl",
@@ -49,7 +55,19 @@ rules_android_sdk = use_extension(
     dev_dependency = True,
 )
 override_repo(rules_android_sdk, "androidsdk")
-register_toolchains("@androidsdk//:all", dev_dependency = True)
+
+rules_android_ndk = use_extension(
+    "@rules_android_ndk//:extension.bzl",
+    "android_ndk_repository_extension",
+    dev_dependency = True,
+)
+override_repo(rules_android_ndk, "androidndk")
+
+register_toolchains(
+    "@androidndk//:all",
+    "@androidsdk//:all",
+    dev_dependency = True,
+)
 
 http_archive(
     name = "libva_headers",
@@ -101,6 +119,25 @@ pose_inference_pip.parse(
     requirements_lock = "//tools/pose_inference:requirements_lock.txt",
 )
 use_repo(pose_inference_pip, "pose_inference_pip")
+
+# MediaPipe Tasks Vision is kept in a separate, pinned Maven graph so its
+# Android transitive dependencies do not leak into unrelated host targets.
+mediapipe_android_maven = use_extension(
+    "@rules_jvm_external//:extensions.bzl",
+    "maven",
+)
+mediapipe_android_maven.install(
+    name = "mediapipe_android",
+    artifacts = ["com.google.mediapipe:tasks-vision:0.10.35"],
+    fail_if_repin_required = True,
+    lock_file = "//third_party/mediapipe:artifacts.lock.json",
+    repositories = [
+        "https://dl.google.com/dl/android/maven2",
+        "https://repo1.maven.org/maven2",
+    ],
+    use_starlark_android_rules = True,
+)
+use_repo(mediapipe_android_maven, "mediapipe_android")
 
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 http_file(

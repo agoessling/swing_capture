@@ -13,7 +13,8 @@ import {
 
 interface DiagnosticFeedbackPanelProps {
   api: ReviewApi;
-  manifest: ClipManifest;
+  manifest?: ClipManifest;
+  diagnosticOnlySessionId?: string;
 }
 
 interface TimingWindow {
@@ -36,9 +37,22 @@ const MISSED_SHOT_AUDIO_WINDOW: TimingWindow = {
   maximumUs: 2_000_000,
 };
 
-export function DiagnosticFeedbackPanel({ api, manifest }: DiagnosticFeedbackPanelProps) {
+export function DiagnosticFeedbackPanel({
+  api,
+  manifest,
+  diagnosticOnlySessionId,
+}: DiagnosticFeedbackPanelProps) {
+  const sessionId = manifest?.session_id ?? diagnosticOnlySessionId;
+  if (sessionId === undefined) {
+    throw new Error("Diagnostic feedback requires a capture manifest or diagnostic session ID");
+  }
+  const diagnosticOnly = manifest === undefined;
   const [classification, setClassification] = useState<DiagnosticClassification>(
-    manifest.trigger.source === "missed_shot" ? "missed_shot" : "good_capture",
+    manifest?.trigger.source === "missed_shot"
+      ? "missed_shot"
+      : diagnosticOnly
+        ? "other"
+        : "good_capture",
   );
   const [note, setNote] = useState("");
   const [desiredStartMs, setDesiredStartMs] = useState("");
@@ -49,9 +63,9 @@ export function DiagnosticFeedbackPanel({ api, manifest }: DiagnosticFeedbackPan
   const [feedbackStatus, setFeedbackStatus] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
-  const timingWindow = manifestTimingWindow(manifest);
+  const timingWindow = manifest === undefined ? null : manifestTimingWindow(manifest);
   const audioTimingWindow =
-    manifest.trigger.source === "missed_shot" ? MISSED_SHOT_AUDIO_WINDOW : timingWindow;
+    manifest?.trigger.source === "missed_shot" ? MISSED_SHOT_AUDIO_WINDOW : timingWindow;
 
   const submitFeedback = async () => {
     setFeedbackPending(true);
@@ -67,7 +81,7 @@ export function DiagnosticFeedbackPanel({ api, manifest }: DiagnosticFeedbackPan
         visualImpactMs,
         audioImpactMs,
       });
-      await api.submitDiagnosticFeedback(manifest.session_id, feedback);
+      await api.submitDiagnosticFeedback(sessionId, feedback);
       setFeedbackStatus("Diagnostic feedback saved.");
     } catch (caught) {
       setDiagnosticError(errorMessage(caught));
@@ -81,7 +95,7 @@ export function DiagnosticFeedbackPanel({ api, manifest }: DiagnosticFeedbackPan
     setExportStatus(null);
     setDiagnosticError(null);
     try {
-      const archives = await api.getDiagnosticArchives(manifest.session_id);
+      const archives = await api.getDiagnosticArchives(sessionId);
       if (archives.length === 0) {
         throw new Error("The station returned no diagnostic ZIP.");
       }
@@ -108,9 +122,15 @@ export function DiagnosticFeedbackPanel({ api, manifest }: DiagnosticFeedbackPan
     >
       <header>
         <div>
-          <p className="section-kicker">Post-capture</p>
-          <h3 id="capture-diagnostics-heading">Capture diagnostics</h3>
-          <p>Label this result and retain a portable evidence bundle for debugging.</p>
+          <p className="section-kicker">{diagnosticOnly ? "Standby evidence" : "Post-capture"}</p>
+          <h3 id="capture-diagnostics-heading">
+            {diagnosticOnly ? "Standby diagnostics" : "Capture diagnostics"}
+          </h3>
+          <p>
+            {diagnosticOnly
+              ? "This session contains diagnostic audio and optional pose evidence, but no review video. Label it or retain a portable evidence bundle for debugging."
+              : "Label this result and retain a portable evidence bundle for debugging."}
+          </p>
         </div>
         <button
           className="secondary diagnostic-export"
@@ -150,7 +170,11 @@ export function DiagnosticFeedbackPanel({ api, manifest }: DiagnosticFeedbackPan
           <textarea
             maxLength={MAX_DIAGNOSTIC_NOTE_LENGTH}
             onChange={(event) => setNote(event.currentTarget.value)}
-            placeholder="What looked wrong, and in which view?"
+            placeholder={
+              diagnosticOnly
+                ? "What happened while the station was waiting?"
+                : "What looked wrong, and in which view?"
+            }
             rows={2}
             value={note}
           />
@@ -163,7 +187,7 @@ export function DiagnosticFeedbackPanel({ api, manifest }: DiagnosticFeedbackPan
           <details className="diagnostic-timing">
             <summary>Timing marks (optional)</summary>
             <p>Milliseconds relative to the detected impact; negative values are before impact.</p>
-            {manifest.trigger.source === "missed_shot" ? (
+            {manifest?.trigger.source === "missed_shot" ? (
               <p>Missed-shot diagnostic audio spans up to 10 seconds before and 2 seconds after.</p>
             ) : null}
             <div>

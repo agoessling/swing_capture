@@ -14,6 +14,7 @@ public final class PreviewEvidenceRingTest {
     oldestEntriesAreEvictedByEveryIndependentBound();
     rejectedAppendsAreTypedAndNonmutating();
     halfOpenSnapshotPreservesTimestampOrdering();
+    lowerCadenceFramesAttachToFiveHzObservations();
     malformedEvidenceAndBoundsAreRejected();
   }
 
@@ -84,6 +85,24 @@ public final class PreviewEvidenceRingTest {
     check(ring.snapshot(21, 30).entryCount() == 0, "empty selection is valid");
   }
 
+  private static void lowerCadenceFramesAttachToFiveHzObservations() {
+    PreviewEvidenceRing ring = new PreviewEvidenceRing(10_000, 10, 100);
+    for (long timestamp = 0; timestamp <= 800; timestamp += 200) {
+      ring.append(evidence(timestamp, new byte[0]));
+    }
+    check(ring.snapshot().entryCount() == 5, "all five-Hz observations retained");
+    check(ring.snapshot().compressedBytes() == 0, "observation rows need no JPEG");
+    check(ring.attachCompressedFrame(0, new byte[] {1, 2, 3}), "first JPEG attached");
+    check(ring.attachCompressedFrame(800, new byte[] {4, 5}), "arm JPEG attached");
+    check(!ring.attachCompressedFrame(1_000, new byte[] {9}), "evicted/unknown row rejected");
+    Snapshot snapshot = ring.snapshot();
+    check(snapshot.entryCount() == 5, "JPEG attachment preserves observation count");
+    check(snapshot.compressedBytes() == 5, "JPEG attachment byte accounting");
+    check(snapshot.entryAt(0).hasCompressedFrame(), "first JPEG present");
+    check(!snapshot.entryAt(1).hasCompressedFrame(), "intermediate observation is trace-only");
+    check(snapshot.entryAt(4).hasCompressedFrame(), "arm JPEG present");
+  }
+
   private static void malformedEvidenceAndBoundsAreRejected() {
     expectIllegalArgument(() -> new PreviewEvidenceRing(0, 1, 1), "zero duration");
     expectIllegalArgument(() -> new PreviewEvidenceRing(1, 0, 1), "zero count");
@@ -93,7 +112,10 @@ public final class PreviewEvidenceRingTest {
     expectIllegalArgument(() -> ring.snapshot(1, 1), "empty snapshot");
     expectIllegalArgument(() -> evidence(-1, 1), "negative timestamp");
     expectIllegalArgument(() -> evidence(Long.MAX_VALUE, 1), "unrepresentable end");
-    expectIllegalArgument(() -> evidence(1, 0), "empty frame");
+    check(!evidence(1, 0).hasCompressedFrame(), "trace-only evidence accepted");
+    expectIllegalArgument(
+        () -> evidence(1, 0).withCompressedFrame(new byte[0]),
+        "empty attached frame");
     expectIllegalArgument(
         () ->
             new PreviewEvidence(

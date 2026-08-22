@@ -15,6 +15,7 @@ public final class PoseLandmarkObservationExtractorTest {
 
   public static void main(String[] arguments) {
     recognizesFaceOnAndDownTheLineAddressGeometry();
+    rejectsUprightDownTheLineClubCarry();
     downTheLinePolicyToleratesFarSideOcclusionOnly();
     feedsStableAddressToExistingController();
     usesFootSupportWithHipFallbackForHittingRegion();
@@ -27,10 +28,13 @@ public final class PoseLandmarkObservationExtractorTest {
     PoseLandmarkObservationExtractor.Evaluation faceOn =
         evaluation(frame(0, faceOnAddress()), null);
     PoseLandmarkObservationExtractor.Evaluation downTheLine =
-        evaluation(frame(0, downTheLineAddress()), null);
+        evaluation(frame(0, downTheLineAddress()), null, PoseProjection.DOWN_THE_LINE);
+    PoseLandmarkObservationExtractor.Evaluation mirroredDownTheLine =
+        evaluation(frame(0, mirrored(downTheLineAddress())), null, PoseProjection.DOWN_THE_LINE);
 
     check(faceOn.addressConfidence() > 0.75, "face-on address confidence");
     check(downTheLine.addressConfidence() > 0.75, "DTL address confidence");
+    check(mirroredDownTheLine.addressConfidence() > 0.75, "mirrored DTL address confidence");
     check(faceOn.insideHittingRegion(), "face-on region membership");
     check(downTheLine.insideHittingRegion(), "DTL region membership");
     check(faceOn.motionMagnitude() == 0.0, "first face-on frame motion");
@@ -63,12 +67,37 @@ public final class PoseLandmarkObservationExtractorTest {
     for (int timestampMs = 0; timestampMs <= 400; timestampMs += 200) {
       PoseLandmarkFrame current = frame(timestampMs, downTheLineAddress());
       PoseTriggerController.Command command =
-          downTheLine.observe(evaluation(current, previous).toControllerObservation()).command();
+          downTheLine
+              .observe(
+                  evaluation(current, previous, PoseProjection.DOWN_THE_LINE)
+                      .toControllerObservation())
+              .command();
       if (timestampMs == 400) {
         check(
             command == PoseTriggerController.Command.START_HIGH_SPEED,
             "DTL address arms controller");
       }
+      previous = current;
+    }
+  }
+
+  private static void rejectsUprightDownTheLineClubCarry() {
+    PoseTriggerController controller = controller();
+    PoseLandmarkFrame previous = null;
+    for (int timestampMs = 0; timestampMs <= 600; timestampMs += 200) {
+      PoseLandmarkFrame current = frame(timestampMs, uprightDownTheLineClubCarry());
+      PoseLandmarkObservationExtractor.Evaluation evaluation =
+          PoseLandmarkObservationExtractor.evaluate(
+              current,
+              previous,
+              HITTING_REGION,
+              CONFIG,
+              PoseProjection.DOWN_THE_LINE);
+      check(evaluation.addressConfidence() < 0.45, "upright DTL club carry rejects address");
+      check(
+          controller.observe(evaluation.toControllerObservation()).command()
+              == PoseTriggerController.Command.NONE,
+          "upright DTL club carry does not arm");
       previous = current;
     }
   }
@@ -200,6 +229,12 @@ public final class PoseLandmarkObservationExtractorTest {
     return PoseLandmarkObservationExtractor.evaluate(current, previous, HITTING_REGION, CONFIG);
   }
 
+  private static PoseLandmarkObservationExtractor.Evaluation evaluation(
+      PoseLandmarkFrame current, PoseLandmarkFrame previous, PoseProjection projection) {
+    return PoseLandmarkObservationExtractor.evaluate(
+        current, previous, HITTING_REGION, CONFIG, projection);
+  }
+
   private static PoseTriggerController controller() {
     return new PoseTriggerController(PoseTriggerController.Config.defaultsForFiveFramesPerSecond());
   }
@@ -260,6 +295,13 @@ public final class PoseLandmarkObservationExtractorTest {
     return pose;
   }
 
+  private static Map<PoseJoint, NormalizedPoseLandmark> uprightDownTheLineClubCarry() {
+    Map<PoseJoint, NormalizedPoseLandmark> pose = copy(downTheLineAddress());
+    pose.put(PoseJoint.LEFT_SHOULDER, landmark(0.58, 0.30));
+    pose.put(PoseJoint.RIGHT_SHOULDER, landmark(0.61, 0.30));
+    return pose;
+  }
+
   private static Map<PoseJoint, NormalizedPoseLandmark> walkingPose() {
     Map<PoseJoint, NormalizedPoseLandmark> pose = copy(standingFaceOn());
     pose.put(PoseJoint.LEFT_WRIST, landmark(0.32, 0.45));
@@ -282,6 +324,18 @@ public final class PoseLandmarkObservationExtractorTest {
               point.x() + xOffset, point.y() + yOffset, point.visibility()));
     }
     return shifted;
+  }
+
+  private static Map<PoseJoint, NormalizedPoseLandmark> mirrored(
+      Map<PoseJoint, NormalizedPoseLandmark> source) {
+    EnumMap<PoseJoint, NormalizedPoseLandmark> mirrored = new EnumMap<>(PoseJoint.class);
+    for (Map.Entry<PoseJoint, NormalizedPoseLandmark> entry : source.entrySet()) {
+      NormalizedPoseLandmark point = entry.getValue();
+      mirrored.put(
+          entry.getKey(),
+          new NormalizedPoseLandmark(1.0 - point.x(), point.y(), point.visibility()));
+    }
+    return mirrored;
   }
 
   private static Map<PoseJoint, NormalizedPoseLandmark> copy(

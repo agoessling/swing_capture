@@ -151,6 +151,15 @@ public final class SessionDiagnosticStoreTest {
         incident.classification()
             == DiagnosticIncident.IncidentClassification.USER_REPORTED,
         "missed shot classification");
+
+    File noImpactSession = sessionDirectory("pose-no-impact", "session-pose");
+    DiagnosticIncident noImpact =
+        store.initialize(
+            noImpactSession, "session-pose", "node-1", "pose_armed_no_impact", 1_234L);
+    check(
+        noImpact.classification()
+            == DiagnosticIncident.IncidentClassification.POSE_ARMED_NO_IMPACT,
+        "pose no-impact classification");
   }
 
   private static File sessionDirectory(String test, String sessionId) throws Exception {

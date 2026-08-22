@@ -8,6 +8,11 @@ import {
   type DiagnosticFeedback,
   PIPELINE_PROFILE_SCHEMA_VERSION,
   type PipelineProfile,
+  type PeerArmState,
+  type PeerArmStatus,
+  type PoseCaptureStatus,
+  type PoseMode,
+  type PosePhase,
   REVIEW_SCHEMA_VERSION,
   type ReviewApi,
   type ReviewRole,
@@ -166,9 +171,28 @@ export class FakeReviewApi implements ReviewApi {
   #hilStageHold = 0;
   #hilSession: SessionSummary | null = null;
   #syntheticSessionIds = new Set<string>();
+  #peerArmStatus: PeerArmStatus | undefined;
 
-  constructor({ hilEnabled = true }: { hilEnabled?: boolean } = {}) {
+  constructor({
+    hilEnabled = true,
+    peerArmState,
+    poseMode,
+    posePhase = "monitoring",
+  }: {
+    hilEnabled?: boolean;
+    peerArmState?: PeerArmState;
+    poseMode?: PoseMode;
+    posePhase?: PosePhase;
+  } = {}) {
     this.#captureStatus.hil.enabled = hilEnabled;
+    if (peerArmState !== undefined || poseMode !== undefined) {
+      this.#peerArmStatus = fixturePeerArmStatus(peerArmState ?? "not_requested");
+      this.#captureStatus.pose = fixturePoseStatus(
+        poseMode ?? "leader",
+        posePhase,
+        this.#peerArmStatus,
+      );
+    }
   }
 
   async getCaptureStatus(): Promise<CaptureStatus> {
@@ -187,6 +211,9 @@ export class FakeReviewApi implements ReviewApi {
       active_session_id: null,
       error: "",
       hil: structuredClone(this.#captureStatus.hil),
+      ...(this.#captureStatus.pose === undefined
+        ? {}
+        : { pose: structuredClone(this.#captureStatus.pose) }),
     };
     return structuredClone(this.#captureStatus);
   }
@@ -209,6 +236,9 @@ export class FakeReviewApi implements ReviewApi {
       active_session_id: session.session_id,
       error: "",
       hil: structuredClone(this.#captureStatus.hil),
+      ...(this.#captureStatus.pose === undefined
+        ? {}
+        : { pose: structuredClone(this.#captureStatus.pose) }),
     };
     this.#pendingPolls = 2;
     return structuredClone(session);
@@ -257,6 +287,9 @@ export class FakeReviewApi implements ReviewApi {
         active_session_id: active.session_id,
         error: "",
         hil: structuredClone(this.#captureStatus.hil),
+        ...(this.#captureStatus.pose === undefined
+          ? {}
+          : { pose: structuredClone(this.#captureStatus.pose) }),
       };
     }
     return {
@@ -278,6 +311,14 @@ export class FakeReviewApi implements ReviewApi {
     manifest.created_at_utc = session.created_at_utc;
     if (this.#syntheticSessionIds.has(sessionId)) {
       manifest.hil_evidence = structuredClone(FIXTURE_SYNTHETIC_HIL_EVIDENCE);
+    }
+    if (this.#peerArmStatus !== undefined) {
+      manifest.android_capture = {
+        node_id: "fixture-node",
+        shared_session_id: this.#peerArmStatus.shared_session_id,
+        trigger_timestamp_uncertainty_ns: 250_000,
+        peer_arm: structuredClone(this.#peerArmStatus),
+      };
     }
     for (const view of manifest.views) {
       view.media.path = `fixtures/review/${view.media.path}`;
@@ -362,9 +403,34 @@ export class FakeReviewApi implements ReviewApi {
           error: "",
         },
       },
+      ...(this.#captureStatus.pose === undefined
+        ? {}
+        : { pose: structuredClone(this.#captureStatus.pose) }),
     };
     this.#hilStageHold = this.#captureStatus.hil.busy ? 1 : 0;
   }
+}
+
+function fixturePeerArmStatus(state: PeerArmState): PeerArmStatus {
+  return {
+    state,
+    shared_session_id: state === "not_requested" ? null : "fixture-shared-session-001",
+    http_status: state === "accepted" ? 202 : state === "rejected" ? 409 : null,
+    failure_type: state === "failed" ? "java.io.IOException" : null,
+  };
+}
+
+function fixturePoseStatus(
+  mode: PoseMode,
+  phase: PosePhase,
+  peerArm: PeerArmStatus,
+): PoseCaptureStatus {
+  return {
+    mode,
+    phase,
+    transition_requested: phase === "high_speed",
+    peer_arm: structuredClone(peerArm),
+  };
 }
 
 const SYNTHETIC_SWING_STAGES: SyntheticSwingHilStage[] = [

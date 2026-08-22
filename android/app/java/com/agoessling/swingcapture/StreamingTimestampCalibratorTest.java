@@ -11,6 +11,13 @@ public final class StreamingTimestampCalibratorTest {
     isolatedOutlierDoesNotInvalidateEstablishedMapping();
     validSamplesResetEstablishedOutlierRun();
     sustainedOutliersFailInsteadOfLeavingStaleMapping();
+    warmStartupAlignmentSkipsUnencodedCameraFrames();
+    warmStartupAlignmentSkipsUnobservedCameraCallbacks();
+    warmStartupAlignmentSupportsAsynchronousArrival();
+    warmStartupAlignmentRejectsUnrelatedClocks();
+    warmStartupAlignmentUsesMeasuredClockOffset();
+    warmStartupAlignmentDoesNotLatchOneTransientBurstPair();
+    warmStartupAlignmentRejectsCoherentUnexpectedOffset();
     rollingEvidenceDoesNotGrow();
     diagnosticSnapshotPreservesExactAsynchronousEvidence();
     diagnosticSnapshotIsBoundedAcrossRingWrap();
@@ -121,6 +128,141 @@ public final class StreamingTimestampCalibratorTest {
     mapping.observeCamera(1, coherentOffset + 5_167_300L);
     assert mapping.valid();
     return mapping;
+  }
+
+  private static void warmStartupAlignmentSkipsUnencodedCameraFrames() {
+    StreamingTimestampCalibrator mapping = new StreamingTimestampCalibrator(true);
+    long firstTimestampNs = 250_000_000_000L;
+    for (int cameraOrdinal = 0; cameraOrdinal < 10; ++cameraOrdinal) {
+      mapping.observeCamera(cameraOrdinal, firstTimestampNs + cameraOrdinal * 4_166_667L);
+    }
+    for (int encoderOrdinal = 0; encoderOrdinal < 3; ++encoderOrdinal) {
+      long matchingCameraOrdinal = encoderOrdinal + 7L;
+      long presentationTimeUs =
+          (firstTimestampNs + matchingCameraOrdinal * 4_166_667L - 500L) / 1_000L;
+      mapping.observeEncoder(encoderOrdinal, presentationTimeUs);
+    }
+    assert mapping.valid();
+    assert mapping.cameraToEncoderOrdinalShift() == 7;
+    assert Math.abs(mapping.medianOffsetNanos()) < 1_500;
+    assert mapping.offsetSpanNanos() < 1_000;
+  }
+
+  private static void warmStartupAlignmentSupportsAsynchronousArrival() {
+    StreamingTimestampCalibrator mapping = new StreamingTimestampCalibrator(true);
+    long firstTimestampNs = 500_000_000_000L;
+    mapping.observeEncoder(0, (firstTimestampNs + 4L * 4_166_667L) / 1_000L);
+    for (int cameraOrdinal = 0; cameraOrdinal <= 5; ++cameraOrdinal) {
+      mapping.observeCamera(cameraOrdinal, firstTimestampNs + cameraOrdinal * 4_166_667L);
+    }
+    mapping.observeEncoder(1, (firstTimestampNs + 5L * 4_166_667L) / 1_000L);
+    assert mapping.valid();
+    assert mapping.cameraToEncoderOrdinalShift() == 4;
+    assert Math.abs(mapping.medianOffsetNanos()) < 1_000;
+  }
+
+  private static void warmStartupAlignmentSkipsUnobservedCameraCallbacks() {
+    StreamingTimestampCalibrator mapping = new StreamingTimestampCalibrator(true);
+    long firstEncoderTimestampNs = 700_000_000_000L;
+    for (int encoderOrdinal = 0; encoderOrdinal < 24; ++encoderOrdinal) {
+      mapping.observeEncoder(
+          encoderOrdinal, (firstEncoderTimestampNs + encoderOrdinal * 4_166_667L) / 1_000L);
+    }
+    for (int cameraOrdinal = 0; cameraOrdinal <= 16; cameraOrdinal += 8) {
+      long matchingEncoderOrdinal = cameraOrdinal + 7L;
+      mapping.observeCamera(
+          cameraOrdinal,
+          firstEncoderTimestampNs + matchingEncoderOrdinal * 4_166_667L + 500L);
+    }
+    assert mapping.valid();
+    assert mapping.cameraToEncoderOrdinalShift() == -7;
+    assert Math.abs(mapping.medianOffsetNanos()) < 1_500;
+    assert mapping.offsetSpanNanos() < 1_000;
+  }
+
+  private static void warmStartupAlignmentRejectsUnrelatedClocks() {
+    StreamingTimestampCalibrator mapping = new StreamingTimestampCalibrator(true);
+    for (int ordinal = 0; ordinal <= 64; ++ordinal) {
+      mapping.observeEncoder(ordinal, 1_000L + ordinal * 4_167L);
+      try {
+        mapping.observeCamera(ordinal, 10_000_000_000L + ordinal * 4_167_000L);
+        if (ordinal == 64) {
+          throw new AssertionError("unrelated warm timestamp clocks were accepted");
+        }
+      } catch (IllegalStateException expected) {
+        assert ordinal == 64;
+      }
+    }
+  }
+
+  private static void warmStartupAlignmentUsesMeasuredClockOffset() {
+    long clockOffset = 195_865_000_000L;
+    StreamingTimestampCalibrator mapping = new StreamingTimestampCalibrator(clockOffset);
+    long firstEncoderTimestampNs = 900_000_000_000L;
+    for (int encoderOrdinal = 0; encoderOrdinal < 24; ++encoderOrdinal) {
+      mapping.observeEncoder(
+          encoderOrdinal, (firstEncoderTimestampNs + encoderOrdinal * 4_166_667L) / 1_000L);
+    }
+    for (int cameraOrdinal = 0; cameraOrdinal <= 16; cameraOrdinal += 8) {
+      long matchingEncoderOrdinal = cameraOrdinal + 7L;
+      mapping.observeCamera(
+          cameraOrdinal,
+          firstEncoderTimestampNs
+              + matchingEncoderOrdinal * 4_166_667L
+              + clockOffset
+              + 500L);
+    }
+    assert mapping.valid();
+    assert mapping.cameraToEncoderOrdinalShift() == -7;
+    assert Math.abs(mapping.medianOffsetNanos() - clockOffset) < 1_500;
+    assert mapping.offsetSpanNanos() < 1_000;
+  }
+
+  private static void warmStartupAlignmentDoesNotLatchOneTransientBurstPair() {
+    StreamingTimestampCalibrator mapping = new StreamingTimestampCalibrator(true);
+    long firstEncoderTimestampNs = 1_200_000_000_000L;
+    long frameDurationNs = 4_166_667L;
+    for (int encoderOrdinal = 0; encoderOrdinal <= 31; ++encoderOrdinal) {
+      mapping.observeEncoder(
+          encoderOrdinal,
+          (firstEncoderTimestampNs + encoderOrdinal * frameDurationNs) / 1_000L);
+    }
+
+    // The first batch exposes one plausible -7 pair. The settled stream then supplies two +1
+    // pairs. Latching the solitary startup coincidence maps every frame one eight-frame burst
+    // early, which is the 33.5 ms failure observed on the Pixel 6.
+    mapping.observeCamera(0, firstEncoderTimestampNs + 7L * frameDurationNs + 500L);
+    assert !mapping.valid();
+    mapping.observeCamera(16, firstEncoderTimestampNs + 15L * frameDurationNs + 600L);
+    assert !mapping.valid();
+    mapping.observeCamera(24, firstEncoderTimestampNs + 23L * frameDurationNs + 700L);
+
+    assert mapping.valid();
+    assert mapping.cameraToEncoderOrdinalShift() == 1;
+    assert Math.abs(mapping.medianOffsetNanos()) < 1_500;
+    assert mapping.offsetSpanNanos() < 1_000;
+  }
+
+  private static void warmStartupAlignmentRejectsCoherentUnexpectedOffset() {
+    long expectedOffsetNs = 800L;
+    StreamingTimestampCalibrator mapping =
+        new StreamingTimestampCalibrator(expectedOffsetNs);
+    long firstEncoderTimestampNs = 1_400_000_000_000L;
+    long wrongOffsetNs = -33_465_000L;
+    for (int ordinal = 0; ordinal < 8; ++ordinal) {
+      mapping.observeEncoder(
+          ordinal, (firstEncoderTimestampNs + ordinal * 4_166_667L) / 1_000L);
+      mapping.observeCamera(
+          ordinal,
+          firstEncoderTimestampNs + ordinal * 4_166_667L + wrongOffsetNs);
+    }
+    assert !mapping.valid();
+    try {
+      mapping.cameraToEncoderOrdinalShift();
+      throw new AssertionError("coherent unexpected clock offset established a warm mapping");
+    } catch (IllegalStateException expected) {
+      // Expected.
+    }
   }
 
   private static void rollingEvidenceDoesNotGrow() {

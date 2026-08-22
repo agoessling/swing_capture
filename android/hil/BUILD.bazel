@@ -1,10 +1,28 @@
 load("//tools:strict_cc.bzl", "cc_library", "cc_test")
 
 cc_library(
+    name = "pose_replay_report_validation",
+    srcs = ["pose_replay_report_validation.cc"],
+    hdrs = ["pose_replay_report_validation.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "pose_replay_report_validation_test",
+    size = "small",
+    srcs = ["pose_replay_report_validation_test.cc"],
+    deps = [
+        ":pose_replay_report_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
     name = "android_probe_hil_support",
     srcs = ["android_probe_hil_support.cc"],
     hdrs = ["android_probe_hil_support.h"],
-    visibility = ["//visibility:private"],
+    visibility = ["//visibility:public"],
     deps = ["@nlohmann_json//:json"],
 )
 

@@ -3,7 +3,9 @@ package com.agoessling.swingcapture;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /** Fixed-memory ordinal correlator for a running Camera2-to-MediaCodec stream. */
 public final class StreamingTimestampCalibrator {
@@ -11,6 +13,8 @@ public final class StreamingTimestampCalibrator {
   private static final int CORRELATION_CAPACITY = 256;
   public static final int DIAGNOSTIC_SAMPLE_CAPACITY = 6;
   private static final long MAXIMUM_OFFSET_SPAN_NANOS = 1_000_000L;
+  private static final long MAXIMUM_STARTUP_ALIGNMENT_DISTANCE_NANOS = 1_000_000L;
+  private static final int MINIMUM_STARTUP_ALIGNMENT_PAIRS = 2;
   private static final int MAXIMUM_CONSECUTIVE_ESTABLISHED_OUTLIERS = 2;
 
   private final long[] encoderOrdinals = new long[CORRELATION_CAPACITY];
@@ -21,6 +25,13 @@ public final class StreamingTimestampCalibrator {
   private int offsetHead;
   private int offsetCount;
   private int consecutiveEstablishedOutliers;
+  private final boolean alignStartupByTimestamp;
+  private final long expectedStartupOffsetNanos;
+  private long cameraToEncoderOrdinalShift = Long.MIN_VALUE;
+  private long lastCorrelatedEncoderOrdinal = -1;
+  private long startupBestDistanceNanos = Long.MAX_VALUE;
+  private long startupBestEncoderOrdinal = -1;
+  private long startupBestCameraOrdinal = -1;
   private long lastEncoderOrdinal = -1;
   private long lastEncoderPtsUs = -1;
   private long lastCameraOrdinal = -1;
@@ -68,6 +79,31 @@ public final class StreamingTimestampCalibrator {
   }
 
   public StreamingTimestampCalibrator() {
+    this(false, 0);
+  }
+
+  /**
+   * Creates a correlator, optionally discovering a fixed warm-session startup frame shift.
+   *
+   * <p>A constrained high-speed session can begin delivering Camera2 callbacks several frames
+   * before its encoder surface emits an access unit. When both timestamps use Android's realtime
+   * clock, timestamp startup alignment pairs the nearest initial Camera2 timestamp with the first
+   * encoder PTS and then applies that fixed ordinal shift to the stream. It must only be enabled
+   * after verifying {@code SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME}.
+   */
+  public StreamingTimestampCalibrator(boolean alignStartupByTimestamp) {
+    this(alignStartupByTimestamp, 0);
+  }
+
+  /** Creates a warm-stream correlator around a measured camera-clock minus encoder-clock offset. */
+  public StreamingTimestampCalibrator(long expectedStartupOffsetNanos) {
+    this(true, expectedStartupOffsetNanos);
+  }
+
+  private StreamingTimestampCalibrator(
+      boolean alignStartupByTimestamp, long expectedStartupOffsetNanos) {
+    this.alignStartupByTimestamp = alignStartupByTimestamp;
+    this.expectedStartupOffsetNanos = expectedStartupOffsetNanos;
     Arrays.fill(encoderOrdinals, -1);
     Arrays.fill(cameraOrdinals, -1);
   }
@@ -84,7 +120,7 @@ public final class StreamingTimestampCalibrator {
     int slot = slot(ordinal);
     encoderOrdinals[slot] = ordinal;
     encoderPtsUs[slot] = presentationTimeUs;
-    correlate(ordinal);
+    correlateAfterObservation(ordinal);
   }
 
   public synchronized void observeCamera(long frameNumber, long sensorTimestampNanos) {
@@ -99,11 +135,15 @@ public final class StreamingTimestampCalibrator {
     int slot = slot(frameNumber);
     cameraOrdinals[slot] = frameNumber;
     cameraSensorNs[slot] = sensorTimestampNanos;
-    correlate(frameNumber);
+    correlateAfterObservation(frameNumber);
   }
 
   public synchronized boolean valid() {
-    return offsetCount >= 2 && offsetSpanNanos() <= MAXIMUM_OFFSET_SPAN_NANOS;
+    return offsetCount >= 2
+        && offsetSpanNanos() <= MAXIMUM_OFFSET_SPAN_NANOS
+        && (!alignStartupByTimestamp
+            || distance(medianOffsetNanos(), expectedStartupOffsetNanos)
+                <= MAXIMUM_STARTUP_ALIGNMENT_DISTANCE_NANOS);
   }
 
   public synchronized long sensorTimestampNanos(long presentationTimeUs) {
@@ -146,6 +186,17 @@ public final class StreamingTimestampCalibrator {
     return offsetCount;
   }
 
+  /** Camera ordinal minus encoder ordinal for the established mapping. */
+  public synchronized long cameraToEncoderOrdinalShift() {
+    if (!alignStartupByTimestamp) {
+      return 0;
+    }
+    if (cameraToEncoderOrdinalShift == Long.MIN_VALUE) {
+      throw new IllegalStateException("warm timestamp startup alignment is not established");
+    }
+    return cameraToEncoderOrdinalShift;
+  }
+
   /** Takes a fixed-size exact snapshot without changing correlation or mapping state. */
   public synchronized DiagnosticSnapshot diagnosticSnapshot(long requestedEncoderOrdinal) {
     if (requestedEncoderOrdinal < 0) {
@@ -173,12 +224,167 @@ public final class StreamingTimestampCalibrator {
             : new CameraSample(lastCameraOrdinal, lastCameraSensorNs));
   }
 
-  private void correlate(long ordinal) {
+  private void correlateAfterObservation(long observedOrdinal) {
+    if (!alignStartupByTimestamp) {
+      correlateSameOrdinal(observedOrdinal);
+      return;
+    }
+    if (cameraToEncoderOrdinalShift == Long.MIN_VALUE) {
+      establishWarmOrdinalShift();
+    }
+    if (cameraToEncoderOrdinalShift != Long.MIN_VALUE) {
+      correlateAlignedOrdinals();
+    } else if (lastEncoderOrdinal >= EVIDENCE_CAPACITY
+        && lastCameraOrdinal >= EVIDENCE_CAPACITY) {
+      throw new IllegalStateException(
+          "Camera2/MediaCodec warm startup timestamps could not be aligned within "
+              + MAXIMUM_STARTUP_ALIGNMENT_DISTANCE_NANOS
+              + " ns (nearest_distance_ns="
+              + startupBestDistanceNanos
+              + ", nearest_encoder_ordinal="
+              + startupBestEncoderOrdinal
+              + ", nearest_camera_ordinal="
+              + startupBestCameraOrdinal
+              + ", timestamp_samples="
+              + diagnosticSnapshot(0)
+              + ")");
+    }
+  }
+
+  private void establishWarmOrdinalShift() {
+    long nearestDistance = Long.MAX_VALUE;
+    long nearestEncoderOrdinal = -1;
+    long nearestCameraOrdinal = -1;
+    long selectedShift = Long.MIN_VALUE;
+    int selectedSupport = 0;
+    long selectedMaximumDistance = Long.MAX_VALUE;
+    long selectedSpan = Long.MAX_VALUE;
+    boolean selectedTied = false;
+    Set<Long> evaluatedShifts = new HashSet<>();
+    for (int encoderIndex = 0; encoderIndex < CORRELATION_CAPACITY; ++encoderIndex) {
+      if (encoderOrdinals[encoderIndex] < 0) {
+        continue;
+      }
+      long encoderTimestampNanos = Math.multiplyExact(encoderPtsUs[encoderIndex], 1_000L);
+      for (int cameraIndex = 0; cameraIndex < CORRELATION_CAPACITY; ++cameraIndex) {
+        if (cameraOrdinals[cameraIndex] < 0) {
+          continue;
+        }
+        long candidateOffset = cameraSensorNs[cameraIndex] - encoderTimestampNanos;
+        long candidateDistance = distance(candidateOffset, expectedStartupOffsetNanos);
+        if (candidateDistance < nearestDistance) {
+          nearestDistance = candidateDistance;
+          nearestEncoderOrdinal = encoderOrdinals[encoderIndex];
+          nearestCameraOrdinal = cameraOrdinals[cameraIndex];
+        }
+        if (candidateDistance > MAXIMUM_STARTUP_ALIGNMENT_DISTANCE_NANOS) {
+          continue;
+        }
+        long candidateShift =
+            Math.subtractExact(cameraOrdinals[cameraIndex], encoderOrdinals[encoderIndex]);
+        if (!evaluatedShifts.add(candidateShift)) {
+          continue;
+        }
+        int support = 0;
+        long minimumOffset = Long.MAX_VALUE;
+        long maximumOffset = Long.MIN_VALUE;
+        long maximumDistance = 0;
+        for (int supportEncoderIndex = 0;
+            supportEncoderIndex < CORRELATION_CAPACITY;
+            ++supportEncoderIndex) {
+          long supportEncoderOrdinal = encoderOrdinals[supportEncoderIndex];
+          if (supportEncoderOrdinal < 0) {
+            continue;
+          }
+          long supportCameraOrdinal = Math.addExact(supportEncoderOrdinal, candidateShift);
+          if (supportCameraOrdinal < 0) {
+            continue;
+          }
+          int supportCameraIndex = slot(supportCameraOrdinal);
+          if (cameraOrdinals[supportCameraIndex] != supportCameraOrdinal) {
+            continue;
+          }
+          long supportOffset =
+              cameraSensorNs[supportCameraIndex]
+                  - Math.multiplyExact(encoderPtsUs[supportEncoderIndex], 1_000L);
+          long supportDistance = distance(supportOffset, expectedStartupOffsetNanos);
+          if (supportDistance > MAXIMUM_STARTUP_ALIGNMENT_DISTANCE_NANOS) {
+            continue;
+          }
+          ++support;
+          minimumOffset = Math.min(minimumOffset, supportOffset);
+          maximumOffset = Math.max(maximumOffset, supportOffset);
+          maximumDistance = Math.max(maximumDistance, supportDistance);
+        }
+        long span = support == 0 ? Long.MAX_VALUE : maximumOffset - minimumOffset;
+        if (support < MINIMUM_STARTUP_ALIGNMENT_PAIRS || span > MAXIMUM_OFFSET_SPAN_NANOS) {
+          continue;
+        }
+        if (support > selectedSupport
+            || (support == selectedSupport && maximumDistance < selectedMaximumDistance)
+            || (support == selectedSupport
+                && maximumDistance == selectedMaximumDistance
+                && span < selectedSpan)) {
+          selectedShift = candidateShift;
+          selectedSupport = support;
+          selectedMaximumDistance = maximumDistance;
+          selectedSpan = span;
+          selectedTied = false;
+        } else if (support == selectedSupport
+            && maximumDistance == selectedMaximumDistance
+            && span == selectedSpan
+            && candidateShift != selectedShift) {
+          selectedTied = true;
+        }
+      }
+    }
+    if (!selectedTied && selectedSupport >= MINIMUM_STARTUP_ALIGNMENT_PAIRS) {
+      cameraToEncoderOrdinalShift = selectedShift;
+      // A negative shift means the encoder emitted startup access units before the first Camera2
+      // callback exposed to this session. Begin at the first encoder ordinal that has a
+      // nonnegative matching Camera2 ordinal instead of waiting forever for impossible samples.
+      lastCorrelatedEncoderOrdinal = Math.max(0L, -cameraToEncoderOrdinalShift) - 1L;
+    }
+    startupBestDistanceNanos = nearestDistance;
+    startupBestEncoderOrdinal = nearestEncoderOrdinal;
+    startupBestCameraOrdinal = nearestCameraOrdinal;
+  }
+
+  private void correlateAlignedOrdinals() {
+    // Constrained high-speed Camera2 may expose one metadata callback per eight-frame burst while
+    // MediaCodec emits every frame. Correlate every available shifted pair in order, but do not
+    // require camera metadata for the intervening encoder ordinals.
+    for (long encoderOrdinal = lastCorrelatedEncoderOrdinal + 1;
+        encoderOrdinal <= lastEncoderOrdinal;
+        ++encoderOrdinal) {
+      long cameraOrdinal = Math.addExact(encoderOrdinal, cameraToEncoderOrdinalShift);
+      int encoderSlot = slot(encoderOrdinal);
+      int cameraSlot = slot(cameraOrdinal);
+      if (encoderOrdinals[encoderSlot] != encoderOrdinal
+          || cameraOrdinals[cameraSlot] != cameraOrdinal) {
+        continue;
+      }
+      addOffset(
+          encoderOrdinal,
+          cameraSensorNs[cameraSlot]
+              - Math.multiplyExact(encoderPtsUs[encoderSlot], 1_000L));
+      lastCorrelatedEncoderOrdinal = encoderOrdinal;
+    }
+  }
+
+  private void correlateSameOrdinal(long ordinal) {
+    if (ordinal < 0) {
+      return;
+    }
     int slot = slot(ordinal);
     if (encoderOrdinals[slot] != ordinal || cameraOrdinals[slot] != ordinal) {
       return;
     }
     long offset = cameraSensorNs[slot] - Math.multiplyExact(encoderPtsUs[slot], 1_000L);
+    addOffset(ordinal, offset);
+  }
+
+  private void addOffset(long ordinal, long offset) {
     long candidateSpanNanos = spanWith(offset);
     if (offsetCount == 1 && candidateSpanNanos > MAXIMUM_OFFSET_SPAN_NANOS) {
       // Before the mapping is established, prefer a new candidate cluster over retaining a

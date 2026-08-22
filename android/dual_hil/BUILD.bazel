@@ -150,3 +150,40 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "dual_phone_paired_pose_arm_hil_test",
+    size = "medium",
+    srcs = ["dual_android_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "paired-pose",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":audio_evidence_validation",
+        ":concurrent_hil_validation",
+        ":dual_session_validation",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)

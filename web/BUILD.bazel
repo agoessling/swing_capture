@@ -27,7 +27,10 @@ APP_SRCS = [
     "src/diagnostic_feedback.tsx",
     "src/dual_node_review_api.ts",
     "src/fake_api.ts",
+    "src/fake_node_setup_api.ts",
     "src/fake_review_api.ts",
+    "src/node_setup_api.ts",
+    "src/node_setup_app.tsx",
     "src/paired_preview.ts",
     "src/review_api.ts",
     "src/review_app.tsx",
@@ -177,10 +180,46 @@ esbuild(
 )
 
 js_test(
-    name = "review_component_test",
+    name = "review_component_test_node",
     size = "small",
     data = NPM_TEST_DEPS,
     entry_point = ":review_component_test.js",
+    tags = ["manual"],
+)
+
+strict_cc_test(
+    name = "review_component_test",
+    size = "small",
+    srcs = [
+        "memory_usage_parser.cc",
+        "memory_usage_parser.h",
+        "process_lifecycle.cc",
+        "process_lifecycle.h",
+        "run_memory_limited_test.cc",
+    ],
+    args = ["$(rootpath :review_component_test_node)"],
+    data = [":review_component_test_node"],
+    timeout = "short",
+)
+
+strict_cc_test(
+    name = "memory_usage_parser_test",
+    size = "small",
+    srcs = [
+        "memory_usage_parser.cc",
+        "memory_usage_parser.h",
+        "memory_usage_parser_test.cc",
+    ],
+)
+
+strict_cc_test(
+    name = "process_lifecycle_test",
+    size = "small",
+    srcs = [
+        "process_lifecycle.cc",
+        "process_lifecycle.h",
+        "process_lifecycle_test.cc",
+    ],
 )
 
 copy_to_directory(

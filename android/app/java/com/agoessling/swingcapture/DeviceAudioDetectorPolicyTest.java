@@ -16,7 +16,7 @@ public final class DeviceAudioDetectorPolicyTest {
     ImpactDetector.Config defaults = ImpactDetector.Config.defaults();
     ImpactDetector.Config config = DeviceAudioDetectorPolicy.forDevice("Google", "Pixel 5a");
 
-    checkFloat(config.minimumPeakAmplitude(), 0.012f, "Pixel 5a minimum peak");
+    checkFloat(config.minimumPeakAmplitude(), 0.010f, "Pixel 5a minimum peak");
     checkFloat(
         config.thresholdMultiplier(), defaults.thresholdMultiplier(), "threshold multiplier");
     checkFloat(config.initialNoiseFloor(), defaults.initialNoiseFloor(), "initial noise floor");
@@ -36,7 +36,7 @@ public final class DeviceAudioDetectorPolicyTest {
 
   private static void matchingNormalizesCaseOnly() {
     ImpactDetector.Config config = DeviceAudioDetectorPolicy.forDevice("gOoGlE", "pIxEl 5A");
-    checkFloat(config.minimumPeakAmplitude(), 0.012f, "case-normalized Pixel 5a minimum");
+    checkFloat(config.minimumPeakAmplitude(), 0.010f, "case-normalized Pixel 5a minimum");
   }
 
   private static void modelNameMustBeExact() {

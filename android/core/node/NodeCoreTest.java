@@ -13,6 +13,7 @@ public final class NodeCoreTest {
     captureStateMachineIsExplicit();
     coordinationStatePreservesSharedSessionIdentity();
     retentionKeepsNewestWithinBothLimits();
+    retentionPrioritizesSwingCapturesOverDiagnostics();
     retentionNeverDeletesProtectedSession();
   }
 
@@ -27,9 +28,26 @@ public final class NodeCoreTest {
     assert report.localSessionId().equals("local-1");
     assert report.timestampUncertaintyNanos() == 350_000L;
 
+    state.resumeMonitoringAfterCapture();
+    assert state.sharedSessionId() == null;
+    assert state.latestTrigger() == report;
+    state.triggered("face_on", "node-2", "ignored", 8_000_000_000L, 0, "manual");
+    assert state.latestTrigger() == report;
+
+    state.armed("shared-20260815-2");
+    assert state.latestTrigger() == null;
+
     state.armed(null);
     state.triggered("face_on", "node-2", "local-2", 8_000_000_000L, 0, "manual");
     assert state.latestTrigger() == null;
+
+    boolean missingReportRejected = false;
+    try {
+      state.resumeMonitoringAfterCapture();
+    } catch (IllegalStateException expected) {
+      missingReportRejected = true;
+    }
+    assert missingReportRejected;
   }
 
   private static void credentialsAreStrongAndExact() throws Exception {
@@ -46,6 +64,13 @@ public final class NodeCoreTest {
     CaptureRuntime runtime = new CaptureRuntime();
     assert runtime.snapshot().state() == CaptureRuntime.State.STOPPED;
     runtime.starting();
+    runtime.armed();
+    runtime.updateRing(5, 0, 50, 1_000_000);
+    runtime.transitioningToHighSpeed();
+    CaptureRuntime.Snapshot transition = runtime.snapshot();
+    assert transition.state() == CaptureRuntime.State.STARTING;
+    assert !transition.armed();
+    assert transition.videoFrames() == 0;
     runtime.armed();
     runtime.updateRing(480, 96_000, 6_000_000, 2_000_000);
     runtime.triggered("session-1", 4_000_000_000L);
@@ -88,7 +113,25 @@ public final class NodeCoreTest {
     assert removed.equals(List.of("new")) : removed;
   }
 
+  private static void retentionPrioritizesSwingCapturesOverDiagnostics() {
+    List<String> removed =
+        SessionRetentionPlanner.deletions(
+            List.of(
+                diagnosticEntry("new-diagnostic", 10_000, 10),
+                entry("old-capture", 1_000, 10)),
+            1,
+            100,
+            Set.of());
+    assert removed.equals(List.of("new-diagnostic")) : removed;
+  }
+
   private static SessionRetentionPlanner.Entry entry(String id, long created, long bytes) {
     return new SessionRetentionPlanner.Entry(id, created, bytes);
+  }
+
+  private static SessionRetentionPlanner.Entry diagnosticEntry(
+      String id, long created, long bytes) {
+    return new SessionRetentionPlanner.Entry(
+        id, created, bytes, SessionRetentionPlanner.RetentionClass.DIAGNOSTIC);
   }
 }

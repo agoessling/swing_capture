@@ -38,8 +38,8 @@ public final class SessionDiagnosticArchive {
   public record Result(File archive, int fileCount, long sourceBytes, long archiveBytes) {
     public Result {
       Objects.requireNonNull(archive, "archive");
-      if (fileCount <= 0 || sourceBytes <= 0 || archiveBytes <= 0) {
-        throw new IllegalArgumentException("diagnostic archive result must be nonempty");
+      if (fileCount <= 0 || sourceBytes < 0 || archiveBytes <= 0) {
+        throw new IllegalArgumentException("diagnostic archive result is invalid");
       }
     }
   }
@@ -169,7 +169,7 @@ public final class SessionDiagnosticArchive {
     long totalBytes = 0;
     for (File file : files) {
       long bytes = file.length();
-      if (bytes <= 0 || totalBytes > MAXIMUM_TOTAL_BYTES - bytes) {
+      if (bytes < 0 || totalBytes > MAXIMUM_TOTAL_BYTES - bytes) {
         throw new IOException("Diagnostic session byte count exceeds the configured bound");
       }
       totalBytes += bytes;
@@ -188,6 +188,16 @@ public final class SessionDiagnosticArchive {
   private static void collectFiles(File root, File current, List<File> files) throws IOException {
     if (Files.isSymbolicLink(current.toPath())) {
       throw new IOException("Refusing to archive a symbolic link");
+    }
+    if (current.getName().equals(SessionStagingCleanup.OWNERSHIP_MARKER)) {
+      File parent = current.getAbsoluteFile().getParentFile();
+      if (current.isFile()
+          && parent != null
+          && parent.getCanonicalFile().equals(root.getCanonicalFile())) {
+        return;
+      }
+      throw new IOException(
+          "Diagnostic session ownership marker is nested or is not a regular root file");
     }
     if (current.isFile()) {
       if (!EXCLUDED_NAMES.contains(current.getName()) && !current.getName().endsWith(".tmp")) {
@@ -307,7 +317,7 @@ public final class SessionDiagnosticArchive {
   private static long boundedSourceBytes(List<Source> sources) throws IOException {
     long total = 0;
     for (Source source : sources) {
-      if (source.bytes() <= 0 || total > MAXIMUM_TOTAL_BYTES - source.bytes()) {
+      if (source.bytes() < 0 || total > MAXIMUM_TOTAL_BYTES - source.bytes()) {
         throw new IOException("Diagnostic archive exceeds its configured byte bound");
       }
       total += source.bytes();

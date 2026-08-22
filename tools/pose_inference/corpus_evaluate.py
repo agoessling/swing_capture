@@ -122,6 +122,21 @@ def _replay_arguments(job: EvaluationJob, executable: Path, startup_budget_ms: i
     return arguments
 
 
+@dataclasses.dataclass(frozen=True)
+class _ReplayEvidence:
+    observation_count: int
+    arm_count: int
+    arm_ns: int | None
+    offset_ns: int | None
+    ready_ns: int | None
+    lead_ns: int | None
+    before_safe: bool
+    forbidden: bool
+    ready: bool
+    passed: bool
+    outcome: str
+
+
 def parse_replay_result(rendered: str, clip_id: str) -> dict[str, object]:
     """Validate the narrow JSON contract emitted by the shared Java replay."""
     decoded = cast("object", json.loads(rendered))
@@ -129,12 +144,152 @@ def parse_replay_result(rendered: str, clip_id: str) -> dict[str, object]:
         message = f"{clip_id} replay emitted an invalid result"
         raise TypeError(message)
     value = cast("dict[str, object]", decoded)
-    if value.get("schema_version") != 1:
+    _validate_replay_shape(value, clip_id)
+    evidence = _parse_replay_evidence(value, clip_id)
+    _validate_replay_timing(evidence, clip_id)
+    expected_outcome = _expected_replay_outcome(evidence)
+    if evidence.outcome != expected_outcome or evidence.passed != evidence.outcome.startswith(
+        "acceptable"
+    ):
+        message = f"{clip_id} replay outcome contradicts its timing evidence"
+        raise ValueError(message)
+    return value
+
+
+def _validate_replay_shape(value: dict[str, object], clip_id: str) -> None:
+    expected_fields = {
+        "schema_version",
+        "observation_count",
+        "arm_request_ns",
+        "arm_offset_from_preferred_ns",
+        "high_speed_ready_ns",
+        "ready_lead_before_takeaway_ns",
+        "armed_before_safe_window",
+        "armed_in_forbidden_interval",
+        "ready_by_takeaway",
+        "passed",
+        "outcome",
+        "arm_request_count",
+        "final_state",
+    }
+    if set(value) != expected_fields or value.get("schema_version") != 1:
         message = f"{clip_id} replay emitted an invalid result"
         raise ValueError(message)
-    passed = value.get("passed")
-    if not isinstance(passed, bool):
-        message = f"{clip_id} replay result has no boolean passed field"
+    if value["final_state"] not in {
+        "watching",
+        "qualifying",
+        "arm_requested",
+        "waiting_for_clear",
+    }:
+        message = f"{clip_id} replay has an unsupported final state"
+        raise ValueError(message)
+
+
+def _parse_replay_evidence(value: dict[str, object], clip_id: str) -> _ReplayEvidence:
+    outcome = value["outcome"]
+    if not isinstance(outcome, str) or outcome not in {
+        "acceptable",
+        "acceptable_early",
+        "no_arm_request",
+        "unsafe_early_arm",
+        "forbidden_arm",
+        "not_ready_by_takeaway",
+    }:
+        message = f"{clip_id} replay has an unsupported outcome"
+        raise ValueError(message)
+    return _ReplayEvidence(
+        observation_count=_nonnegative_integer(value["observation_count"], "observation_count"),
+        arm_count=_nonnegative_integer(value["arm_request_count"], "arm_request_count"),
+        arm_ns=_optional_decimal(value["arm_request_ns"], "arm_request_ns", signed=False),
+        offset_ns=_optional_decimal(
+            value["arm_offset_from_preferred_ns"],
+            "arm_offset_from_preferred_ns",
+            signed=True,
+        ),
+        ready_ns=_optional_decimal(
+            value["high_speed_ready_ns"], "high_speed_ready_ns", signed=False
+        ),
+        lead_ns=_optional_decimal(
+            value["ready_lead_before_takeaway_ns"],
+            "ready_lead_before_takeaway_ns",
+            signed=True,
+        ),
+        before_safe=_boolean(value["armed_before_safe_window"], "armed_before_safe_window"),
+        forbidden=_boolean(value["armed_in_forbidden_interval"], "armed_in_forbidden_interval"),
+        ready=_boolean(value["ready_by_takeaway"], "ready_by_takeaway"),
+        passed=_boolean(value["passed"], "passed"),
+        outcome=outcome,
+    )
+
+
+def _validate_replay_timing(evidence: _ReplayEvidence, clip_id: str) -> None:
+    if evidence.arm_count > evidence.observation_count:
+        message = f"{clip_id} replay has more arm requests than observations"
+        raise ValueError(message)
+    has_arm = evidence.arm_count > 0
+    if has_arm != (evidence.arm_ns is not None):
+        message = f"{clip_id} replay arm count contradicts its first arm timestamp"
+        raise ValueError(message)
+    timing = (evidence.offset_ns, evidence.ready_ns, evidence.lead_ns)
+    if any(value is not None for value in timing) != has_arm or (
+        has_arm and any(value is None for value in timing)
+    ):
+        message = f"{clip_id} replay arm timing fields are incomplete"
+        raise ValueError(message)
+    if not has_arm and (evidence.before_safe or evidence.forbidden or evidence.ready):
+        message = f"{clip_id} replay without an arm retains arm evidence"
+        raise ValueError(message)
+    if has_arm and (
+        evidence.arm_ns is None
+        or evidence.ready_ns is None
+        or evidence.lead_ns is None
+        or evidence.ready_ns < evidence.arm_ns
+        or evidence.ready != (evidence.lead_ns >= 0)
+    ):
+        message = f"{clip_id} replay timing contradicts readiness"
+        raise ValueError(message)
+
+
+def _expected_replay_outcome(evidence: _ReplayEvidence) -> str:
+    if evidence.arm_count == 0:
+        return "no_arm_request"
+    if evidence.forbidden:
+        return "forbidden_arm"
+    if evidence.before_safe:
+        return "unsafe_early_arm"
+    if not evidence.ready:
+        return "not_ready_by_takeaway"
+    if evidence.offset_ns is not None and evidence.offset_ns < 0:
+        return "acceptable_early"
+    return "acceptable"
+
+
+def _nonnegative_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        message = f"replay {name} must be an integer"
+        raise TypeError(message)
+    if value < 0:
+        message = f"replay {name} cannot be negative"
+        raise ValueError(message)
+    return value
+
+
+def _optional_decimal(value: object, name: str, *, signed: bool) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        message = f"replay {name} must be a decimal string or null"
+        raise TypeError(message)
+    digits = value[1:] if signed and value.startswith("-") else value
+    if not digits.isdigit():
+        message = f"replay {name} must be a decimal string or null"
+        raise ValueError(message)
+    return int(value)
+
+
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        message = f"replay {name} must be boolean"
         raise TypeError(message)
     return value
 

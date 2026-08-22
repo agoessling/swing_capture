@@ -79,7 +79,7 @@ owns Camera2, the microphone, a hardware H.264 encoder, and a bounded encoded
 pre-roll ring; a local audio impact freezes a real MP4 plus timestamped manifest
 without depending on the activity or browser lifecycle. Roles and capture
 profiles are configured independently. The Pixel 6 keeps the detector default
-floor of 0.015, while an isolated exact-model Pixel 5a policy uses 0.012; the
+floor of 0.015, while an isolated exact-model Pixel 5a policy uses 0.010; the
 Pixel 5a accommodation does not change Pixel 6 tuning.
 
 Each phone serves its sessions to the existing browser over bounded HTTP. The
@@ -132,23 +132,30 @@ diagnostic bundle: a 60-second in-memory PCM flight recorder yields up to a
 10-second-pre/2-second-post lossless WAV, canonical user feedback and timing
 labels are stored beside the clip, and one authenticated action downloads a
 checksummed ZIP. The browser provides “Save missed shot”, classification,
-timing-label, and ZIP controls for single- and dual-node sessions. Exact 5 Hz
-preview/pose evidence has a bounded core contract but will remain explicitly
-unavailable until the pose model is running in the phone service.
+timing-label, and ZIP controls for single- and dual-node sessions. When debug
+evidence is enabled, the phone service now retains every bounded 5 Hz pose row
+and controller decision plus thermally bounded one-Hz preview JPEGs and the arm
+frame, then publishes that evidence in the diagnostic ZIP.
 
-A separate low-rate pose-trigger prototype is underway to avoid running 240 fps
-continuously between shots. Bazel pins MediaPipe Pose Landmarker Lite and its
+A separate low-rate pose-trigger path avoids running 240 fps continuously
+between shots. Bazel pins MediaPipe Pose Landmarker Lite and its
 Python runtime under `//tools/pose_inference`; the shared pure-Java feature,
 controller, and replay code lives at `//android/core/pose`. Recorded 5 fps
 replays now produce auditable landmark/feature evidence and annotated videos,
 and a manual Android HIL now proves that one already-open low-rate Camera2
 session can transition to 720p240 without reopening the camera. Pixel 6 reached
 its first encoded high-speed frame in 543 ms and Pixel 5a in 1.322 s in the
-latest passing runs. The pose model is not yet integrated into the phone
-foreground service, so screen-off standby-to-trigger operation remains
-unclaimed. Impact timing still belongs to the existing microphone path. The
-contract, corpus results, warm-transition evidence, and staged plan are
-documented in [`docs/pose_trigger.md`](docs/pose_trigger.md).
+latest passing runs. The foreground service now runs the same pure-Java pose
+controller and MediaPipe model against a bounded 5 Hz Camera2 stream, with a
+GPU-preferred/CPU-fallback delegate policy, before transferring the open camera
+to high speed. The paired physical gate now passes with real 5 Hz inference on
+both phones: the Pixel 6 leader used the production peer-arm client to start the
+Pixel 5a shadow, both captured one Feather event concurrently at 720p240, and
+the durable coordination record bounded their mapped trigger separation to
+10.890 ms with 7.359 ms combined clock uncertainty. Impact timing still belongs
+to the existing microphone path. The contract, corpus results, transition and
+paired evidence, and remaining field-qualification plan are documented in
+[`docs/pose_trigger.md`](docs/pose_trigger.md).
 
 This runs the hardware-independent C++, Python, and TypeScript/UI suite. It
 covers the station doctor, SDK extractor, unattended HIL runner, synthetic

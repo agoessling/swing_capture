@@ -45,6 +45,8 @@ export type CaptureState =
 
 export type ReviewRole = "down_the_line" | "face_on";
 
+export type SessionKind = "capture" | "standby_diagnostic";
+
 export type SyntheticSwingHilStage =
   | "idle"
   | "calibrating"
@@ -75,6 +77,38 @@ export interface CaptureStatus {
   active_session_id: string | null;
   error: string;
   hil: SyntheticSwingHilStatus;
+  pose?: PoseCaptureStatus;
+}
+
+export const PEER_ARM_STATES = [
+  "not_requested",
+  "pending",
+  "accepted",
+  "rejected",
+  "failed",
+  "inbound_accepted",
+] as const;
+
+export type PeerArmState = (typeof PEER_ARM_STATES)[number];
+
+export const POSE_MODES = ["disabled", "shadow", "leader"] as const;
+export type PoseMode = (typeof POSE_MODES)[number];
+
+export const POSE_PHASES = ["idle", "monitoring", "high_speed"] as const;
+export type PosePhase = (typeof POSE_PHASES)[number];
+
+export interface PeerArmStatus {
+  state: PeerArmState;
+  shared_session_id: string | null;
+  http_status: number | null;
+  failure_type: string | null;
+}
+
+export interface PoseCaptureStatus {
+  mode: PoseMode;
+  phase: PosePhase;
+  transition_requested: boolean;
+  peer_arm: PeerArmStatus;
 }
 
 export interface SessionSummary {
@@ -82,6 +116,7 @@ export interface SessionSummary {
   state: CaptureState;
   created_at_utc: string;
   error: string;
+  session_kind?: SessionKind;
 }
 
 export interface SessionList {
@@ -257,6 +292,7 @@ export interface AndroidCaptureMetadata {
   shared_session_id: string | null;
   trigger_timestamp_uncertainty_ns: number | null;
   local_nearest_frame_residual_us?: number;
+  peer_arm?: PeerArmStatus;
 }
 
 export interface ReviewApi {
@@ -269,6 +305,11 @@ export interface ReviewApi {
   getManifest(sessionId: string): Promise<ClipManifest>;
   submitDiagnosticFeedback(sessionId: string, feedback: DiagnosticFeedback): Promise<void>;
   getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]>;
+  /**
+   * Maximum time a node-local standby diagnostic may remain pending before catalog publication.
+   * Coordinators omit this because their synthetic shared ID has no diagnostic artifact route.
+   */
+  readonly standbyDiagnosticPublicationTimeoutMs?: number;
   subscribeToChanges?(onChange: () => void): (() => void) | undefined;
   impactPreviewUrl?(sessionId: string, role: ReviewRole, revision: number): string;
 }
@@ -277,6 +318,7 @@ type Fetcher = typeof fetch;
 type HighResolutionNow = () => number;
 
 export class HttpReviewApi implements ReviewApi {
+  readonly standbyDiagnosticPublicationTimeoutMs = 10_000;
   readonly #baseUrl: string;
   readonly #fetcher: Fetcher;
   readonly #now: HighResolutionNow;
@@ -507,6 +549,7 @@ export function parseCaptureStatus(value: unknown): CaptureStatus {
   if (object.schema_version !== CAPTURE_SCHEMA_VERSION) {
     throw new Error(`Unsupported capture schema: ${String(object.schema_version)}`);
   }
+  const pose = parsePoseCaptureStatus(object.pose);
   return {
     schema_version: CAPTURE_SCHEMA_VERSION,
     state: parseState(object.state, "capture state"),
@@ -514,6 +557,7 @@ export function parseCaptureStatus(value: unknown): CaptureStatus {
     active_session_id: asNullableString(object.active_session_id, "active_session_id"),
     error: asString(object.error, "capture error"),
     hil: parseSyntheticSwingHilStatus(object.hil),
+    ...(pose === undefined ? {} : { pose }),
   };
 }
 
@@ -531,11 +575,20 @@ export function parseSessionList(value: unknown): SessionList {
 
 export function parseSessionSummary(value: unknown): SessionSummary {
   const object = asObject(value, "session summary");
+  const sessionKind = object.session_kind;
+  if (
+    sessionKind !== undefined &&
+    sessionKind !== "capture" &&
+    sessionKind !== "standby_diagnostic"
+  ) {
+    throw new Error(`Unsupported session_kind: ${String(sessionKind)}`);
+  }
   return {
     session_id: asNonemptyString(object.session_id, "session_id"),
     state: parseState(object.state, "session state"),
     created_at_utc: parseTimestamp(object.created_at_utc, "session created_at_utc"),
     error: asString(object.error, "session error"),
+    ...(sessionKind === undefined ? {} : { session_kind: sessionKind }),
   };
 }
 
@@ -597,6 +650,7 @@ function parseAndroidCaptureMetadata(value: unknown): AndroidCaptureMetadata | u
   }
   const object = asObject(value, "android_capture");
   const localResidual = object.local_nearest_frame_residual_us;
+  const peerArm = parsePeerArmStatus(object.peer_arm, "android_capture.peer_arm");
   return {
     node_id: asNonemptyString(object.node_id, "android_capture.node_id"),
     shared_session_id:
@@ -618,6 +672,71 @@ function parseAndroidCaptureMetadata(value: unknown): AndroidCaptureMetadata | u
             "android_capture.local_nearest_frame_residual_us",
           ),
         }),
+    ...(peerArm === undefined ? {} : { peer_arm: peerArm }),
+  };
+}
+
+function parsePoseCaptureStatus(value: unknown): PoseCaptureStatus | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const object = asObject(value, "capture pose status");
+  const mode = parseStringEnum(object.mode, POSE_MODES, "capture pose status mode");
+  const phase = parseStringEnum(object.phase, POSE_PHASES, "capture pose status phase");
+  const peerArm = parsePeerArmStatus(object.peer_arm, "capture pose status peer_arm");
+  if (peerArm === undefined) {
+    throw new Error("capture pose status peer_arm is required");
+  }
+  return {
+    mode,
+    phase,
+    transition_requested: asBoolean(
+      object.transition_requested,
+      "capture pose status transition_requested",
+    ),
+    peer_arm: peerArm,
+  };
+}
+
+function parsePeerArmStatus(value: unknown, label: string): PeerArmStatus | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const object = asObject(value, label);
+  const state = object.state;
+  if (typeof state !== "string" || !(PEER_ARM_STATES as readonly string[]).includes(state)) {
+    throw new Error(`${label}.state is unsupported: ${String(state)}`);
+  }
+  const parsedState = state as PeerArmState;
+  const sharedSessionId = asNullableString(object.shared_session_id, `${label}.shared_session_id`);
+  const httpStatus =
+    object.http_status === null ? null : asHttpStatus(object.http_status, `${label}.http_status`);
+  const failureType = asNullableString(object.failure_type, `${label}.failure_type`);
+
+  if (parsedState === "not_requested") {
+    if (sharedSessionId !== null || httpStatus !== null || failureType !== null) {
+      throw new Error(`${label} not_requested must not include an outcome`);
+    }
+  } else if (sharedSessionId === null) {
+    throw new Error(`${label}.${parsedState} requires shared_session_id`);
+  }
+  if ((parsedState === "accepted" || parsedState === "rejected") && httpStatus === null) {
+    throw new Error(`${label}.${parsedState} requires http_status`);
+  }
+  if (parsedState === "failed" && failureType === null) {
+    throw new Error(`${label}.failed requires failure_type`);
+  }
+  if (parsedState !== "accepted" && parsedState !== "rejected" && httpStatus !== null) {
+    throw new Error(`${label}.${parsedState} must not include http_status`);
+  }
+  if (parsedState !== "failed" && failureType !== null) {
+    throw new Error(`${label}.${parsedState} must not include failure_type`);
+  }
+  return {
+    state: parsedState,
+    shared_session_id: sharedSessionId,
+    http_status: httpStatus,
+    failure_type: failureType,
   };
 }
 
@@ -1082,6 +1201,17 @@ function parseState(value: unknown, label: string): CaptureState {
   return value;
 }
 
+function parseStringEnum<const Values extends readonly string[]>(
+  value: unknown,
+  values: Values,
+  label: string,
+): Values[number] {
+  if (typeof value !== "string" || !(values as readonly string[]).includes(value)) {
+    throw new Error(`${label} is unsupported: ${String(value)}`);
+  }
+  return value as Values[number];
+}
+
 function parseRole(value: unknown): ReviewRole {
   if (value !== "down_the_line" && value !== "face_on") {
     throw new Error(`Unknown review role: ${String(value)}`);
@@ -1220,6 +1350,14 @@ function asNonnegativeInteger(value: unknown, label: string): number {
     throw new Error(`${label} must be nonnegative`);
   }
   return integer;
+}
+
+function asHttpStatus(value: unknown, label: string): number {
+  const status = asInteger(value, label);
+  if (status < 100 || status > 599) {
+    throw new Error(`${label} must be an HTTP status code`);
+  }
+  return status;
 }
 
 function asPositiveInteger(value: unknown, label: string): number {

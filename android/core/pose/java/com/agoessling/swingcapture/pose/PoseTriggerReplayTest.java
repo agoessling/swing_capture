@@ -15,6 +15,8 @@ public final class PoseTriggerReplayTest {
     rejectsFinishPoseInForbiddenInterval();
     reportsMissingArm();
     reportsSignedOffsetFromPreferredArm();
+    treatsEarlyButSafeArmAsAcceptable();
+    scoresMultipleArmRequestsWithoutThrowing();
   }
 
   private static void passesWhenHighSpeedIsReadyBeforeTakeaway() {
@@ -29,6 +31,7 @@ public final class PoseTriggerReplayTest {
     check(result.readyLeadBeforeTakeawayNs().orElseThrow() == 300 * MS, "pass lead");
     check(result.readyByTakeaway(), "pass readiness");
     check(result.passed(), "pass result");
+    check(result.outcome() == PoseTriggerReplay.Outcome.ACCEPTABLE, "pass outcome");
   }
 
   private static void failsLateArmUsingStartupBudget() {
@@ -40,6 +43,9 @@ public final class PoseTriggerReplayTest {
     check(result.readyLeadBeforeTakeawayNs().orElseThrow() == -100 * MS, "late negative lead");
     check(!result.readyByTakeaway(), "late readiness");
     check(!result.passed(), "late result");
+    check(
+        result.outcome() == PoseTriggerReplay.Outcome.NOT_READY_BY_TAKEAWAY,
+        "late outcome");
   }
 
   private static void rejectsFinishPoseInForbiddenInterval() {
@@ -55,6 +61,7 @@ public final class PoseTriggerReplayTest {
 
     check(result.armedInForbiddenInterval(), "forbidden arm flag");
     check(!result.passed(), "forbidden result");
+    check(result.outcome() == PoseTriggerReplay.Outcome.FORBIDDEN_ARM, "forbidden outcome");
   }
 
   private static void reportsMissingArm() {
@@ -68,6 +75,7 @@ public final class PoseTriggerReplayTest {
 
     check(result.armRequestNs().isEmpty(), "missing arm time");
     check(!result.passed(), "missing arm result");
+    check(result.outcome() == PoseTriggerReplay.Outcome.NO_ARM_REQUEST, "missing outcome");
   }
 
   private static void reportsSignedOffsetFromPreferredArm() {
@@ -88,6 +96,46 @@ public final class PoseTriggerReplayTest {
     check(
         late.armOffsetFromPreferredNs().orElseThrow() == 200 * MS,
         "late preferred-arm offset");
+  }
+
+  private static void treatsEarlyButSafeArmAsAcceptable() {
+    PoseTriggerReplay.Result result =
+        PoseTriggerReplay.evaluate(
+            config(),
+            observationsWithAddressStartingAt(1_000),
+            new PoseTriggerReplay.Annotation(
+                800 * MS, 1_600 * MS, 2_000 * MS, 100 * MS, List.of()));
+
+    check(result.armRequestNs().orElseThrow() == 1_400 * MS, "early-safe arm time");
+    check(result.armOffsetFromPreferredNs().orElseThrow() == -200 * MS, "early-safe offset");
+    check(result.passed(), "early-safe result");
+    check(
+        result.outcome() == PoseTriggerReplay.Outcome.ACCEPTABLE_EARLY,
+        "early-safe outcome");
+  }
+
+  private static void scoresMultipleArmRequestsWithoutThrowing() {
+    List<PoseTriggerController.Observation> observations = new ArrayList<>();
+    for (int timestampMs = 0; timestampMs <= 5_200; timestampMs += 200) {
+      boolean firstSetup = timestampMs >= 1_000 && timestampMs <= 1_400;
+      boolean clear = timestampMs >= 1_600 && timestampMs <= 4_600;
+      boolean secondSetup = timestampMs >= 4_800;
+      if (firstSetup || secondSetup) {
+        observations.add(observation(timestampMs, 0.9, 0.9, 0.0, true));
+      } else if (clear) {
+        observations.add(observation(timestampMs, 0.0, 0.0, 0.0, false));
+      } else {
+        observations.add(observation(timestampMs, 0.9, 0.2, 0.0, true));
+      }
+    }
+
+    PoseTriggerReplay.Result result =
+        PoseTriggerReplay.evaluate(
+            config(), observations, annotation(800, 7_000, 100, List.of()));
+
+    check(result.armRequestCount() == 2, "multiple arm count");
+    check(result.armRequestNs().orElseThrow() == 1_400 * MS, "multiple first arm time");
+    check(result.passed(), "multiple replay result");
   }
 
   private static List<PoseTriggerController.Observation> observationsWithAddressStartingAt(

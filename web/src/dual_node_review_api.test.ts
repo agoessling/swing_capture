@@ -33,6 +33,33 @@ async function main() {
   isolatesDuplicateHistoricalRolesFromValidPairs();
   await provisionsOneSharedSessionAndRollsBackPartialArm();
   await persistsAndRecoversAlignmentAcrossCoordinatorInstances();
+  await remapsEndpointsAfterLiveRoleSwap();
+  await filtersStandbyDiagnosticsBeforeManifestLoading();
+  await preservesDualStandbyMissedShotKind();
+  await preservesPeerArmFailureInCombinedStatus();
+}
+
+async function remapsEndpointsAfterLiveRoleSwap() {
+  const nodes = fakeDualNodes();
+  const api = new DualNodeReviewApi(
+    endpoints(),
+    nodes.fetcher,
+    nodes.now,
+    () => "shared-after-role-swap",
+    null,
+  );
+  await api.getCaptureStatus();
+  nodes.swapRoles();
+  await api.setArmed(true);
+  assert.deepEqual(
+    nodes.armBodies.filter((body) => body.armed === true).map((body) => body.host),
+    ["face.test", "dtl.test"],
+    "live node descriptors, not bookmark parameter names, determine canonical role order",
+  );
+  const status = await api.getCaptureStatus();
+  assert.equal(status.active_session_id, "shared-after-role-swap");
+  assert.equal(status.error, "");
+  assert.equal(nodes.coordinationRecords.size, 2);
 }
 
 function localizesCommonRelativeDiagnosticMarks() {
@@ -137,6 +164,45 @@ async function persistsAndRecoversAlignmentAcrossCoordinatorInstances() {
   assert.equal(recoveredStatus.active_session_id, "shared-durable-session");
   assert.equal(nodes.coordinationRecords.size, 2);
   assert.ok(nodes.coordinationReads >= 2);
+}
+
+async function filtersStandbyDiagnosticsBeforeManifestLoading() {
+  const nodes = fakeDualNodes(null, true);
+  const api = new DualNodeReviewApi(endpoints(), nodes.fetcher, nodes.now, undefined, null);
+  assert.deepEqual(await api.getSessions(), { schema_version: 1, sessions: [] });
+  assert.equal(nodes.manifestRequests, 0);
+}
+
+async function preservesDualStandbyMissedShotKind() {
+  const nodes = fakeDualNodes(null, true, true);
+  const api = new DualNodeReviewApi(
+    endpoints(),
+    nodes.fetcher,
+    nodes.now,
+    () => "shared-standby-diagnostic",
+    null,
+  );
+  await api.setArmed(true);
+  const summary = await api.saveMissedShot();
+  assert.equal(summary.session_id, "shared-standby-diagnostic");
+  assert.equal(summary.session_kind, "standby_diagnostic");
+  assert.deepEqual(await api.getSessions(), { schema_version: 1, sessions: [] });
+  assert.equal(nodes.manifestRequests, 0);
+}
+
+async function preservesPeerArmFailureInCombinedStatus() {
+  const nodes = fakeDualNodes(null, false, false, true);
+  const api = new DualNodeReviewApi(endpoints(), nodes.fetcher, nodes.now, undefined, null);
+  const status = await api.getCaptureStatus();
+  assert.deepEqual(status.pose?.peer_arm, {
+    state: "rejected",
+    shared_session_id: "pose-shared-session",
+    http_status: 409,
+    failure_type: null,
+  });
+  assert.equal(status.pose?.mode, "leader");
+  assert.equal(status.pose?.phase, "high_speed");
+  assert.equal(status.pose?.transition_requested, true);
 }
 
 function estimatesIntersectedClockBounds() {
@@ -361,20 +427,28 @@ function endpoints() {
   ] as const;
 }
 
-function fakeDualNodes(failArmHost: string | null = null) {
+function fakeDualNodes(
+  failArmHost: string | null = null,
+  includeStandbyDiagnostic = false,
+  standbyMissedShot = false,
+  includePeerFailure = false,
+) {
   let coordinatorNow = 0n;
   let activeSharedSessionId: string | null = null;
+  let rolesSwapped = false;
   const armBodies: Array<Record<string, unknown> & { host: string }> = [];
   const coordinationRecords = new Map<string, unknown>();
   let coordinationReads = 0;
+  let manifestRequests = 0;
   const now = () => {
     coordinatorNow += 1_000_000n;
     return coordinatorNow;
   };
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
-    const role = url.hostname === "dtl.test" ? "down_the_line" : "face_on";
-    const nodeId = role === "down_the_line" ? "node-dtl" : "node-face";
+    const originallyDownTheLine = url.hostname === "dtl.test";
+    const role = originallyDownTheLine !== rolesSwapped ? "down_the_line" : "face_on";
+    const nodeId = originallyDownTheLine ? "node-dtl" : "node-face";
     if (url.pathname === "/api/v1/node") {
       return Response.json({
         schema_version: 1,
@@ -423,7 +497,59 @@ function fakeDualNodes(failArmHost: string | null = null) {
         shared_session_id: activeSharedSessionId,
         error: "",
         hil: { enabled: false, busy: false, stage: "idle", error: "", last_run: null },
+        ...(includePeerFailure
+          ? {
+              pose: {
+                mode: role === "down_the_line" ? "leader" : "shadow",
+                phase: role === "down_the_line" ? "high_speed" : "monitoring",
+                transition_requested: role === "down_the_line",
+                peer_arm:
+                  role === "down_the_line"
+                    ? {
+                        state: "rejected",
+                        shared_session_id: "pose-shared-session",
+                        http_status: 409,
+                        failure_type: null,
+                      }
+                    : {
+                        state: "inbound_accepted",
+                        shared_session_id: "pose-shared-session",
+                        http_status: null,
+                        failure_type: null,
+                      },
+              },
+            }
+          : {}),
       });
+    }
+    if (url.pathname === "/api/v1/capture/missed-shot") {
+      return Response.json({
+        session_id: `standby-${role}`,
+        state: standbyMissedShot ? "ready" : "waiting_post_roll",
+        created_at_utc: "2026-08-17T22:00:00Z",
+        error: "",
+        ...(standbyMissedShot ? { session_kind: "standby_diagnostic" } : {}),
+      });
+    }
+    if (url.pathname === "/api/v1/sessions") {
+      return Response.json({
+        schema_version: 1,
+        sessions: includeStandbyDiagnostic
+          ? [
+              {
+                session_id: `standby-${role}`,
+                state: "ready",
+                created_at_utc: "2026-08-17T22:00:00Z",
+                error: "",
+                session_kind: "standby_diagnostic",
+              },
+            ]
+          : [],
+      });
+    }
+    if (url.pathname.endsWith("/manifest")) {
+      manifestRequests += 1;
+      return Response.json({ error: "standby diagnostic has no clip manifest" }, { status: 404 });
     }
     if (url.pathname === "/api/v1/capture/trigger-report") {
       if (activeSharedSessionId === null) {
@@ -466,8 +592,14 @@ function fakeDualNodes(failArmHost: string | null = null) {
     get coordinationReads() {
       return coordinationReads;
     },
+    get manifestRequests() {
+      return manifestRequests;
+    },
     fetcher,
     now,
+    swapRoles() {
+      rolesSwapped = !rolesSwapped;
+    },
   };
 }
 

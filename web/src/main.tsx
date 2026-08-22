@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Application, viewFromHash } from "./application.js";
 import { HttpStationApi } from "./api.js";
 import { DualNodeReviewApi } from "./dual_node_review_api.js";
+import { HttpNodeSetupApi } from "./node_setup_api.js";
 import { HttpReviewApi } from "./review_api.js";
 import { isAndroidReviewMode, reviewEventsSupported } from "./review_boot.js";
 import "./styles.css";
@@ -42,13 +43,23 @@ const reviewApi =
         nodeControlToken,
         reviewEventsSupported(parameters),
       );
+const nodeSetupApis =
+  downTheLineNode !== null && faceOnNode !== null
+    ? [
+        new HttpNodeSetupApi(downTheLineNode, parameters.get("dtl_token") ?? ""),
+        new HttpNodeSetupApi(faceOnNode, parameters.get("face_token") ?? ""),
+      ]
+    : androidReviewMode
+      ? [new HttpNodeSetupApi(nodeBaseUrl, nodeControlToken)]
+      : undefined;
 
 createRoot(root).render(
   <StrictMode>
     <Application
       initialView={viewFromHash(window.location.hash)}
+      {...(nodeSetupApis === undefined ? {} : { nodeSetupApis })}
       reviewApi={reviewApi}
-      setupAvailable={!androidReviewMode}
+      setupAvailable
       stationApi={new HttpStationApi()}
     />
   </StrictMode>,

@@ -172,6 +172,8 @@ public final class SessionDiagnosticStore {
           DiagnosticIncident.IncidentClassification.SUCCESSFUL_CAPTURE;
       case "missed_shot" ->
           DiagnosticIncident.IncidentClassification.USER_REPORTED;
+      case "pose_armed_no_impact" ->
+          DiagnosticIncident.IncidentClassification.POSE_ARMED_NO_IMPACT;
       default -> throw new IllegalArgumentException("Unsupported diagnostic trigger source");
     };
   }

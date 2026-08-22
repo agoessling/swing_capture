@@ -105,15 +105,21 @@ detecting the ball and instead needs temporal motion/rearm policy.
 | Continuous qualification | 400 ms |
 | Maximum observation gap | 450 ms |
 | Isolated dropout grace | 250 ms |
-| Maximum high-speed arm | 15 s |
+| Active-evidence lease | 15 s |
+| Absolute thermal hard cap | 30 s |
 | Required clear interval | 1 s |
 | Rearm cooldown | 2 s |
 
 At a strict 5 fps cadence, 400 ms means three qualifying observations. The
 controller tolerates one isolated missed inference but resets on a larger gap.
-It emits one `START_HIGH_SPEED` command. A capture completion moves it to a
-waiting-for-clear state so a finish pose cannot immediately arm another swing.
-An arm that receives no impact emits `STOP_HIGH_SPEED` after 15 seconds.
+It emits one `START_HIGH_SPEED` command. While pose observations continue, an
+engaged golfer extends a 15-second active-evidence lease, including motion that
+no longer looks like address. The lease cannot cross the absolute 30-second
+thermal hard cap. A capture completion, expired lease, hard cap, or continuously
+clear hitting region moves the controller to a waiting-for-clear state. Rearm
+then requires both a fresh continuous one-second clear interval and the
+two-second cooldown, so a finish pose or a golfer stepping back in during the
+cooldown cannot immediately arm another swing.
 
 These are prototype thresholds, not product constants. The address and motion
 thresholds were first tuned against the reviewer-selected 7.0-second IN01 and
@@ -215,29 +221,43 @@ the original provisional 800 ms cold Pixel 6 budget:
 | IN01 | 7.0 s | 7.400 s | 8.200 s | 17.600 s |
 | IN02 | 8.0–10.0 s | 8.609 s | 9.409 s | 16.200 s |
 
-The current seven-clip run uses the configured ATL/DTL projection policy and a
-conservative 1.6 s startup budget derived from the slower warm Pixel 5a. It is
-preserved at
-`artifacts/pose_trigger_corpus_evaluation_20260816T2247Z/report.json`.
+The most recent seven-clip annotated run uses the configured ATL/DTL projection
+policy and an 800 ms provisional Pixel 6 startup budget. It is preserved at
+`artifacts/pose_trigger_corpus_evaluation_20260817T2308Z/report.json`. The arm
+times below are controller decisions; changing the startup budget changes only
+the estimated-ready time, not those decisions.
 
-| Clip | View | Human safe arm | Controller arm | Result |
+| Clip | View | Provisional safe arm | Controller arm | Strict label result |
 | --- | --- | ---: | ---: | --- |
 | IN01 | ATL | 7.0 s | 7.400 s | pass |
 | IN02 | ATL | 8.0 s | 8.609 s | pass |
-| C01 | DTL | 11.0 s | 10.200 s | early |
-| D01 | DTL | 10.0 s | 7.000 s | early |
-| D03 | ATL | 19.0 s | 11.400 s | narrow-stance false arm |
-| D04 | DTL | 13.0 s | 12.204 s | early |
-| E_E | ATL | 12.0 s | 9.200 s | early final setup |
+| C01 | DTL | 11.0 s | 11.000 s | pass |
+| D01 | DTL | 10.0 s | 8.000 s | early |
+| D03 | ATL | 19.0 s | 11.400 s | early |
+| D04 | DTL | 13.0 s | 12.608 s | early |
+| EE01 (E_E) | ATL | 12.0 s | 9.200 s | early |
 
 The DTL policy now tolerates far-side joint occlusion while ATL retains
 bilateral landmark requirements. That turns the former DTL no-arms into visible
-decisions, but the 2/7 result is intentionally not hidden: static pose,
-stillness, and region occupancy do not yet distinguish an early setup or narrow
-stance from the reviewer-selected final address. This points to an explicit
-temporal setup-phase feature or small sequence model. A continuously running
-ball detector is still unlikely to solve the practice/setup cases because the
-ball is already present.
+decisions. The strict replay score is 3/7 because the current label contract
+treats any arm before `safe_arm_start_ms` as a failure, including D04's 392 ms
+offset. It should not be reported as model accuracy. After reviewing the
+annotated videos, the human reviewer judged all seven displayed arm points
+reasonable for starting high-speed capture. That visual acceptance also is not
+a 7/7 accuracy claim: these are selected positive instructional clips, the
+acceptable early boundary has not yet been relabeled, and the set does not
+measure false arms during ordinary field use.
+
+The retained strict boundaries remain useful as conservative regression
+challenges until they are reconciled in a separate labeling pass. In
+particular, they keep the narrow-stance, practice-swing, and early-setup periods
+visible instead of silently redefining them after seeing controller output.
+The current static pose, stillness, and region features still need field
+evidence for aborted address, no-swing timeout, clear-and-rearm behavior,
+walk-throughs, and repeated setup attempts. A temporal setup-phase feature or a
+small sequence model remains an evidence-driven option if those cases produce
+unacceptable false arms. A continuously running ball detector is still
+unlikely to solve the practice/setup cases because the ball is already present.
 
 ## Warm Camera2 transition evidence
 
@@ -290,18 +310,47 @@ bazel test //android/hil:android_warm_high_speed_transition_hil_test \
   --test_output=streamed --nocache_test_results
 ```
 
-The next implementation slice is:
+## Current implementation and qualification
 
-1. add reviewed ATL and DTL development clips, especially aborted-address and
-   narrow-stance negatives;
-2. derive a temporal setup-phase feature or compact sequence classifier without
-   tuning against the held-out validation clips;
-3. integrate the same pure-Java controller and low-rate Camera2 session into the
-   leader phone's foreground service with the display off;
-4. provision one leader arm command to the peer and preserve the measured
-   per-node transition uncertainty; and
-5. add a short physical HIL in which the low-rate path arms both phones before
-   one Feather LED/tone event.
+Most of the integration work formerly listed as the next implementation slice
+now exists in the tree. `PoseStandbyEngine` runs the same pure-Java controller
+from the foreground service, consumes a bounded latest-frame Camera2 YUV stream
+at 5 Hz, runs the arm64 MediaPipe model with GPU-preferred/CPU-fallback delegate
+selection on both supported Pixels, retains optional low-rate debug evidence,
+and transfers its already-open camera into 720p240 capture. Setup selects the
+phone role, leader/shadow mode, delegate policy, hitting region, and debug
+evidence. A leader decision sends one authenticated pose-arm candidate to its
+configured peer without blocking local capture, and peer outcome is retained
+in status evidence. The controller implements an active-evidence lease,
+absolute thermal cap, no-swing stop, and clear-plus-cooldown rearm policy.
+
+The paired low-rate-to-high-speed physical gate passed on 2026-08-22. Its
+complete evidence is preserved at
+`artifacts/android_pose_field_readiness_20260821/dual_paired_passed_000604`.
+Both phones ran real 5 Hz on-device inference before the HIL-gated Pixel 6
+leader candidate exercised the production authenticated peer-arm client. The
+Pixel 5a shadow accepted that arm, both already-open cameras transitioned to
+720p240 concurrently, and exactly one Feather event produced two valid local
+audio captures. The durable paired record was created and read back on both
+phones. The mapped trigger delta was 3.529 ms; the conservative maximum
+separation was 10.890 ms with 7.359 ms combined clock uncertainty. Pixel 6 and
+Pixel 5a measured 238.876 and 239.353 sensor fps, retained 1.955 and 1.924
+seconds of pre-roll, decoded every manifested frame, and retained AprilTag 0
+before, at, and after impact. The complete transition-and-capture stage took
+14.855 seconds and remained inside its explicit 15-second deadline.
+
+The current evidence-driven refinement plan is:
+
+1. exercise aborted address, arm-without-swing, clear-and-rearm, practice-swing,
+   empty-scene, and repeated-setup cases during field use with low-rate preview
+   and standby-audio diagnostics enabled;
+2. add more reviewed ATL and DTL clips, especially true negative and aborted
+   sequences, while keeping held-out validation clips separate from tuning;
+3. reconcile provisional strict safe-window labels with the accepted visual
+   review before using aggregate pass counts as a release gate; and
+4. introduce temporal features or a compact sequence classifier only if the
+   collected off-nominal evidence shows the current geometry and controller
+   hysteresis are insufficient.
 
 MediaPipe Pose Landmarker documentation:
 https://developers.google.com/mediapipe/solutions/vision/pose_landmarker/

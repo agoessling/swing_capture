@@ -1,0 +1,226 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "pose_replay_hil_support",
+    srcs = ["pose_replay_hil_support.cc"],
+    hdrs = ["pose_replay_hil_support.h"],
+)
+
+cc_test(
+    name = "pose_replay_hil_support_test",
+    size = "small",
+    srcs = ["pose_replay_hil_support_test.cc"],
+    deps = [":pose_replay_hil_support"],
+)
+
+cc_test(
+    name = "android_pose_replay_hil_test",
+    size = "medium",
+    srcs = ["pose_replay_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":pose_replay_hil_support",
+        "//android/hil:pose_replay_report_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "pose_standby_validation",
+    srcs = ["pose_standby_validation.cc"],
+    hdrs = ["pose_standby_validation.h"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "pose_standby_validation_test",
+    size = "small",
+    srcs = ["pose_standby_validation_test.cc"],
+    deps = [":pose_standby_validation"],
+)
+
+cc_library(
+    name = "warm_retained_validation",
+    srcs = ["warm_retained_validation.cc"],
+    hdrs = ["warm_retained_validation.h"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "warm_retained_validation_test",
+    size = "small",
+    srcs = ["warm_retained_validation_test.cc"],
+    deps = [
+        ":warm_retained_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "standby_missed_validation",
+    srcs = ["standby_missed_validation.cc"],
+    hdrs = ["standby_missed_validation.h"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "standby_missed_validation_test",
+    size = "small",
+    srcs = ["standby_missed_validation_test.cc"],
+    deps = [
+        ":standby_missed_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_pose_standby_hil_test",
+    size = "medium",
+    srcs = ["pose_standby_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":pose_standby_validation",
+        ":standby_missed_validation",
+        ":warm_retained_validation",
+        "//android/hil:android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_pose_warm_retained_hil_test",
+    size = "medium",
+    srcs = ["pose_standby_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--warm-retained",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":pose_standby_validation",
+        ":standby_missed_validation",
+        ":warm_retained_validation",
+        "//android/hil:android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_pose_standby_missed_shot_hil_test",
+    size = "medium",
+    srcs = ["pose_standby_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--standby-missed-shot",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":pose_standby_validation",
+        ":standby_missed_validation",
+        ":warm_retained_validation",
+        "//android/hil:android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "android_pose_standby_impact_diagnostic_hil_test",
+    size = "medium",
+    srcs = ["pose_standby_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "--standby-impact",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":pose_standby_validation",
+        ":standby_missed_validation",
+        ":warm_retained_validation",
+        "//android/hil:android_probe_hil_support",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)

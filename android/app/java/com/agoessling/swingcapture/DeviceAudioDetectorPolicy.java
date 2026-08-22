@@ -7,7 +7,9 @@ import java.util.Locale;
 final class DeviceAudioDetectorPolicy {
   private static final String GOOGLE_MANUFACTURER = "google";
   private static final String PIXEL_5A_MODEL = "pixel 5a";
-  private static final float PIXEL_5A_MINIMUM_PEAK_AMPLITUDE = 0.012f;
+  // The maximum-safe Feather fixture tone has measured 0.0115-0.0122 on the Pixel 5a. Keep
+  // device-specific margin below that range while retaining the adaptive 8x-noise-floor gate.
+  private static final float PIXEL_5A_MINIMUM_PEAK_AMPLITUDE = 0.010f;
 
   private DeviceAudioDetectorPolicy() {}
 

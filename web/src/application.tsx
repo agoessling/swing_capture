@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { StationApi } from "./api.js";
 import { App as CameraSetupApp } from "./app.js";
+import type { NodeSetupApi } from "./node_setup_api.js";
+import { NodeSetupApp } from "./node_setup_app.js";
 import type { ReviewApi } from "./review_api.js";
 import { ReviewApp } from "./review_app.js";
 
@@ -12,6 +14,7 @@ export interface ApplicationProps {
   initialView?: ApplicationView;
   pollIntervalMs?: number;
   setupAvailable?: boolean;
+  nodeSetupApis?: readonly NodeSetupApi[];
 }
 
 export function Application({
@@ -20,6 +23,7 @@ export function Application({
   initialView = "review",
   pollIntervalMs,
   setupAvailable = true,
+  nodeSetupApis,
 }: ApplicationProps) {
   const [view, setView] = useState(
     initialView === "setup" && !setupAvailable ? "review" : initialView,
@@ -53,15 +57,17 @@ export function Application({
               onClick={() => selectView("setup")}
               type="button"
             >
-              Camera setup
+              {nodeSetupApis === undefined ? "Camera setup" : "Phone setup"}
             </button>
           ) : null}
         </div>
       </nav>
       {view === "review" ? (
         <ReviewApp api={reviewApi} {...polling} />
-      ) : (
+      ) : nodeSetupApis === undefined ? (
         <CameraSetupApp api={stationApi} {...polling} />
+      ) : (
+        <NodeSetupApp apis={nodeSetupApis} />
       )}
     </>
   );

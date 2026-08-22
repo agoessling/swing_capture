@@ -35,6 +35,7 @@ import com.agoessling.swingcapture.audio.ContinuousAudioImpactDetector;
 import com.agoessling.swingcapture.audio.ImpactDetector;
 import com.agoessling.swingcapture.audio.Pcm16EvidenceRing;
 import com.agoessling.swingcapture.diagnostics.DiagnosticAudioRing;
+import com.agoessling.swingcapture.diagnostics.PreviewEvidenceRing;
 import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -73,6 +74,10 @@ public final class ContinuousCaptureEngine {
   private static final int RETENTION_BYTES = 48 * 1024 * 1024;
   private static final int RETENTION_BLOCK_BYTES = 16 * 1024;
   private static final int RETENTION_ACCESS_UNITS = 1_200;
+  private static final String DIAGNOSTIC_STATUS_NOT_AVAILABLE = "not_available";
+  private static final String DIAGNOSTIC_STATUS_AVAILABLE = "available";
+  private static final String DIAGNOSTIC_STATUS_PUBLICATION_FAILED = "publication_failed";
+  private static final int MAXIMUM_LOGGED_FAILURE_TYPE_CHARACTERS = 160;
 
   /** Thread-safe callbacks; implementations must return promptly. */
   public interface Listener {
@@ -154,7 +159,9 @@ public final class ContinuousCaptureEngine {
 
     private static TriggerEvidence operator(
         String source, long timestampNanos, long audioFramePosition) {
-      if (!source.equals("manual") && !source.equals("missed_shot")) {
+      if (!source.equals("manual")
+          && !source.equals("missed_shot")
+          && !source.equals("pose_armed_no_impact")) {
         throw new IllegalArgumentException("unsupported operator trigger source");
       }
       return new TriggerEvidence(
@@ -199,9 +206,12 @@ public final class ContinuousCaptureEngine {
   private final String sharedSessionId;
   private final boolean automaticAudioTriggersRequested;
   private final Listener listener;
+  private final WarmCameraLease warmCameraLease;
+  private final PreviewEvidenceRing.Snapshot poseDiagnosticSnapshot;
+  private final PeerArmStatusTracker peerArmStatus;
   private final EncodedAccessUnitRetention retention;
-  private final StreamingTimestampCalibrator timestampCalibrator =
-      new StreamingTimestampCalibrator();
+  private final StreamingTimestampCalibrator timestampCalibrator;
+  private final long expectedEncoderToSensorOffsetNanos;
   private final ContinuousAudioImpactDetector impactDetector;
   private final Pcm16EvidenceRing pcmEvidenceRing;
   private final DiagnosticAudioRing diagnosticAudioRing =
@@ -249,11 +259,73 @@ public final class ContinuousCaptureEngine {
       boolean audioHilMode,
       boolean automaticAudioTriggersRequested,
       Listener listener) {
+    this(
+        context,
+        captureConfiguration,
+        sharedSessionId,
+        audioHilMode,
+        automaticAudioTriggersRequested,
+        null,
+        null,
+        null,
+        listener);
+  }
+
+  public ContinuousCaptureEngine(
+      Context context,
+      CaptureConfigurationSnapshot captureConfiguration,
+      String sharedSessionId,
+      boolean audioHilMode,
+      boolean automaticAudioTriggersRequested,
+      WarmCameraLease warmCameraLease,
+      Listener listener) {
+    this(
+        context,
+        captureConfiguration,
+        sharedSessionId,
+        audioHilMode,
+        automaticAudioTriggersRequested,
+        warmCameraLease,
+        null,
+        null,
+        listener);
+  }
+
+  /**
+   * Creates an engine with optional immutable pose-preview evidence for best-effort publication.
+   * Existing constructors retain their behavior by supplying no pose diagnostic snapshot.
+   */
+  public ContinuousCaptureEngine(
+      Context context,
+      CaptureConfigurationSnapshot captureConfiguration,
+      String sharedSessionId,
+      boolean audioHilMode,
+      boolean automaticAudioTriggersRequested,
+      WarmCameraLease warmCameraLease,
+      PreviewEvidenceRing.Snapshot poseDiagnosticSnapshot,
+      PeerArmStatusTracker peerArmStatus,
+      Listener listener) {
     this.context = context.getApplicationContext();
     this.captureConfiguration = captureConfiguration;
     this.profile = captureConfiguration.profile();
     this.sharedSessionId = sharedSessionId;
     this.automaticAudioTriggersRequested = automaticAudioTriggersRequested;
+    this.warmCameraLease = warmCameraLease;
+    if (warmCameraLease == null) {
+      expectedEncoderToSensorOffsetNanos = 0;
+      timestampCalibrator = new StreamingTimestampCalibrator();
+    } else {
+      long monotonicBeforeNanos = System.nanoTime();
+      long boottimeNanos = SystemClock.elapsedRealtimeNanos();
+      long monotonicAfterNanos = System.nanoTime();
+      expectedEncoderToSensorOffsetNanos =
+          WarmCaptureTransitionTiming.midpointClockOffsetNanos(
+              monotonicBeforeNanos, boottimeNanos, monotonicAfterNanos);
+      timestampCalibrator =
+          new StreamingTimestampCalibrator(expectedEncoderToSensorOffsetNanos);
+    }
+    this.poseDiagnosticSnapshot = poseDiagnosticSnapshot;
+    this.peerArmStatus = peerArmStatus;
     this.listener = listener;
     this.impactDetector =
         new ContinuousAudioImpactDetector(
@@ -290,7 +362,20 @@ public final class ContinuousCaptureEngine {
         Thread.sleep(10);
       }
       if (!triggerReady()) {
-        throw new IllegalStateException("Timed out filling a continuous encoded pre-roll");
+        String ordinalShift;
+        try {
+          ordinalShift = Long.toString(timestampCalibrator.cameraToEncoderOrdinalShift());
+        } catch (IllegalStateException unavailable) {
+          ordinalShift = "unavailable";
+        }
+        throw new IllegalStateException(
+            "Timed out filling a continuous encoded pre-roll (timestamp_evidence="
+                + timestampCalibrator.evidenceCount()
+                + ", camera_to_encoder_ordinal_shift="
+                + ordinalShift
+                + ", timestamp_samples="
+                + timestampCalibrator.diagnosticSnapshot(0)
+                + ")");
       }
       fullPreRollReadyElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
       listener.onReady();
@@ -310,6 +395,11 @@ public final class ContinuousCaptureEngine {
 
   public TriggerAttempt triggerMissedShot(String requestedSessionId) {
     return triggerOperator(requestedSessionId, "missed_shot");
+  }
+
+  /** Retains bounded evidence when pose armed high-speed capture but no impact followed. */
+  public TriggerAttempt triggerPoseArmedNoImpact(String requestedSessionId) {
+    return triggerOperator(requestedSessionId, "pose_armed_no_impact");
   }
 
   private TriggerAttempt triggerOperator(String requestedSessionId, String source) {
@@ -631,6 +721,10 @@ public final class ContinuousCaptureEngine {
     if (!temporaryDirectory.mkdir()) {
       throw new IllegalStateException("Unable to create temporary session " + pending.sessionId);
     }
+    boolean publicationSucceeded = false;
+    try {
+      SessionStagingCleanup.markOwned(sessions, temporaryDirectory);
+      AndroidDirectorySync.synchronize(temporaryDirectory);
     String mediaName = captureConfiguration.mediaFileName();
     File temporaryMedia = new File(temporaryDirectory, mediaName + ".tmp");
     File media = new File(temporaryDirectory, mediaName);
@@ -705,6 +799,27 @@ public final class ContinuousCaptureEngine {
       diagnosticIncidentStatus = "publication_failed";
       Log.e(TAG, "Unable to publish auxiliary diagnostic incident", diagnosticFailure);
     }
+    JSONObject poseDiagnosticMetadata = null;
+    String poseDiagnosticStatus = DIAGNOSTIC_STATUS_NOT_AVAILABLE;
+    if (poseDiagnosticSnapshot != null) {
+      try {
+        PoseDiagnosticFiles.ManifestMetadata publishedPoseDiagnostics =
+            new PoseDiagnosticFiles(AndroidDirectorySync::synchronize)
+                .publish(temporaryDirectory, poseDiagnosticSnapshot);
+        poseDiagnosticMetadata =
+            new JSONObject(publishedPoseDiagnostics.toCanonicalJson());
+        poseDiagnosticStatus = DIAGNOSTIC_STATUS_AVAILABLE;
+      } catch (Throwable diagnosticFailure) {
+        poseDiagnosticMetadata = null;
+        poseDiagnosticStatus = DIAGNOSTIC_STATUS_PUBLICATION_FAILED;
+        Log.e(
+            TAG,
+            "Unable to publish auxiliary pose diagnostics; status="
+                + DIAGNOSTIC_STATUS_PUBLICATION_FAILED
+                + "; failure_type="
+                + boundedFailureType(diagnosticFailure));
+      }
+    }
     JSONObject manifest =
         sessionManifest(
             snapshot,
@@ -715,7 +830,9 @@ public final class ContinuousCaptureEngine {
             audioMetadata,
             diagnosticAudioMetadata,
             diagnosticAudioStatus,
-            diagnosticIncidentStatus);
+            diagnosticIncidentStatus,
+            poseDiagnosticMetadata,
+            poseDiagnosticStatus);
     File temporaryManifest = new File(temporaryDirectory, "manifest.json.tmp");
     File publishedManifest = new File(temporaryDirectory, "manifest.json");
     try (FileOutputStream output = new FileOutputStream(temporaryManifest)) {
@@ -725,11 +842,22 @@ public final class ContinuousCaptureEngine {
     if (!temporaryManifest.renameTo(publishedManifest)) {
       throw new IllegalStateException("Unable to publish retained manifest");
     }
+    AndroidDirectorySync.synchronize(temporaryDirectory);
     File publishedDirectory = new File(sessions, pending.sessionId);
     if (!temporaryDirectory.renameTo(publishedDirectory)) {
       throw new IllegalStateException("Unable to atomically publish session " + pending.sessionId);
     }
     AndroidDirectorySync.synchronize(sessions);
+      publicationSucceeded = true;
+    } finally {
+      if (!publicationSucceeded && temporaryDirectory.exists()) {
+        if (!SessionStagingCleanup.cleanupFailedPublication(sessions, temporaryDirectory)) {
+          if (!SessionStagingCleanup.cleanupAfterMarkFailure(sessions, temporaryDirectory)) {
+            Log.e(TAG, "Refused unsafe failed session staging cleanup: " + temporaryDirectory);
+          }
+        }
+      }
+    }
   }
 
   private Pcm16EvidenceRing.Snapshot awaitAudioEvidence(TriggerEvidence evidence)
@@ -842,7 +970,9 @@ public final class ContinuousCaptureEngine {
       Pcm16WavFile.EvidenceMetadata audioEvidence,
       DiagnosticPcm16WavFile.EvidenceMetadata diagnosticAudioEvidence,
       String diagnosticAudioStatus,
-      String diagnosticIncidentStatus)
+      String diagnosticIncidentStatus,
+      JSONObject poseDiagnosticMetadata,
+      String poseDiagnosticStatus)
       throws Exception {
     long triggerNs = snapshot.triggerSensorTimestampNs();
     long firstPtsUs = snapshot.metadata(0).presentationTimeUs();
@@ -933,8 +1063,14 @@ public final class ContinuousCaptureEngine {
             .put("avc_level_idc", codec.levelIdc())
             .put("timestamp_mapping", "streaming_camera2_frame_to_encoder_ordinal")
             .put(
+                "camera_to_encoder_ordinal_shift",
+                timestampCalibrator.cameraToEncoderOrdinalShift())
+            .put(
                 "encoder_to_sensor_offset_ns",
                 Long.toString(pending.encoderToSensorOffsetNanos))
+            .put(
+                "expected_encoder_to_sensor_offset_ns",
+                Long.toString(expectedEncoderToSensorOffsetNanos))
             .put("timestamp_offset_span_ns", pending.timestampOffsetSpanNanos)
             .put("timestamp_pair_count", pending.timestampPairCount)
             .put(
@@ -952,6 +1088,22 @@ public final class ContinuousCaptureEngine {
                     / 1_000)
             .put("encoded_first_pts_us", firstPtsUs)
             .put("encoded_last_pts_us", lastPtsUs);
+    if (peerArmStatus != null) {
+      PeerArmStatusTracker.Snapshot peerArm = peerArmStatus.snapshot();
+      androidCapture.put(
+          "peer_arm",
+          new JSONObject()
+              .put("state", peerArm.state().name().toLowerCase(java.util.Locale.ROOT))
+              .put(
+                  "shared_session_id",
+                  peerArm.sharedSessionId().isEmpty()
+                      ? JSONObject.NULL
+                      : peerArm.sharedSessionId())
+              .put("http_status", peerArm.httpStatus() == 0 ? JSONObject.NULL : peerArm.httpStatus())
+              .put(
+                  "failure_type",
+                  peerArm.failureType().isEmpty() ? JSONObject.NULL : peerArm.failureType()));
+    }
     if (audioEvidence != null) {
       androidCapture.put(
           "audio_evidence",
@@ -971,10 +1123,10 @@ public final class ContinuousCaptureEngine {
             .put("audio", JSONObject.NULL)
             .put("audio_status", diagnosticAudioStatus)
             .put("incident_status", diagnosticIncidentStatus)
-            .put("preview", JSONObject.NULL)
             .put(
-                "preview_status",
-                "unavailable_until_low_rate_pose_capture_is_integrated");
+                "preview",
+                poseDiagnosticMetadata == null ? JSONObject.NULL : poseDiagnosticMetadata)
+            .put("preview_status", poseDiagnosticStatus);
     if (diagnosticAudioEvidence != null) {
       diagnosticEvidence.put(
           "audio",
@@ -1125,6 +1277,35 @@ public final class ContinuousCaptureEngine {
   }
 
   private void startCamera() throws Exception {
+    if (warmCameraLease != null) {
+      cameraId = warmCameraLease.cameraId();
+      cameraTimestampSource = warmCameraLease.timestampSource();
+      warmCameraLease.transitionToHighSpeed(
+          encoderInputSurface,
+          new WarmCameraLease.HighSpeedListener() {
+            @Override
+            public void onCaptureStarted(long elapsedRealtimeNanos) {
+              firstCameraFrameElapsedRealtimeNanos.compareAndSet(0, elapsedRealtimeNanos);
+              firstCameraFrame.countDown();
+            }
+
+            @Override
+            public void onCaptureCompleted(long frameNumber, long sensorTimestampNanos) {
+              try {
+                timestampCalibrator.observeCamera(frameNumber, sensorTimestampNanos);
+              } catch (Throwable failure) {
+                fail(failure);
+              }
+            }
+
+            @Override
+            public void onFailure(Throwable failure) {
+              fail(failure);
+            }
+          });
+      throwIfFailed();
+      return;
+    }
     CameraManager manager = context.getSystemService(CameraManager.class);
     CameraSelection selection = selectCamera(manager);
     cameraId = selection.cameraId;
@@ -1295,6 +1476,10 @@ public final class ContinuousCaptureEngine {
   }
 
   private void stopCamera() {
+    if (warmCameraLease != null) {
+      warmCameraLease.close();
+      return;
+    }
     if (cameraSession != null) {
       try {
         cameraSession.stopRepeating();
@@ -1383,6 +1568,13 @@ public final class ContinuousCaptureEngine {
     if (!stopping.get() && failed.compareAndSet(false, true)) {
       listener.onFailure(failure);
     }
+  }
+
+  private static String boundedFailureType(Throwable failure) {
+    String type = failure.getClass().getName();
+    return type.length() <= MAXIMUM_LOGGED_FAILURE_TYPE_CHARACTERS
+        ? type
+        : type.substring(0, MAXIMUM_LOGGED_FAILURE_TYPE_CHARACTERS);
   }
 
   private static String newSessionId() {

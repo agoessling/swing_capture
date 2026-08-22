@@ -38,6 +38,14 @@ public final class NodeCoordinationState {
     latestTrigger = null;
   }
 
+  /** Returns to pose monitoring while retaining the completed swing for coordinator pickup. */
+  public synchronized void resumeMonitoringAfterCapture() {
+    if (latestTrigger == null) {
+      throw new IllegalStateException("cannot preserve a missing completed trigger report");
+    }
+    sharedSessionId = null;
+  }
+
   public synchronized String sharedSessionId() {
     return sharedSessionId;
   }

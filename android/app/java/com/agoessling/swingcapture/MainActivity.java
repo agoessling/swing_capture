@@ -7,18 +7,27 @@ import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.media.MediaFormat;
 import android.os.Bundle;
+import android.text.InputType;
 import android.util.Log;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import com.agoessling.swingcapture.node.CaptureRuntime;
+import com.agoessling.swingcapture.pose.NormalizedHittingRegion;
+import com.agoessling.swingcapture.pose.PoseProjection;
+import com.agoessling.swingcapture.pose.inference.PoseInferenceDelegatePolicy;
+import com.agoessling.swingcapture.pose.inference.PoseReplayConfiguration;
+import com.agoessling.swingcapture.pose.inference.PoseReplayHilRunner;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONObject;
@@ -33,6 +42,12 @@ public final class MainActivity extends Activity {
   private NodeConfiguration configuration;
   private Spinner roleSpinner;
   private Spinner profileSpinner;
+  private Spinner poseModeSpinner;
+  private Spinner poseDelegateSpinner;
+  private EditText hittingRegionEdit;
+  private EditText peerOriginEdit;
+  private EditText peerTokenEdit;
+  private CheckBox debugEvidenceCheckBox;
   private TextView status;
   private TextView networkStatus;
   private Button refreshButton;
@@ -43,6 +58,7 @@ public final class MainActivity extends Activity {
   private Button disarmButton;
   private Button manualTriggerButton;
   private Button saveConfigurationButton;
+  private Button savePoseConfigurationButton;
   private boolean configurationEditsLocallyEnabled = true;
   private boolean initialProbeRequested;
   private boolean initialRetainedCaptureRequested;
@@ -51,6 +67,9 @@ public final class MainActivity extends Activity {
   private boolean initialAudioHilRequested;
   private boolean initialSoakHilRequested;
   private boolean initialSoakFinishRequested;
+  private boolean initialPoseStandbyHilRequested;
+  private boolean initialPoseReplayHilRequested;
+  private boolean initialPoseArmHilEnabled;
 
   @Override
   protected void onCreate(Bundle savedInstanceState) {
@@ -65,8 +84,12 @@ public final class MainActivity extends Activity {
     initialAudioHilRequested = getIntent().getBooleanExtra("run_audio_hil", false);
     initialSoakHilRequested = getIntent().getBooleanExtra("run_audio_soak_hil", false);
     initialSoakFinishRequested = getIntent().getBooleanExtra("finish_audio_soak_hil", false);
+    initialPoseStandbyHilRequested =
+        getIntent().getBooleanExtra("run_pose_standby_hil", false);
+    initialPoseReplayHilRequested = getIntent().getBooleanExtra("run_pose_replay_hil", false);
+    initialPoseArmHilEnabled = getIntent().getBooleanExtra("enable_pose_arm_hil", false);
     setContentView(createContentView());
-    if (!requestRuntimePermissions()) {
+    if (initialPoseReplayHilRequested || !requestRuntimePermissions()) {
       runInitialAction();
     }
   }
@@ -83,9 +106,12 @@ public final class MainActivity extends Activity {
     initialAudioHilRequested = intent.getBooleanExtra("run_audio_hil", false);
     initialSoakHilRequested = intent.getBooleanExtra("run_audio_soak_hil", false);
     initialSoakFinishRequested = intent.getBooleanExtra("finish_audio_soak_hil", false);
+    initialPoseStandbyHilRequested = intent.getBooleanExtra("run_pose_standby_hil", false);
+    initialPoseReplayHilRequested = intent.getBooleanExtra("run_pose_replay_hil", false);
+    initialPoseArmHilEnabled = intent.getBooleanExtra("enable_pose_arm_hil", false);
     selectConfiguredRole();
     selectConfiguredProfile();
-    if (!requestRuntimePermissions()) {
+    if (initialPoseReplayHilRequested || !requestRuntimePermissions()) {
       runInitialAction();
     }
   }
@@ -112,8 +138,9 @@ public final class MainActivity extends Activity {
     if (intent == null) {
       return;
     }
-    CaptureRole currentRole = configuration.role();
-    CaptureProfile currentProfile = configuration.captureProfile();
+    NodeConfiguration.StationConfiguration current = configuration.stationConfiguration();
+    CaptureRole currentRole = current.capture().role();
+    CaptureProfile currentProfile = current.capture().profile();
     CaptureRole requestedRole =
         intent.hasExtra("role")
             ? CaptureRole.parse(intent.getStringExtra("role"))
@@ -122,14 +149,61 @@ public final class MainActivity extends Activity {
         intent.hasExtra("capture_profile")
             ? CaptureProfile.parse(intent.getStringExtra("capture_profile"))
             : currentProfile;
-    if (requestedRole == currentRole && requestedProfile == currentProfile) {
+    PoseStationConfigurationSnapshot requestedPose = requestedIntentPose(intent, current.pose());
+    if (requestedRole == currentRole
+        && requestedProfile == currentProfile
+        && requestedPose.equals(current.pose())) {
       return;
     }
     if (!configurationChangeAllowed()) {
       rejectConfigurationChange();
       return;
     }
-    configuration.setCaptureConfiguration(requestedRole, requestedProfile);
+    configuration.setStationConfiguration(requestedRole, requestedProfile, requestedPose);
+  }
+
+  private static PoseStationConfigurationSnapshot requestedIntentPose(
+      Intent intent, PoseStationConfigurationSnapshot current) {
+    if (!intent.hasExtra("pose_mode")
+        && !intent.hasExtra("pose_delegate")
+        && !intent.hasExtra("pose_hitting_region")
+        && !intent.hasExtra("pose_debug_evidence")
+        && !intent.hasExtra("pose_peer_origin")
+        && !intent.hasExtra("pose_peer_control_token")) {
+      return current;
+    }
+    NormalizedHittingRegion region = current.hittingRegion();
+    if (intent.hasExtra("pose_hitting_region")) {
+      String[] fields =
+          intent.getStringExtra("pose_hitting_region").trim().split(",", -1);
+      if (fields.length != 4) {
+        throw new IllegalArgumentException("pose_hitting_region requires four coordinates");
+      }
+      region =
+          new NormalizedHittingRegion(
+              Double.parseDouble(fields[0]),
+              Double.parseDouble(fields[1]),
+              Double.parseDouble(fields[2]),
+              Double.parseDouble(fields[3]));
+    }
+    return new PoseStationConfigurationSnapshot(
+            intent.hasExtra("pose_mode")
+                ? PoseNodeMode.parse(intent.getStringExtra("pose_mode"))
+                : current.mode(),
+            intent.hasExtra("pose_delegate")
+                ? PoseStationConfigurationSnapshot.parseDelegatePolicy(
+                    intent.getStringExtra("pose_delegate"))
+                : current.delegatePolicy(),
+            region,
+            intent.hasExtra("pose_debug_evidence")
+                ? intent.getBooleanExtra("pose_debug_evidence", true)
+                : current.debugEvidenceEnabled(),
+            intent.hasExtra("pose_peer_origin")
+                ? intent.getStringExtra("pose_peer_origin")
+                : current.peerOrigin(),
+            intent.hasExtra("pose_peer_control_token")
+                ? intent.getStringExtra("pose_peer_control_token")
+                : current.peerControlToken());
   }
 
   private LinearLayout createContentView() {
@@ -182,8 +256,64 @@ public final class MainActivity extends Activity {
     saveConfigurationButton.setOnClickListener(ignored -> saveCaptureConfiguration());
     root.addView(saveConfigurationButton);
 
+    TextView poseHeading = new TextView(this);
+    poseHeading.setText("Low-rate pose trigger prototype");
+    poseHeading.setTextSize(18.0f);
+    root.addView(poseHeading);
+
+    PoseStationConfigurationSnapshot poseConfiguration =
+        configuration.poseConfigurationSnapshot();
+    poseModeSpinner = new Spinner(this);
+    String[] poseModes = new String[PoseNodeMode.values().length];
+    for (int index = 0; index < PoseNodeMode.values().length; ++index) {
+      poseModes[index] = PoseNodeMode.values()[index].displayName();
+    }
+    poseModeSpinner.setAdapter(
+        new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, poseModes));
+    poseModeSpinner.setSelection(poseConfiguration.mode().ordinal());
+    root.addView(poseModeSpinner);
+
+    poseDelegateSpinner = new Spinner(this);
+    String[] delegates = new String[PoseInferenceDelegatePolicy.values().length];
+    for (int index = 0; index < PoseInferenceDelegatePolicy.values().length; ++index) {
+      delegates[index] = PoseInferenceDelegatePolicy.values()[index].name();
+    }
+    poseDelegateSpinner.setAdapter(
+        new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, delegates));
+    poseDelegateSpinner.setSelection(poseConfiguration.delegatePolicy().ordinal());
+    root.addView(poseDelegateSpinner);
+
+    hittingRegionEdit = new EditText(this);
+    hittingRegionEdit.setHint("Hitting region: left,top,right,bottom");
+    NormalizedHittingRegion region = poseConfiguration.hittingRegion();
+    hittingRegionEdit.setText(
+        region.left() + "," + region.top() + "," + region.right() + "," + region.bottom());
+    root.addView(hittingRegionEdit);
+
+    peerOriginEdit = new EditText(this);
+    peerOriginEdit.setHint("Optional peer origin, e.g. http://192.168.1.20:8088");
+    peerOriginEdit.setText(poseConfiguration.peerOrigin());
+    root.addView(peerOriginEdit);
+
+    peerTokenEdit = new EditText(this);
+    peerTokenEdit.setHint("Optional peer control token");
+    peerTokenEdit.setInputType(
+        InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+    peerTokenEdit.setText(poseConfiguration.peerControlToken());
+    root.addView(peerTokenEdit);
+
+    debugEvidenceCheckBox = new CheckBox(this);
+    debugEvidenceCheckBox.setText("Retain 60 seconds of low-rate debug evidence in memory");
+    debugEvidenceCheckBox.setChecked(poseConfiguration.debugEvidenceEnabled());
+    root.addView(debugEvidenceCheckBox);
+
+    savePoseConfigurationButton = new Button(this);
+    savePoseConfigurationButton.setText("Save pose trigger configuration");
+    savePoseConfigurationButton.setOnClickListener(ignored -> savePoseConfiguration());
+    root.addView(savePoseConfigurationButton);
+
     armButton = new Button(this);
-    armButton.setText("Arm continuous capture (screen may turn off)");
+    updateArmButtonLabel(poseConfiguration.mode());
     armButton.setOnClickListener(ignored -> sendServiceAction(CaptureForegroundService.ACTION_ARM));
     root.addView(armButton);
 
@@ -252,6 +382,48 @@ public final class MainActivity extends Activity {
     refreshCapabilities();
   }
 
+  private void savePoseConfiguration() {
+    if (!configurationChangeAllowed()) {
+      rejectConfigurationChange();
+      return;
+    }
+    try {
+      String[] coordinates = hittingRegionEdit.getText().toString().trim().split(",", -1);
+      if (coordinates.length != 4) {
+        throw new IllegalArgumentException("hitting region requires four comma-separated values");
+      }
+      NormalizedHittingRegion region =
+          new NormalizedHittingRegion(
+              Double.parseDouble(coordinates[0].trim()),
+              Double.parseDouble(coordinates[1].trim()),
+              Double.parseDouble(coordinates[2].trim()),
+              Double.parseDouble(coordinates[3].trim()));
+      PoseStationConfigurationSnapshot snapshot =
+          new PoseStationConfigurationSnapshot(
+              PoseNodeMode.values()[poseModeSpinner.getSelectedItemPosition()],
+              PoseInferenceDelegatePolicy.values()[poseDelegateSpinner.getSelectedItemPosition()],
+              region,
+              debugEvidenceCheckBox.isChecked(),
+              peerOriginEdit.getText().toString(),
+              peerTokenEdit.getText().toString());
+      configuration.setPoseConfiguration(snapshot);
+      updateArmButtonLabel(snapshot.mode());
+      status.setText("Pose trigger configuration saved.");
+    } catch (RuntimeException invalid) {
+      status.setText("Pose trigger configuration is invalid: " + invalid.getMessage());
+    }
+  }
+
+  private void updateArmButtonLabel(PoseNodeMode mode) {
+    if (armButton == null) {
+      return;
+    }
+    armButton.setText(
+        mode == PoseNodeMode.DISABLED
+            ? "Arm continuous 720p240 capture"
+            : "Start 5 Hz pose monitoring (screen may turn off)");
+  }
+
   private boolean configurationChangeAllowed() {
     return configurationEditsLocallyEnabled
         && CaptureConfigurationPolicy.mayChange(CaptureForegroundService.snapshot().state());
@@ -278,6 +450,15 @@ public final class MainActivity extends Activity {
     if (saveConfigurationButton != null) {
       saveConfigurationButton.setEnabled(enabled);
     }
+    if (poseModeSpinner != null) {
+      poseModeSpinner.setEnabled(enabled);
+      poseDelegateSpinner.setEnabled(enabled);
+      hittingRegionEdit.setEnabled(enabled);
+      peerOriginEdit.setEnabled(enabled);
+      peerTokenEdit.setEnabled(enabled);
+      debugEvidenceCheckBox.setEnabled(enabled);
+      savePoseConfigurationButton.setEnabled(enabled);
+    }
   }
 
   private boolean requestRuntimePermissions() {
@@ -299,12 +480,22 @@ public final class MainActivity extends Activity {
   }
 
   private void runInitialAction() {
+    if (initialPoseReplayHilRequested) {
+      initialPoseReplayHilRequested = false;
+      runPoseReplayHil(getIntent());
+      return;
+    }
     if (capturePermissionsGranted()) {
       ensureNodeService();
     }
     if (initialSoakFinishRequested && capturePermissionsGranted()) {
       initialSoakFinishRequested = false;
       sendServiceAction(CaptureForegroundService.ACTION_FINISH_SOAK_HIL);
+      return;
+    }
+    if (initialPoseStandbyHilRequested && capturePermissionsGranted()) {
+      initialPoseStandbyHilRequested = false;
+      sendServiceAction(CaptureForegroundService.ACTION_ARM);
       return;
     }
     if ((initialContinuousHilRequested || initialAudioHilRequested || initialSoakHilRequested)
@@ -364,6 +555,117 @@ public final class MainActivity extends Activity {
         intent.getStringExtra("probe_mime") == null
             ? MediaFormat.MIMETYPE_VIDEO_AVC
             : intent.getStringExtra("probe_mime"));
+  }
+
+  private void runPoseReplayHil(Intent intent) {
+    if (status == null) {
+      return;
+    }
+    setControlsEnabled(false);
+    try {
+      CaptureRole role = CaptureRole.parse(intent.getStringExtra("pose_replay_role"));
+      if (role == CaptureRole.UNASSIGNED) {
+        throw new IllegalArgumentException("pose replay role is required");
+      }
+      PoseProjection projection =
+          intent.hasExtra("pose_replay_projection")
+              ? PoseProjection.parse(intent.getStringExtra("pose_replay_projection"))
+              : PoseStandbyPolicy.projectionForRole(role);
+      NormalizedHittingRegion hittingRegion =
+          parsePoseReplayHittingRegion(intent.getStringExtra("pose_replay_hitting_region"));
+      PoseInferenceDelegatePolicy delegatePolicy =
+          PoseStationConfigurationSnapshot.parseDelegatePolicy(
+              intent.getStringExtra("pose_replay_delegate"));
+      PoseReplayConfiguration.Expectation expectation =
+          parsePoseReplayExpectation(intent.getStringExtra("pose_replay_expectation"));
+      PoseReplayConfiguration defaults =
+          PoseReplayConfiguration.defaults(
+              role.wireName(), projection, hittingRegion, delegatePolicy, expectation);
+      int maximumFrames =
+          intent.getIntExtra(
+              "pose_replay_maximum_frames", PoseReplayConfiguration.DEFAULT_MAXIMUM_FRAMES);
+      PoseReplayConfiguration replayConfiguration =
+          new PoseReplayConfiguration(
+              defaults.role(),
+              defaults.projection(),
+              defaults.hittingRegion(),
+              defaults.delegatePolicy(),
+              defaults.observationConfig(),
+              defaults.controllerConfig(),
+              defaults.expectation(),
+              maximumFrames);
+      String clipName = requirePoseReplayClipName(intent.getStringExtra("pose_replay_clip"));
+      File replayRoot = new File(getFilesDir(), "pose_replay_hil");
+      File clip = new File(replayRoot, clipName);
+      status.setText("Running on-device pose replay for " + clipName + "…");
+      new PoseReplayHilRunner()
+          .runAndPersistAsync(
+              worker,
+              this,
+              replayRoot,
+              clip,
+              replayConfiguration,
+              json -> ReportStore.writeLatest(this, json))
+          .whenComplete(
+              (published, failure) ->
+                  runOnUiThread(
+                      () -> {
+                        if (failure != null) {
+                          Log.e(TAG, "Pose replay failed before publishing its report", failure);
+                          status.setText("Pose replay report publication failed: " + failure);
+                        } else {
+                          Log.i(TAG, "Pose replay report written to " + published.file());
+                          status.setText(published.report().toJson());
+                        }
+                        setControlsEnabled(true);
+                      }));
+    } catch (RuntimeException invalidRequest) {
+      Log.e(TAG, "Pose replay request is invalid", invalidRequest);
+      status.setText("Pose replay request is invalid: " + invalidRequest.getMessage());
+      setControlsEnabled(true);
+    }
+  }
+
+  private static NormalizedHittingRegion parsePoseReplayHittingRegion(String value) {
+    String text = value == null ? "0.15,0.30,0.85,1.0" : value;
+    String[] fields = text.trim().split(",", -1);
+    if (fields.length != 4) {
+      throw new IllegalArgumentException("pose replay hitting region requires four coordinates");
+    }
+    return new NormalizedHittingRegion(
+        Double.parseDouble(fields[0].trim()),
+        Double.parseDouble(fields[1].trim()),
+        Double.parseDouble(fields[2].trim()),
+        Double.parseDouble(fields[3].trim()));
+  }
+
+  private static PoseReplayConfiguration.Expectation parsePoseReplayExpectation(String value) {
+    String normalized = value == null ? "OBSERVE_ONLY" : value.trim().toUpperCase(Locale.ROOT);
+    try {
+      return PoseReplayConfiguration.Expectation.valueOf(normalized);
+    } catch (IllegalArgumentException invalid) {
+      throw new IllegalArgumentException("Unknown pose replay expectation: " + value, invalid);
+    }
+  }
+
+  private static String requirePoseReplayClipName(String value) {
+    if (value == null || value.isEmpty() || value.length() > 128 || !value.endsWith(".mp4")) {
+      throw new IllegalArgumentException("pose replay clip must be a bounded MP4 basename");
+    }
+    for (int index = 0; index < value.length(); index++) {
+      char character = value.charAt(index);
+      boolean safe =
+          (character >= 'a' && character <= 'z')
+              || (character >= 'A' && character <= 'Z')
+              || (character >= '0' && character <= '9')
+              || character == '.'
+              || character == '_'
+              || character == '-';
+      if (!safe) {
+        throw new IllegalArgumentException("pose replay clip must be a safe basename");
+      }
+    }
+    return value;
   }
 
   private void selectConfiguredRole() {
@@ -546,7 +848,10 @@ public final class MainActivity extends Activity {
   private void ensureNodeService() {
     try {
       Intent service = new Intent(this, CaptureForegroundService.class);
-      service.setAction(CaptureForegroundService.ACTION_START);
+      service.setAction(
+          initialPoseArmHilEnabled
+              ? CaptureForegroundService.ACTION_START_POSE_HIL
+              : CaptureForegroundService.ACTION_START);
       startForegroundService(service);
       refreshServiceDisplay();
       scheduleServiceDisplayRefresh(500);

@@ -8,6 +8,42 @@ public final class WarmCaptureTransitionTimingTest {
     computesEveryTransitionInterval();
     acceptsCoincidentMilestones();
     rejectsNegativeAndOutOfOrderMilestones();
+    classifiesExpectedStandbyFlushes();
+    normalizesSessionFrameOrdinals();
+    estimatesClockOffsetAtMonotonicMidpoint();
+  }
+
+  private static void normalizesSessionFrameOrdinals() {
+    check(WarmCaptureTransitionTiming.highSpeedOrdinal(67, 67) == 0, "first ordinal");
+    check(WarmCaptureTransitionTiming.highSpeedOrdinal(67, 68) == 1, "second ordinal");
+    expectThrows(
+        () -> WarmCaptureTransitionTiming.highSpeedOrdinal(67, 66),
+        "frame before high-speed session");
+  }
+
+  private static void estimatesClockOffsetAtMonotonicMidpoint() {
+    check(
+        WarmCaptureTransitionTiming.midpointClockOffsetNanos(1_000, 201_005, 1_010)
+            == 200_000,
+        "positive suspend offset");
+    check(
+        WarmCaptureTransitionTiming.midpointClockOffsetNanos(1_000, 1_004, 1_009) == 0,
+        "odd midpoint rounds down");
+    expectThrows(
+        () -> WarmCaptureTransitionTiming.midpointClockOffsetNanos(2, 4, 1),
+        "reversed monotonic anchor");
+  }
+
+  private static void classifiesExpectedStandbyFlushes() {
+    check(
+        WarmCaptureTransitionTiming.standbyCaptureFailureIsFatal(false, false),
+        "active standby failure is fatal");
+    check(
+        !WarmCaptureTransitionTiming.standbyCaptureFailureIsFatal(true, false),
+        "transition flush is expected");
+    check(
+        !WarmCaptureTransitionTiming.standbyCaptureFailureIsFatal(false, true),
+        "closed-session flush is expected");
   }
 
   private static void computesEveryTransitionInterval() {

@@ -51,6 +51,7 @@ public final class PoseTriggerReplayCliTest {
                 + "\"armed_before_safe_window\":false,"
                 + "\"armed_in_forbidden_interval\":false,"
                 + "\"ready_by_takeaway\":true,\"passed\":true,"
+                + "\"outcome\":\"acceptable\",\"arm_request_count\":1,"
                 + "\"final_state\":\"arm_requested\"}"),
         "canonical result JSON");
   }

@@ -17,6 +17,10 @@ import {
   HttpReviewApi,
   parseCaptureStatus,
   parseClipManifest,
+  parseSessionSummary,
+  type PeerArmState,
+  type PeerArmStatus,
+  type PoseCaptureStatus,
   type ReviewApi,
   type SessionList,
   type SessionSummary,
@@ -34,7 +38,9 @@ installMediaFixture(dom.window);
 const downloadedArchiveNames = installDownloadFixture(dom.window);
 
 async function main() {
-  const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+  const { act, cleanup, fireEvent, render, screen, waitFor } = await import(
+    "@testing-library/react"
+  );
   const { default: axe } = await import("axe-core");
 
   const diagnosticsApi = new RecordingReviewApi();
@@ -74,6 +80,61 @@ async function main() {
   const timeline = screen.getByRole("slider", { name: "Review timeline" }) as HTMLInputElement;
   fireEvent.input(timeline, { target: { value: "10" } });
   assert.ok(screen.getByText("Frame 11 of 90"));
+  Object.defineProperty(timeline, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({
+      bottom: 10,
+      height: 10,
+      left: 0,
+      right: 100,
+      toJSON: () => ({}),
+      top: 0,
+      width: 100,
+      x: 0,
+      y: 0,
+    }),
+  });
+  fireEvent.pointerMove(timeline, { clientX: 50 });
+  assert.ok(rendered.container.querySelector("video[data-timeline-thumbnail]"));
+  assert.ok(screen.getAllByText("Frame 46 · Trigger estimate").length > 0);
+  fireEvent.pointerMove(timeline, { clientX: 0 });
+  assert.equal(
+    (rendered.container.querySelector(".timeline-thumbnail") as HTMLElement | null)?.style
+      .transform,
+    "translateX(-0%)",
+  );
+  fireEvent.pointerMove(timeline, { clientX: 100 });
+  assert.equal(
+    (rendered.container.querySelector(".timeline-thumbnail") as HTMLElement | null)?.style
+      .transform,
+    "translateX(-100%)",
+  );
+  fireEvent.pointerLeave(timeline.parentElement as HTMLElement);
+  assert.equal(rendered.container.querySelector("video[data-timeline-thumbnail]"), null);
+
+  screen.getByRole("toolbar", { name: "Playback controls" });
+  const playButton = screen.getByRole("button", { name: "Play" });
+  fireEvent.keyDown(playButton, { key: "ArrowRight" });
+  assert.ok(screen.getByText("Frame 12 of 90"));
+  fireEvent.keyDown(playButton, { key: "ArrowLeft" });
+  assert.ok(screen.getByText("Frame 11 of 90"));
+  fireEvent.keyDown(playButton, { key: "End" });
+  assert.ok(screen.getByText("Frame 90 of 90"));
+  fireEvent.keyDown(playButton, { key: "Home" });
+  assert.ok(screen.getByText("Frame 1 of 90"));
+  fireEvent.keyDown(playButton, { key: "k" });
+  assert.ok(await screen.findByRole("button", { name: "Pause" }));
+  fireEvent.keyDown(screen.getByRole("button", { name: "Pause" }), { key: "K" });
+  assert.ok(screen.getByRole("button", { name: "Play" }));
+  assert.equal(
+    screen.getByRole("button", { name: "Previous frame" }).getAttribute("aria-keyshortcuts"),
+    "ArrowLeft ,",
+  );
+  assert.equal(
+    screen.getByRole("button", { name: "Next frame" }).getAttribute("aria-keyshortcuts"),
+    "ArrowRight .",
+  );
+  assert.equal(timeline.getAttribute("aria-keyshortcuts"), "Home End");
 
   fireEvent.change(screen.getByRole("combobox", { name: "Playback speed" }), {
     target: { value: "0.5" },
@@ -133,6 +194,162 @@ async function main() {
     [],
     "review fixture should have no automated accessibility violations",
   );
+  cleanup();
+
+  for (const [state, heading] of [
+    ["pending", "Arming paired phone"],
+    ["accepted", "Paired phone armed"],
+    ["inbound_accepted", "Arm accepted from paired phone"],
+  ] as const) {
+    render(
+      <ReviewApp
+        api={new FakeReviewApi({ hilEnabled: false, peerArmState: state })}
+        pollIntervalMs={60_000}
+      />,
+    );
+    assert.ok(await screen.findByText(heading));
+    await waitFor(() => assert.equal(screen.getAllByRole("status").length, 2));
+    cleanup();
+  }
+
+  for (const [state, heading, detail] of [
+    ["rejected", "Paired phone rejected arm", "HTTP 409"],
+    ["failed", "Paired-phone arm failed", "java.io.IOException"],
+  ] as const) {
+    const peerFailure = render(
+      <ReviewApp
+        api={new FakeReviewApi({ hilEnabled: false, peerArmState: state })}
+        pollIntervalMs={60_000}
+      />,
+    );
+    assert.equal((await screen.findAllByText(heading)).length, 2);
+    assert.equal(screen.getAllByRole("alert").length, 2);
+    assert.equal(screen.getAllByText(new RegExp(detail)).length, 2);
+    const peerFailureAccessibility = await axe.run(peerFailure.container, {
+      rules: { "color-contrast": { enabled: false } },
+    });
+    assert.deepEqual(
+      peerFailureAccessibility.violations.map((violation) => violation.id),
+      [],
+      `${state} peer-arm state should have no automated accessibility violations`,
+    );
+    cleanup();
+  }
+
+  const poseLeader = render(
+    <ReviewApp
+      api={new FakeReviewApi({ hilEnabled: false, poseMode: "leader" })}
+      pollIntervalMs={60_000}
+    />,
+  );
+  assert.ok(await screen.findByRole("heading", { name: "Watching for address" }));
+  assert.ok(screen.getByText("Address trigger"));
+  assert.ok(screen.getByRole("button", { name: "Tag missed shot" }));
+  assert.ok(screen.getByText(/no review video is created before high-speed starts/));
+  fireEvent.click(screen.getByRole("button", { name: "Disarm capture" }));
+  assert.ok(await screen.findByRole("button", { name: "Arm pose capture" }));
+  const poseLeaderAccessibility = await axe.run(poseLeader.container, {
+    rules: { "color-contrast": { enabled: false } },
+  });
+  assert.deepEqual(
+    poseLeaderAccessibility.violations.map((violation) => violation.id),
+    [],
+    "pose monitoring status should have no automated accessibility violations",
+  );
+  cleanup();
+
+  render(
+    <ReviewApp
+      api={new FakeReviewApi({ hilEnabled: false, poseMode: "shadow" })}
+      pollIntervalMs={60_000}
+    />,
+  );
+  assert.ok(await screen.findByRole("heading", { name: "Waiting for the pose leader" }));
+  assert.ok(screen.getByText(/waits for the paired leader/));
+  cleanup();
+
+  render(
+    <ReviewApp
+      api={
+        new FakeReviewApi({
+          hilEnabled: false,
+          poseMode: "leader",
+          posePhase: "high_speed",
+        })
+      }
+      pollIntervalMs={60_000}
+    />,
+  );
+  assert.ok(
+    await screen.findByRole("heading", { name: "High-speed capture is listening for impact" }),
+  );
+  assert.ok(screen.getByText("Impact trigger"));
+  assert.ok(screen.getByText(/240 fps ring and microphone impact detector are active/));
+  assert.ok(screen.getByRole("button", { name: "Save missed shot" }));
+  cleanup();
+
+  const standbyApi = new StandbyDiagnosticReviewApi();
+  render(<ReviewApp api={standbyApi} pollIntervalMs={60_000} />);
+  assert.ok(await screen.findByRole("region", { name: "Standby diagnostics" }));
+  assert.ok(screen.getByText(/no review video/));
+  assert.equal(document.querySelectorAll("video").length, 0);
+  assert.equal(standbyApi.manifestRequests, 0);
+  assert.match(
+    (screen.getByRole("combobox", { name: "Recorded session" }) as HTMLSelectElement).textContent,
+    /Diagnostics only/,
+  );
+  assert.equal(screen.queryByText("Timing marks (optional)"), null);
+  assert.equal(
+    (screen.getByRole("combobox", { name: "Result" }) as HTMLSelectElement).value,
+    "other",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save diagnostic feedback" }));
+  assert.ok(await screen.findByText("Diagnostic feedback saved."));
+  assert.deepEqual(standbyApi.feedback, [
+    {
+      sessionId: "standby-diagnostic-001",
+      feedback: {
+        schema_version: DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
+        classification: "other",
+      },
+    },
+  ]);
+  fireEvent.click(screen.getByRole("button", { name: "Download diagnostic ZIP" }));
+  assert.ok(await screen.findByText("Diagnostic ZIP download started."));
+  assert.deepEqual(standbyApi.archiveRequests, ["standby-diagnostic-001"]);
+  assert.equal(downloadedArchiveNames.at(-1), "fixture-diagnostics.zip");
+  cleanup();
+
+  let pendingNowMs = 0;
+  const pendingStandbyApi = new PendingStandbyDiagnosticReviewApi();
+  render(<ReviewApp api={pendingStandbyApi} nowMs={() => pendingNowMs} pollIntervalMs={5} />);
+  assert.ok(await screen.findByText("Listening for an audio trigger"));
+  fireEvent.click(screen.getByRole("button", { name: "Save missed shot" }));
+  assert.ok(await screen.findByText("Saving standby diagnostics"));
+  assert.ok(screen.getByText(/Retaining audio post-roll/));
+  assert.equal(document.querySelectorAll("figure").length, 0);
+  const pollsAfterTag = pendingStandbyApi.sessionPolls;
+  await waitFor(() => {
+    assert.ok(pendingStandbyApi.sessionPolls > pollsAfterTag);
+    assert.ok(screen.getByText("Saving standby diagnostics"));
+  });
+  pendingStandbyApi.published = true;
+  assert.ok(await screen.findByRole("region", { name: "Standby diagnostics" }));
+  assert.equal(pendingStandbyApi.manifestRequests, 0);
+  cleanup();
+
+  pendingNowMs = 0;
+  const expiredStandbyApi = new PendingStandbyDiagnosticReviewApi();
+  render(<ReviewApp api={expiredStandbyApi} nowMs={() => pendingNowMs} pollIntervalMs={5} />);
+  assert.ok(await screen.findByText("Listening for an audio trigger"));
+  fireEvent.click(screen.getByRole("button", { name: "Save missed shot" }));
+  assert.ok(await screen.findByText("Saving standby diagnostics"));
+  await act(async () => {
+    pendingNowMs = expiredStandbyApi.standbyDiagnosticPublicationTimeoutMs + 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  assert.equal(screen.queryByText("Saving standby diagnostics"), null);
+  assert.ok(screen.getByText("No recorded swings yet"));
   cleanup();
 
   const missedShotApi = new MissedShotReviewApi();
@@ -353,6 +570,76 @@ function testRuntimeSchemaRejection() {
     },
   } as const;
   assert.deepEqual(parseCaptureStatus(captureStatus), captureStatus);
+  for (const state of [
+    "not_requested",
+    "pending",
+    "accepted",
+    "rejected",
+    "failed",
+    "inbound_accepted",
+  ] as const) {
+    const peerArm = peerArmFixture(state);
+    const pose = poseStatusFixture(peerArm);
+    assert.deepEqual(parseCaptureStatus({ ...captureStatus, pose }).pose, pose);
+  }
+  assert.throws(
+    () =>
+      parseCaptureStatus({
+        ...captureStatus,
+        pose: poseStatusFixture({
+          ...peerArmFixture("pending"),
+          state: "timed_out",
+        } as unknown as PeerArmStatus),
+      }),
+    /state is unsupported/,
+  );
+  assert.throws(
+    () =>
+      parseCaptureStatus({
+        ...captureStatus,
+        pose: poseStatusFixture({ ...peerArmFixture("rejected"), http_status: null }),
+      }),
+    /rejected requires http_status/,
+  );
+  assert.throws(
+    () =>
+      parseCaptureStatus({
+        ...captureStatus,
+        pose: poseStatusFixture({ ...peerArmFixture("failed"), failure_type: null }),
+      }),
+    /failed requires failure_type/,
+  );
+  assert.throws(
+    () =>
+      parseCaptureStatus({
+        ...captureStatus,
+        pose: { ...poseStatusFixture(peerArmFixture("not_requested")), mode: "automatic" },
+      }),
+    /pose status mode is unsupported/,
+  );
+  assert.throws(
+    () =>
+      parseCaptureStatus({
+        ...captureStatus,
+        pose: { ...poseStatusFixture(peerArmFixture("not_requested")), phase: "warming" },
+      }),
+    /pose status phase is unsupported/,
+  );
+  const sessionSummary = {
+    session_id: "standby-diagnostic-001",
+    state: "ready",
+    created_at_utc: "2026-08-17T22:00:00Z",
+    error: "",
+  } as const;
+  assert.deepEqual(parseSessionSummary(sessionSummary), sessionSummary);
+  assert.deepEqual(parseSessionSummary({ ...sessionSummary, session_kind: "standby_diagnostic" }), {
+    ...sessionSummary,
+    session_kind: "standby_diagnostic",
+  });
+  assert.throws(
+    () => parseSessionSummary({ ...sessionSummary, session_kind: "unknown" }),
+    /Unsupported session_kind/,
+  );
   assert.throws(
     () =>
       parseCaptureStatus({
@@ -367,6 +654,17 @@ function testRuntimeSchemaRejection() {
     /capture hil status must be an object/,
   );
   assert.deepEqual(parseClipManifest(FIXTURE_MANIFEST), FIXTURE_MANIFEST);
+  const androidManifest = structuredClone(FIXTURE_MANIFEST);
+  androidManifest.android_capture = {
+    node_id: "pixel-node",
+    shared_session_id: "shared-session-001",
+    trigger_timestamp_uncertainty_ns: 250_000,
+    peer_arm: peerArmFixture("accepted"),
+  };
+  assert.deepEqual(
+    parseClipManifest(androidManifest).android_capture?.peer_arm,
+    peerArmFixture("accepted"),
+  );
   assert.equal(
     parseClipManifest(FIXTURE_MANIFEST).pipeline_profile?.capture.confirmation_to_acceptance_ms,
     -0.4,
@@ -519,6 +817,24 @@ function testRuntimeSchemaRejection() {
   assert.throws(() => parseClipManifest(persistedExternalUrl), /must not be persisted/);
 }
 
+function peerArmFixture(state: PeerArmState): PeerArmStatus {
+  return {
+    state,
+    shared_session_id: state === "not_requested" ? null : "shared-session-001",
+    http_status: state === "accepted" ? 202 : state === "rejected" ? 409 : null,
+    failure_type: state === "failed" ? "java.io.IOException" : null,
+  };
+}
+
+function poseStatusFixture(peerArm: PeerArmStatus): PoseCaptureStatus {
+  return {
+    mode: "leader",
+    phase: "monitoring",
+    transition_requested: false,
+    peer_arm: peerArm,
+  };
+}
+
 async function testHttpContract() {
   const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
   const capture: CaptureStatus = {
@@ -541,6 +857,11 @@ async function testHttpContract() {
     created_at_utc: FIXTURE_MANIFEST.created_at_utc,
     error: "",
   };
+  const missedShotSession: SessionSummary = {
+    ...session,
+    session_id: "standby-missed-shot-001",
+    session_kind: "standby_diagnostic",
+  };
   const sessions: SessionList = { schema_version: 1, sessions: [session] };
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -552,7 +873,7 @@ async function testHttpContract() {
       return Response.json(session);
     }
     if (url.endsWith("/capture/missed-shot")) {
-      return Response.json(session);
+      return Response.json(missedShotSession);
     }
     if (url.endsWith("/hil/synthetic-swing")) {
       return Response.json(capture);
@@ -596,7 +917,7 @@ async function testHttpContract() {
     "Bearer test-control-token",
   );
   assert.equal((await api.triggerManualCapture()).session_id, session.session_id);
-  assert.equal((await api.saveMissedShot()).session_id, session.session_id);
+  assert.deepEqual(await api.saveMissedShot(), missedShotSession);
   assert.equal((await api.startSyntheticSwing()).hil.enabled, false);
   assert.deepEqual(JSON.parse(String(calls[4]?.init?.body)), {});
   assert.equal((await api.getSessions()).sessions.length, 1);
@@ -737,6 +1058,71 @@ class MissedShotReviewApi extends RecordingReviewApi {
     manifest.trigger.source = "missed_shot";
     return manifest;
   }
+}
+
+class StandbyDiagnosticReviewApi extends RecordingReviewApi {
+  manifestRequests = 0;
+
+  override getSessions(): Promise<SessionList> {
+    return Promise.resolve({
+      schema_version: 1,
+      sessions: [
+        {
+          session_id: "standby-diagnostic-001",
+          state: "ready",
+          created_at_utc: "2026-08-17T22:00:00Z",
+          error: "",
+          session_kind: "standby_diagnostic",
+        },
+      ],
+    });
+  }
+
+  override getManifest(): Promise<ClipManifest> {
+    this.manifestRequests += 1;
+    return Promise.reject(new Error("standby diagnostics must not request a clip manifest"));
+  }
+}
+
+class PendingStandbyDiagnosticReviewApi extends RecordingReviewApi {
+  readonly standbyDiagnosticPublicationTimeoutMs = 5_000;
+  manifestRequests = 0;
+  published = false;
+  sessionPolls = 0;
+
+  override getSessions(): Promise<SessionList> {
+    this.sessionPolls += 1;
+    return Promise.resolve({
+      schema_version: 1,
+      sessions: this.published
+        ? [
+            {
+              ...pendingStandbySession(),
+              state: "ready",
+            },
+          ]
+        : [],
+    });
+  }
+
+  override saveMissedShot(): Promise<SessionSummary> {
+    return Promise.resolve(pendingStandbySession());
+  }
+
+  override getManifest(): Promise<ClipManifest> {
+    this.manifestRequests += 1;
+    return Promise.reject(new Error("standby diagnostics must not request a clip manifest"));
+  }
+}
+
+function pendingStandbySession(): SessionSummary {
+  return {
+    session_id: "standby-pending-001",
+    state: "waiting_post_roll",
+    created_at_utc: "2026-08-17T22:01:00Z",
+    error: "",
+    session_kind: "standby_diagnostic",
+  };
 }
 
 void main().catch((caught: unknown) => {

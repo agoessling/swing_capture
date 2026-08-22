@@ -2,6 +2,7 @@ common --enable_bzlmod
 common --announce_rc
 common --enable_platform_specific_config
 common --repo_env=ACCEPTED_ANDROID_SDK_LICENSE_VERSION=36
+common --repo_env=ACCEPTED_ANDROID_NDK_LICENSE_VERSION=r25c
 common --java_language_version=17
 common --java_runtime_version=remotejdk_21
 common --tool_java_language_version=17
@@ -22,6 +23,9 @@ build --strip=never
 # and desugared JDK runtime required on-device, rather than only desugaring each
 # dependency jar in isolation.
 build --desugar_java8_libs
+# The supported capture phones are arm64. This also selects the matching
+# MediaPipe Tasks JNI from its pinned Android AAR for every install/HIL APK.
+build --android_platforms=//android/pose_inference:android_arm64
 
 test --test_output=errors
 

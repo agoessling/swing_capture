@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page, type Response as PlaywrightResponse } from "@playwright/test";
 
 interface HilManifestSummary {
   sessionId: string;
@@ -71,7 +71,7 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
   await expect(page.getByText("Frame 46 of 90")).toBeVisible();
 
-  const videos = page.locator("video");
+  const videos = page.locator('video[aria-label$="recorded swing"]');
   await expect(videos).toHaveCount(2);
   await expect
     .poll(async () =>
@@ -88,7 +88,9 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
     "Audio confirmation → both frames displayed, lower bound",
   );
   await expect(pipelinePanel).toContainText("no clock epochs are assumed to match");
-  await expect.poll(async () => pipelinePanel.getAttribute("data-browser-timing")).not.toBeNull();
+  await expect
+    .poll(async () => pipelinePanel.getAttribute("data-browser-timing"), { timeout: 7_500 })
+    .not.toBeNull();
   const serializedBrowserTiming = await pipelinePanel.getAttribute("data-browser-timing");
   expect(serializedBrowserTiming).not.toBeNull();
   const browserTiming = JSON.parse(serializedBrowserTiming ?? "null") as {
@@ -139,6 +141,72 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
       elements.map((video) => Number((video as HTMLVideoElement).currentTime.toFixed(6))),
     ),
   ).toEqual([1.499985, 1.499985]);
+
+  const playbackControls = page.getByRole("toolbar", { name: "Playback controls" });
+  await playbackControls.getByRole("button", { name: "Play" }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByText("Frame 47 of 90")).toBeVisible();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByText("Frame 46 of 90")).toBeVisible();
+  await page.keyboard.press("End");
+  await expect(page.getByText("Frame 90 of 90")).toBeVisible();
+  await page.keyboard.press("Home");
+  await expect(page.getByText("Frame 1 of 90")).toBeVisible();
+  await page.keyboard.press("k");
+  await expect(playbackControls.getByRole("button", { name: "Pause" })).toBeVisible();
+  await page.keyboard.press("K");
+  await expect(playbackControls.getByRole("button", { name: "Play" })).toBeVisible();
+  await page.keyboard.press("Space");
+  await expect(playbackControls.getByRole("button", { name: "Pause" })).toBeVisible();
+  await page.keyboard.press("Space");
+  await expect(playbackControls.getByRole("button", { name: "Play" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Previous frame" })).toHaveAttribute(
+    "aria-keyshortcuts",
+    "ArrowLeft ,",
+  );
+
+  const timeline = page.getByRole("slider", { name: "Review timeline" });
+  await expect(timeline).toHaveAttribute("aria-keyshortcuts", "Home End");
+  await timeline.fill("45");
+  await expect(page.getByText("Frame 46 of 90")).toBeVisible();
+  const timelineBounds = await timeline.boundingBox();
+  expect(timelineBounds).not.toBeNull();
+  if (timelineBounds !== null) {
+    await page.mouse.move(
+      timelineBounds.x + timelineBounds.width / 2,
+      timelineBounds.y + timelineBounds.height / 2,
+    );
+  }
+  const thumbnail = page.locator("video[data-timeline-thumbnail]");
+  await expect(thumbnail).toBeVisible();
+  await expect(
+    page.locator(".timeline-thumbnail").getByText("Frame 46 · Trigger estimate"),
+  ).toBeVisible();
+  const thumbnailScreenshot = await page.screenshot({ animations: "disabled", fullPage: false });
+  if (timingOutputDirectory !== undefined) {
+    await writeFile(
+      path.join(timingOutputDirectory, "review-timeline-thumbnail.png"),
+      thumbnailScreenshot,
+    );
+  }
+  if (timelineBounds !== null) {
+    await page.mouse.move(timelineBounds.x + 1, timelineBounds.y + timelineBounds.height / 2);
+    const startThumbnailBounds = await page.locator(".timeline-thumbnail").boundingBox();
+    expect(startThumbnailBounds).not.toBeNull();
+    expect(startThumbnailBounds?.x ?? -1).toBeGreaterThanOrEqual(timelineBounds.x - 1);
+
+    await page.mouse.move(
+      timelineBounds.x + timelineBounds.width - 1,
+      timelineBounds.y + timelineBounds.height / 2,
+    );
+    const endThumbnailBounds = await page.locator(".timeline-thumbnail").boundingBox();
+    expect(endThumbnailBounds).not.toBeNull();
+    expect((endThumbnailBounds?.x ?? 0) + (endThumbnailBounds?.width ?? 0)).toBeLessThanOrEqual(
+      timelineBounds.x + timelineBounds.width + 1,
+    );
+  }
+  await page.mouse.move(0, 0);
+  await expect(thumbnail).toHaveCount(0);
 
   await page.getByRole("button", { name: "Next frame" }).click();
   await expect(page.getByText("Frame 47 of 90")).toBeVisible();
@@ -204,9 +272,57 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
   expect(viewport).toEqual({ width: 1440, height: 1000 });
 });
 
+test("keeps paired-phone arm failures prominent after review media is ready", async ({ page }) => {
+  const peerFailureUrl = new URL(stationUrl);
+  peerFailureUrl.searchParams.set("peer_arm", "rejected");
+  peerFailureUrl.hash = "review";
+  await page.goto(peerFailureUrl.toString());
+
+  await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Watching for address" })).toBeVisible();
+  await expect(page.getByText("Address trigger")).toBeVisible();
+  await expect(page.getByText("Paired phone rejected arm")).toHaveCount(2);
+  await expect(page.getByRole("alert")).toHaveCount(2);
+  await expect(page.getByText(/HTTP 409.*only one view/)).toHaveCount(2);
+  await expect(page.getByText("Frame 46 of 90")).toBeVisible();
+
+  const screenshot = await page.screenshot({ animations: "disabled", fullPage: false });
+  expect({ width: screenshot.readUInt32BE(16), height: screenshot.readUInt32BE(20) }).toEqual({
+    width: 1440,
+    height: 1000,
+  });
+  const outputDirectory = process.env.TEST_UNDECLARED_OUTPUTS_DIR;
+  if (outputDirectory !== undefined) {
+    await writeFile(path.join(outputDirectory, "peer-arm-failure.png"), screenshot);
+  }
+});
+
 test("keeps post-capture diagnostics usable on a phone viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(stationUrl);
+  const outputDirectory = process.env.TEST_UNDECLARED_OUTPUTS_DIR;
+
+  await page.getByRole("button", { name: "Next frame" }).click();
+  await expect(page.getByText("Frame 47 of 90")).toBeVisible();
+  const mobileTimeline = page.getByRole("slider", { name: "Review timeline" });
+  const mobileTimelineBounds = await mobileTimeline.boundingBox();
+  expect(mobileTimelineBounds).not.toBeNull();
+  if (mobileTimelineBounds !== null) {
+    await page.mouse.move(
+      mobileTimelineBounds.x + mobileTimelineBounds.width - 1,
+      mobileTimelineBounds.y + mobileTimelineBounds.height / 2,
+    );
+    const mobileThumbnailBounds = await page.locator(".timeline-thumbnail").boundingBox();
+    expect(mobileThumbnailBounds).not.toBeNull();
+    expect(
+      (mobileThumbnailBounds?.x ?? 0) + (mobileThumbnailBounds?.width ?? 0),
+    ).toBeLessThanOrEqual(391);
+  }
+  await page.mouse.move(0, 0);
+  const playerScreenshot = await page.screenshot({ animations: "disabled", fullPage: false });
+  if (outputDirectory !== undefined) {
+    await writeFile(path.join(outputDirectory, "review-phone-player.png"), playerScreenshot);
+  }
 
   const diagnostics = page.getByRole("region", { name: "Capture diagnostics" });
   await diagnostics.scrollIntoViewIfNeeded();
@@ -236,7 +352,6 @@ test("keeps post-capture diagnostics usable on a phone viewport", async ({ page 
     width: 390,
     height: 844,
   });
-  const outputDirectory = process.env.TEST_UNDECLARED_OUTPUTS_DIR;
   if (outputDirectory !== undefined) {
     await writeFile(path.join(outputDirectory, "review-phone-diagnostics.png"), screenshot);
   }
@@ -325,6 +440,98 @@ test("keeps camera setup available and exposes accessible review controls", asyn
   if (outputDirectory !== undefined) {
     await writeFile(path.join(outputDirectory, "synthetic-hil-ready.png"), hilScreenshot);
   }
+});
+
+test("configures and associates two Android phones at fixed viewports", async ({ page }) => {
+  const phoneSetupUrl = new URL(stationUrl);
+  phoneSetupUrl.searchParams.set("phone_setup", "dual");
+  phoneSetupUrl.hash = "setup";
+  await page.goto(phoneSetupUrl.toString());
+
+  await expect(page.getByRole("heading", { name: "Phone setup" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Two-phone station configured" })).toBeVisible();
+  await expect(page.getByText("Both views assigned")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save phone configuration" })).toHaveCount(2);
+  const phoneCards = page.locator("article.phone-card");
+  const leaderCard = phoneCards.nth(0);
+  const shadowCard = phoneCards.nth(1);
+  await expect(leaderCard.getByLabel("Peer control token")).toHaveValue("");
+  await expect(leaderCard.getByLabel("Peer phone origin")).toHaveValue("http://pixel-5a.test:8088");
+  await expect(shadowCard.getByLabel("Peer control token")).toHaveCount(0);
+
+  await leaderCard.getByLabel("Clear the existing peer association").check();
+  await leaderCard.getByRole("button", { name: "Save phone configuration" }).click();
+  await expect(page.getByRole("heading", { name: "Resolve pose assignments" })).toBeVisible();
+  await expect(leaderCard.getByText("No peer association stored")).toBeVisible();
+  await leaderCard.getByLabel("Peer phone origin").fill("http://pixel-5a.test:8088");
+  await leaderCard.getByLabel("Peer control token").fill("browser-write-only-peer-token");
+  await leaderCard.getByRole("button", { name: "Save phone configuration" }).click();
+  await expect(page.getByRole("heading", { name: "Two-phone station configured" })).toBeVisible();
+  await expect(leaderCard.getByLabel("Peer control token")).toHaveValue("");
+  await expect(leaderCard.getByText("Peer association stored")).toBeVisible();
+
+  await leaderCard.getByRole("combobox", { name: "Camera view" }).selectOption("face_on");
+  await leaderCard.getByRole("button", { name: "Save phone configuration" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Resolve camera view assignments" }),
+  ).toBeVisible();
+  await shadowCard.getByRole("combobox", { name: "Camera view" }).selectOption("down_the_line");
+  await shadowCard.getByRole("button", { name: "Save phone configuration" }).click();
+  await expect(page.getByRole("heading", { name: "Two-phone station configured" })).toBeVisible();
+  await expect(leaderCard.getByRole("heading", { name: "Across-the-line phone" })).toBeVisible();
+  await expect(shadowCard.getByRole("heading", { name: "Down-the-line phone" })).toBeVisible();
+
+  await leaderCard
+    .getByRole("combobox", { name: "Inference hardware" })
+    .selectOption("gpu_required");
+  await leaderCard.getByRole("button", { name: "Save phone configuration" }).click();
+  await expect(leaderCard.getByText("Phone configuration saved.")).toBeVisible();
+
+  const fullPageScreenshot = await page.screenshot({ animations: "disabled", fullPage: true });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const screenshot = await page.screenshot({ animations: "disabled", fullPage: false });
+  expect({ width: screenshot.readUInt32BE(16), height: screenshot.readUInt32BE(20) }).toEqual({
+    width: 1440,
+    height: 1000,
+  });
+  const outputDirectory = process.env.TEST_UNDECLARED_OUTPUTS_DIR;
+  if (outputDirectory !== undefined) {
+    await writeFile(path.join(outputDirectory, "phone-setup-fixed-viewport.png"), screenshot);
+    await writeFile(path.join(outputDirectory, "phone-setup-full-page.png"), fullPageScreenshot);
+  }
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("heading", { name: "Phone setup" }).scrollIntoViewIfNeeded();
+  expect(
+    await page.evaluate(() => ({
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: document.documentElement.clientWidth,
+    })),
+  ).toEqual({ documentWidth: 390, viewportWidth: 390 });
+  const mobileScreenshot = await page.screenshot({ animations: "disabled", fullPage: false });
+  expect({
+    width: mobileScreenshot.readUInt32BE(16),
+    height: mobileScreenshot.readUInt32BE(20),
+  }).toEqual({ width: 390, height: 844 });
+  if (outputDirectory !== undefined) {
+    await writeFile(path.join(outputDirectory, "phone-setup-mobile.png"), mobileScreenshot);
+  }
+
+  await page.getByRole("button", { name: "Review" }).click();
+  await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
+  await expect(page.getByText("Frame 46 of 90")).toBeVisible();
+});
+
+test("rejects an incompatible two-phone pose topology", async ({ page }) => {
+  const phoneSetupUrl = new URL(stationUrl);
+  phoneSetupUrl.searchParams.set("phone_setup", "dual_invalid_pose");
+  phoneSetupUrl.hash = "setup";
+  await page.goto(phoneSetupUrl.toString());
+
+  await expect(page.getByRole("heading", { name: "Resolve pose assignments" })).toBeVisible();
+  await expect(page.getByText(/leader associated with one peer-free shadow/)).toBeVisible();
+  await expect(page.getByText("Pose assignment needed")).toBeVisible();
+  await expect(page.getByText("Both views assigned")).toHaveCount(0);
 });
 
 test("loads the supplied physical HIL session artifact", async ({ page }) => {
@@ -466,6 +673,31 @@ test("loads the live Android capture node", async ({ page }) => {
   if (parsedNodeUrl.protocol !== "http:" && parsedNodeUrl.protocol !== "https:") {
     throw new Error("SWING_CAPTURE_ANDROID_NODE_URL must be an HTTP(S) URL");
   }
+  if (
+    parsedNodeUrl.username.length > 0 ||
+    parsedNodeUrl.password.length > 0 ||
+    parsedNodeUrl.pathname !== "/" ||
+    parsedNodeUrl.hash.length > 0 ||
+    [...parsedNodeUrl.searchParams.keys()].some((key) => key !== "node_token")
+  ) {
+    throw new Error(
+      "SWING_CAPTURE_ANDROID_NODE_URL must be an origin with at most a node_token query",
+    );
+  }
+  const embeddedNodeToken = parsedNodeUrl.searchParams.get("node_token");
+  const environmentNodeToken = process.env.SWING_CAPTURE_ANDROID_NODE_TOKEN;
+  if (
+    embeddedNodeToken !== null &&
+    environmentNodeToken !== undefined &&
+    embeddedNodeToken !== environmentNodeToken
+  ) {
+    throw new Error("Android node tokens supplied by URL and environment do not match");
+  }
+  const nodeToken = requireNodeToken(
+    environmentNodeToken ?? embeddedNodeToken ?? "",
+    "SWING_CAPTURE_ANDROID_NODE_TOKEN",
+  );
+  parsedNodeUrl.search = "";
   const staticRoot = process.env.SWING_CAPTURE_STATIC_APP;
   if (staticRoot === undefined) {
     throw new Error("SWING_CAPTURE_STATIC_APP is not set");
@@ -475,6 +707,8 @@ test("loads the live Android capture node", async ({ page }) => {
   });
   const staticUrl = await listen(staticServer);
   try {
+    await assertPhoneHostedApplication(page, parsedNodeUrl, nodeToken);
+
     const pageErrors: string[] = [];
     const failedRequests: string[] = [];
     const mediaResponseStatuses: number[] = [];
@@ -487,9 +721,11 @@ test("loads the live Android capture node", async ({ page }) => {
         mediaResponseStatuses.push(response.status());
       }
     });
-    await page.goto(
-      `${staticUrl}/index.html?node=${encodeURIComponent(parsedNodeUrl.toString())}#review`,
-    );
+    const reviewUrl = new URL("/index.html", staticUrl);
+    reviewUrl.searchParams.set("node", parsedNodeUrl.origin);
+    reviewUrl.searchParams.set("node_token", nodeToken);
+    reviewUrl.hash = "review";
+    await page.goto(reviewUrl.toString());
     await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Ready" })).toBeVisible();
     const h264Support = await page.evaluate(() =>
@@ -553,6 +789,66 @@ test("loads the live Android capture node", async ({ page }) => {
     await close(staticServer);
   }
 });
+
+async function assertPhoneHostedApplication(
+  page: Page,
+  configuredNodeUrl: URL,
+  controlToken: string,
+): Promise<void> {
+  requireNodeToken(controlToken, "phone-hosted application control token");
+  const rootUrl = new URL("/", configuredNodeUrl.origin);
+  rootUrl.searchParams.set("node_token", controlToken);
+  rootUrl.hash = "review";
+
+  const assets = new Map<string, PlaywrightResponse>();
+  const apiResponses = new Map<string, PlaywrightResponse>();
+  const recordAsset = (response: PlaywrightResponse) => {
+    const url = new URL(response.url());
+    if (
+      url.origin === rootUrl.origin &&
+      (url.pathname === "/app.js" || url.pathname === "/app.css")
+    ) {
+      assets.set(url.pathname, response);
+    }
+    if (
+      url.origin === rootUrl.origin &&
+      (url.pathname === "/api/v1/capture/status" || url.pathname === "/api/v1/setup")
+    ) {
+      apiResponses.set(url.pathname, response);
+    }
+  };
+  page.on("response", recordAsset);
+  try {
+    const documentResponse = await page.goto(rootUrl.toString());
+    expect(documentResponse, "phone-hosted root must return an HTML document").not.toBeNull();
+    expect(documentResponse?.status()).toBe(200);
+    expect(documentResponse?.headers()["content-type"] ?? "").toContain("text/html");
+    await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
+    await expect(page.locator(".capture-badge strong")).not.toHaveText("Connecting");
+    await expect.poll(() => apiResponses.get("/api/v1/capture/status")?.status()).toBe(200);
+    expect(
+      await apiResponses.get("/api/v1/capture/status")?.request().headerValue("authorization"),
+    ).toBe(`Bearer ${controlToken}`);
+    await expect.poll(() => [...assets.keys()].sort()).toEqual(["/app.css", "/app.js"]);
+    for (const [path, response] of assets) {
+      expect(response.status(), `phone-hosted ${path}`).toBe(200);
+      const contentType = response.headers()["content-type"] ?? "";
+      expect(contentType, `phone-hosted ${path} content type`).toMatch(
+        path.endsWith(".js") ? /javascript/ : /css/,
+      );
+    }
+
+    await page.getByRole("button", { name: "Phone setup" }).click();
+    await expect(page.getByRole("heading", { name: "Phone setup" })).toBeVisible();
+    await expect(page.locator("article.phone-card:not(.unavailable)")).toHaveCount(1);
+    await expect.poll(() => apiResponses.get("/api/v1/setup")?.status()).toBe(200);
+    expect(await apiResponses.get("/api/v1/setup")?.request().headerValue("authorization")).toBe(
+      `Bearer ${controlToken}`,
+    );
+  } finally {
+    page.off("response", recordAsset);
+  }
+}
 
 test("validates the dual Android HIL environment contract", () => {
   expect(readDualAndroidHilConfiguration({})).toBeNull();
@@ -632,6 +928,17 @@ test("loads a durable paired session from two live Android nodes", async ({ page
   const pageErrors: string[] = [];
   const failedRequests: string[] = [];
   try {
+    await assertPhoneHostedApplication(
+      page,
+      new URL(configuration.downTheLineNodeUrl),
+      configuration.downTheLineToken,
+    );
+    await assertPhoneHostedApplication(
+      page,
+      new URL(configuration.faceOnNodeUrl),
+      configuration.faceOnToken,
+    );
+
     const partialContentOrigins = new Set<string>();
     const durableCoordinationOrigins = new Set<string>();
     page.on("pageerror", (error) => pageErrors.push(error.message));

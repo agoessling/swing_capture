@@ -3,6 +3,9 @@ import { JSDOM, type DOMWindow } from "jsdom";
 import { App } from "./app.js";
 import { HttpStationApi, parseStationStatus, type CameraStatus, type StationApi } from "./api.js";
 import { FakeStationApi, FIXTURE_STATUS } from "./fake_api.js";
+import { FakeNodeSetupApi, fixtureNodeSetup } from "./fake_node_setup_api.js";
+import { HttpNodeSetupApi, parseNodeSetupSnapshot } from "./node_setup_api.js";
+import { NodeSetupApp } from "./node_setup_app.js";
 import {
   type ObjectUrlFactory,
   PairedPreviewLoader,
@@ -31,6 +34,7 @@ async function main() {
   assert.equal((await screen.findAllByRole("img")).length, 2);
   assert.ok(screen.getByText("Both configured camera roles are online."));
   assert.ok(screen.getByText("Face-on image needs attention."));
+  await flushAsyncWork();
   fireEvent.error(screen.getByRole("img", { name: "Down-the-line live setup preview" }));
   assert.ok(screen.getAllByText("Preview update delayed").length > 0);
 
@@ -78,6 +82,172 @@ async function main() {
   );
   cleanup();
 
+  const nodeSetupApi = new FakeNodeSetupApi(
+    "http://pixel-6-pro.test:8088",
+    "down_the_line",
+    "Pixel 6 Pro",
+    "leader",
+    null,
+  );
+  const phoneSetup = render(<NodeSetupApp apis={[nodeSetupApi]} />);
+  assert.ok(await screen.findByRole("heading", { name: "Phone setup" }));
+  assert.ok(await screen.findByRole("heading", { name: "Resolve pose assignment" }));
+  assert.ok(screen.getByText("Pixel 6 Pro", { exact: false }));
+  assert.equal(
+    (screen.getByRole("combobox", { name: "Camera view" }) as HTMLSelectElement).value,
+    "down_the_line",
+  );
+  assert.ok(screen.getByText(/1280×720 · 240 fps · recommended/));
+  assert.equal(
+    (screen.getByRole("textbox", { name: "Peer phone origin" }) as HTMLInputElement).value,
+    "",
+  );
+  assert.equal(
+    (screen.getByLabelText("Peer control token") as HTMLInputElement).value,
+    "",
+    "stored peer credentials must never be returned to the browser",
+  );
+  assert.ok(screen.getByText("No peer association stored"));
+  fireEvent.change(screen.getByRole("textbox", { name: "Peer phone origin" }), {
+    target: { value: "http://pixel-5a.test:8088" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save phone configuration" }));
+  assert.ok(
+    await screen.findByText(
+      "Enter both the peer origin and its control token to replace the association.",
+    ),
+  );
+  assert.equal((await nodeSetupApi.getSetup()).revision, 4);
+  fireEvent.change(screen.getByLabelText("Peer control token"), {
+    target: { value: "peer-control-token-never-returned" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save phone configuration" }));
+  assert.ok(await screen.findByText("Phone configuration saved."));
+  await waitFor(async () => {
+    const savedSetup = await nodeSetupApi.getSetup();
+    assert.equal(savedSetup.configuration.pose.peer?.origin, "http://pixel-5a.test:8088");
+    assert.equal(savedSetup.revision, 5);
+  });
+  assert.ok(await screen.findByRole("heading", { name: "Phone configuration loaded" }));
+  assert.equal(
+    (screen.getByLabelText("Peer control token") as HTMLInputElement).value,
+    "",
+    "a newly written token must be cleared rather than rendered back",
+  );
+  fireEvent.click(screen.getByLabelText("Clear the existing peer association"));
+  fireEvent.click(screen.getByRole("button", { name: "Save phone configuration" }));
+  await waitFor(async () => {
+    const clearedSetup = await nodeSetupApi.getSetup();
+    assert.equal(clearedSetup.configuration.pose.peer, null);
+    assert.equal(clearedSetup.revision, 6);
+  });
+
+  const externallyUpdated = await nodeSetupApi.getSetup();
+  await nodeSetupApi.updateSetup(externallyUpdated.revision, {
+    role: externallyUpdated.configuration.role,
+    capture_profile: externallyUpdated.configuration.capture_profile,
+    pose: {
+      mode: externallyUpdated.configuration.pose.mode,
+      inference_delegate: "cpu_only",
+      debug_evidence_enabled: externallyUpdated.configuration.pose.debug_evidence_enabled,
+      hitting_region: externallyUpdated.configuration.pose.hitting_region,
+      peer_update: { operation: "keep" },
+    },
+  });
+  fireEvent.change(screen.getByRole("combobox", { name: "Inference hardware" }), {
+    target: { value: "gpu_required" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save phone configuration" }));
+  assert.ok(await screen.findByText("setup configuration changed; reload before saving"));
+  fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+  await waitFor(() => {
+    assert.equal(
+      (screen.getByRole("combobox", { name: "Inference hardware" }) as HTMLSelectElement).value,
+      "cpu_only",
+    );
+    assert.equal(screen.queryByText("setup configuration changed; reload before saving"), null);
+  });
+  const phoneAccessibility = await axe.run(phoneSetup.container, {
+    rules: { "color-contrast": { enabled: false } },
+  });
+  assert.deepEqual(
+    phoneAccessibility.violations.map((violation) => violation.id),
+    [],
+    "phone setup fixture should have no automated accessibility violations",
+  );
+  cleanup();
+
+  const demotedLeaderApi = new FakeNodeSetupApi(
+    "http://pixel-6-pro.test:8088",
+    "down_the_line",
+    "Pixel 6 Pro",
+  );
+  render(<NodeSetupApp apis={[demotedLeaderApi]} />);
+  assert.ok(await screen.findByText("Peer association stored"));
+  fireEvent.change(screen.getByRole("combobox", { name: "Pose behavior" }), {
+    target: { value: "shadow" },
+  });
+  assert.equal(screen.queryByRole("textbox", { name: "Peer phone origin" }), null);
+  assert.ok(screen.getByText("Peer association will be cleared"));
+  fireEvent.click(screen.getByRole("button", { name: "Save phone configuration" }));
+  await waitFor(async () => {
+    const demoted = await demotedLeaderApi.getSetup();
+    assert.equal(demoted.configuration.pose.mode, "shadow");
+    assert.equal(demoted.configuration.pose.peer, null);
+  });
+  cleanup();
+
+  render(
+    <NodeSetupApp
+      apis={[
+        new FakeNodeSetupApi("http://pixel-6-pro.test:8088", "down_the_line", "Pixel 6 Pro"),
+        new FakeNodeSetupApi("http://pixel-5a.test:8088", "face_on", "Pixel 5a"),
+      ]}
+    />,
+  );
+  assert.ok(await screen.findByRole("heading", { name: "Two-phone station configured" }));
+  assert.ok(screen.getByText("Both views assigned"));
+  assert.equal(screen.getAllByRole("button", { name: "Save phone configuration" }).length, 2);
+  cleanup();
+
+  render(
+    <NodeSetupApp
+      apis={[
+        new FakeNodeSetupApi(
+          "http://pixel-6-pro.test:8088",
+          "down_the_line",
+          "Pixel 6 Pro",
+          "leader",
+          "http://different-shadow.test:8088",
+        ),
+        new FakeNodeSetupApi("http://pixel-5a.test:8088", "face_on", "Pixel 5a", "shadow"),
+      ]}
+    />,
+  );
+  assert.ok(await screen.findByRole("heading", { name: "Resolve pose assignments" }));
+  assert.ok(screen.getByText(/leader associated with one peer-free shadow/));
+  assert.equal(screen.queryByText("Both views assigned"), null);
+  cleanup();
+
+  render(
+    <NodeSetupApp
+      apis={[
+        new FakeNodeSetupApi("http://pixel-6-pro.test:8088", "down_the_line", "Pixel 6 Pro"),
+        new FakeNodeSetupApi(
+          "http://pixel-5a.test:8088",
+          "face_on",
+          "Pixel 5a",
+          "shadow",
+          "http://pixel-6-pro.test:8088",
+        ),
+      ]}
+    />,
+  );
+  assert.ok(await screen.findByRole("heading", { name: "Resolve pose assignments" }));
+  assert.ok(screen.getByText(/peer-free shadow/));
+  assert.equal(screen.queryByText("Both views assigned"), null);
+  cleanup();
+
   await testPairedPreviewBackpressure();
 
   const disconnected = structuredClone(FIXTURE_STATUS);
@@ -119,6 +289,7 @@ async function main() {
   await testPollFailureClearsStaleStatus({ cleanup, render, screen });
 
   await testHttpContract();
+  await testNodeSetupHttpContract();
   assert.throws(
     () => parseStationStatus({ ...FIXTURE_STATUS, schema_version: 2 }),
     /Unsupported station status schema/,
@@ -128,6 +299,139 @@ async function main() {
   };
   delete missingError.cameras[0]?.error;
   assert.throws(() => parseStationStatus(missingError), /camera error must be a string/);
+}
+
+async function testNodeSetupHttpContract() {
+  const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+  let responseSetup = fixtureNodeSetup();
+  const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    if (init?.method === "PUT") {
+      const request = JSON.parse(String(init.body)) as {
+        configuration: { pose: { peer_update: { operation: string; origin?: string } } };
+      };
+      const peerUpdate = request.configuration.pose.peer_update;
+      responseSetup = {
+        ...responseSetup,
+        revision: responseSetup.revision + 1,
+        configuration: {
+          ...responseSetup.configuration,
+          pose: {
+            ...responseSetup.configuration.pose,
+            peer:
+              peerUpdate.operation === "keep"
+                ? responseSetup.configuration.pose.peer
+                : peerUpdate.operation === "clear"
+                  ? null
+                  : { origin: peerUpdate.origin ?? "" },
+          },
+        },
+      };
+    }
+    return Response.json(responseSetup);
+  }) as typeof fetch;
+  const api = new HttpNodeSetupApi("http://pixel.test:8088/", "node-secret", fetcher);
+  const setup = await api.getSetup();
+  assert.equal(setup.revision, 4);
+  const firstCall = calls[0];
+  assert.ok(firstCall);
+  assert.equal(firstCall.url, "http://pixel.test:8088/api/v1/setup");
+  assert.ok(firstCall.init);
+  assert.equal(new Headers(firstCall.init.headers).get("Authorization"), "Bearer node-secret");
+  const updated = await api.updateSetup(setup.revision, {
+    role: "down_the_line",
+    capture_profile: "720p240",
+    pose: {
+      mode: "leader",
+      inference_delegate: "gpu_preferred",
+      debug_evidence_enabled: true,
+      hitting_region: { left: 0.15, top: 0.3, right: 0.85, bottom: 1 },
+      peer_update: { operation: "keep" },
+    },
+  });
+  assert.equal(updated.revision, 5);
+  assert.equal(calls[1]?.init?.method, "PUT");
+  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
+    schema_version: 1,
+    expected_revision: 4,
+    configuration: {
+      role: "down_the_line",
+      capture_profile: "720p240",
+      pose: {
+        mode: "leader",
+        inference_delegate: "gpu_preferred",
+        debug_evidence_enabled: true,
+        hitting_region: { left: 0.15, top: 0.3, right: 0.85, bottom: 1 },
+        peer_update: { operation: "keep" },
+      },
+    },
+  });
+  const replaced = await api.updateSetup(updated.revision, {
+    role: "down_the_line",
+    capture_profile: "720p240",
+    pose: {
+      mode: "leader",
+      inference_delegate: "gpu_preferred",
+      debug_evidence_enabled: true,
+      hitting_region: { left: 0.15, top: 0.3, right: 0.85, bottom: 1 },
+      peer_update: {
+        operation: "replace",
+        origin: "http://pixel-5a.test:8088",
+        control_token: "write-only-peer-token",
+      },
+    },
+  });
+  assert.equal(replaced.revision, 6);
+  assert.deepEqual(replaced.configuration.pose.peer, { origin: "http://pixel-5a.test:8088" });
+  assert.doesNotMatch(JSON.stringify(replaced), /write-only-peer-token/);
+  assert.deepEqual(
+    (JSON.parse(String(calls[2]?.init?.body)) as { configuration: { pose: object } }).configuration
+      .pose,
+    {
+      mode: "leader",
+      inference_delegate: "gpu_preferred",
+      debug_evidence_enabled: true,
+      hitting_region: { left: 0.15, top: 0.3, right: 0.85, bottom: 1 },
+      peer_update: {
+        operation: "replace",
+        origin: "http://pixel-5a.test:8088",
+        control_token: "write-only-peer-token",
+      },
+    },
+  );
+  const cleared = await api.updateSetup(replaced.revision, {
+    role: "down_the_line",
+    capture_profile: "720p240",
+    pose: {
+      mode: "disabled",
+      inference_delegate: "gpu_preferred",
+      debug_evidence_enabled: true,
+      hitting_region: { left: 0.15, top: 0.3, right: 0.85, bottom: 1 },
+      peer_update: { operation: "clear" },
+    },
+  });
+  assert.equal(cleared.revision, 7);
+  assert.equal(cleared.configuration.pose.peer, null);
+  assert.deepEqual(
+    (
+      JSON.parse(String(calls[3]?.init?.body)) as {
+        configuration: { pose: { peer_update: object } };
+      }
+    ).configuration.pose.peer_update,
+    { operation: "clear" },
+  );
+  assert.throws(
+    () => parseNodeSetupSnapshot({ ...fixtureNodeSetup(), revision: -1 }),
+    /setup revision must be a nonnegative integer/,
+  );
+  assert.throws(
+    () =>
+      parseNodeSetupSnapshot({
+        ...fixtureNodeSetup(),
+        preview: { available: true, url: null },
+      }),
+    /preview availability must agree/,
+  );
 }
 
 async function testPairedPreviewBackpressure() {

@@ -26,6 +26,28 @@ public final class PoseTriggerController {
     STOP_HIGH_SPEED
   }
 
+  /** Stable machine-readable explanations for controller decisions and state transitions. */
+  public enum TransitionReason {
+    LEGACY,
+    WAITING_FOR_ADDRESS,
+    QUALIFICATION_STARTED,
+    QUALIFICATION_CONTINUING,
+    QUALIFICATION_DROPOUT_TOLERATED,
+    QUALIFICATION_DROPPED,
+    OBSERVATION_GAP_RESTARTED,
+    OBSERVATION_GAP_CLEARED,
+    ADDRESS_STABLE_ARMED,
+    ACTIVE_WINDOW_EXTENDED,
+    ACTIVE_CLEARING,
+    ACTIVE_CLEAR_STOPPED,
+    ACTIVE_EVIDENCE_EXPIRED,
+    THERMAL_HARD_CAP_REACHED,
+    EXTERNAL_CAPTURE_STARTED,
+    CAPTURE_ENDED,
+    WAITING_FOR_CLEAR,
+    CLEAR_COMPLETE_REARMED
+  }
+
   /** Values are normalized to [0, 1], and timestamps use one monotonic clock. */
   public record Observation(
       long timestampNs,
@@ -52,8 +74,15 @@ public final class PoseTriggerController {
   /**
    * Controller thresholds and time bounds.
    *
-   * <p>The defaults require three coherent observations at 5 fps, tolerate one isolated missed
-   * observation, and never keep an unproductive high-speed session alive for more than 15 seconds.
+   * <p>The defaults require three coherent observations at 5 fps and tolerate one isolated missed
+   * observation. {@code maximumArmedDurationNs} is a sliding evidence lease: observations that
+   * still place the golfer in the hitting region extend it. {@code thermalHardCapNs} is absolute
+   * from the first arm request and cannot be extended. Defaults therefore allow an address dwell
+   * to remain armed beyond 15 seconds, but force a stop after 30 seconds without an impact.
+   *
+   * <p>The ten-argument constructor preserves the former API and its exact fixed-timeout behavior
+   * by using {@code maximumArmedDurationNs} as both the evidence lease and hard cap. New callers
+   * should specify the hard cap explicitly.
    */
   public record Config(
       double minimumPersonConfidence,
@@ -65,7 +94,8 @@ public final class PoseTriggerController {
       long qualificationDropoutGraceNs,
       long maximumArmedDurationNs,
       long clearDurationNs,
-      long cooldownNs) {
+      long cooldownNs,
+      long thermalHardCapNs) {
     private static final long MILLIS_TO_NANOS = 1_000_000L;
 
     public Config {
@@ -83,10 +113,41 @@ public final class PoseTriggerController {
       requirePositive(maximumArmedDurationNs, "maximumArmedDurationNs");
       requirePositive(clearDurationNs, "clearDurationNs");
       requireNonnegative(cooldownNs, "cooldownNs");
+      requirePositive(thermalHardCapNs, "thermalHardCapNs");
       if (qualificationDropoutGraceNs > maximumObservationGapNs) {
         throw new IllegalArgumentException(
             "qualificationDropoutGraceNs cannot exceed maximumObservationGapNs");
       }
+      if (thermalHardCapNs < maximumArmedDurationNs) {
+        throw new IllegalArgumentException(
+            "thermalHardCapNs cannot be shorter than maximumArmedDurationNs");
+      }
+    }
+
+    /** Compatibility constructor retaining the former fixed maximum armed duration. */
+    public Config(
+        double minimumPersonConfidence,
+        double maximumClearPersonConfidence,
+        double minimumAddressConfidence,
+        double maximumMotionMagnitude,
+        long minimumQualificationNs,
+        long maximumObservationGapNs,
+        long qualificationDropoutGraceNs,
+        long maximumArmedDurationNs,
+        long clearDurationNs,
+        long cooldownNs) {
+      this(
+          minimumPersonConfidence,
+          maximumClearPersonConfidence,
+          minimumAddressConfidence,
+          maximumMotionMagnitude,
+          minimumQualificationNs,
+          maximumObservationGapNs,
+          qualificationDropoutGraceNs,
+          maximumArmedDurationNs,
+          clearDurationNs,
+          cooldownNs,
+          maximumArmedDurationNs);
     }
 
     public static Config defaultsForFiveFramesPerSecond() {
@@ -100,7 +161,8 @@ public final class PoseTriggerController {
           250 * MILLIS_TO_NANOS,
           15_000 * MILLIS_TO_NANOS,
           1_000 * MILLIS_TO_NANOS,
-          2_000 * MILLIS_TO_NANOS);
+          2_000 * MILLIS_TO_NANOS,
+          30_000 * MILLIS_TO_NANOS);
     }
 
     private static void requireUnitInterval(double value, String name) {
@@ -127,13 +189,37 @@ public final class PoseTriggerController {
       Command command,
       String reason,
       OptionalLong qualificationStartedNs,
-      OptionalLong armRequestedNs) {
+      OptionalLong armRequestedNs,
+      OptionalLong activeUntilNs,
+      OptionalLong thermalHardStopNs,
+      TransitionReason transitionReason) {
     public Decision {
       Objects.requireNonNull(state, "state");
       Objects.requireNonNull(command, "command");
       Objects.requireNonNull(reason, "reason");
       Objects.requireNonNull(qualificationStartedNs, "qualificationStartedNs");
       Objects.requireNonNull(armRequestedNs, "armRequestedNs");
+      Objects.requireNonNull(activeUntilNs, "activeUntilNs");
+      Objects.requireNonNull(thermalHardStopNs, "thermalHardStopNs");
+      Objects.requireNonNull(transitionReason, "transitionReason");
+    }
+
+    /** Source-compatible constructor for consumers that construct legacy decisions in tests. */
+    public Decision(
+        State state,
+        Command command,
+        String reason,
+        OptionalLong qualificationStartedNs,
+        OptionalLong armRequestedNs) {
+      this(
+          state,
+          command,
+          reason,
+          qualificationStartedNs,
+          armRequestedNs,
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          TransitionReason.LEGACY);
     }
   }
 
@@ -143,6 +229,8 @@ public final class PoseTriggerController {
   private long qualificationStartedNs = -1;
   private long lastQualifiedNs = -1;
   private long armRequestedNs = -1;
+  private long activeUntilNs = -1;
+  private long thermalHardStopNs = -1;
   private long cooldownUntilNs = -1;
   private long clearStartedNs = -1;
 
@@ -156,19 +244,11 @@ public final class PoseTriggerController {
     long previousTimestampNs = lastTimestampNs;
     lastTimestampNs = observation.timestampNs();
 
-    if (state == State.ARM_REQUESTED
-        && elapsedNs(observation.timestampNs(), armRequestedNs)
-            >= config.maximumArmedDurationNs()) {
-      enterWaitingForClear(observation.timestampNs());
-      updateClearEvidence(observation);
-      return decision(Command.STOP_HIGH_SPEED, "high-speed arm timed out without an impact");
-    }
-
     return switch (state) {
       case WATCHING -> observeWatching(observation);
       case QUALIFYING -> observeQualifying(observation, previousTimestampNs);
-      case ARM_REQUESTED -> decision(Command.NONE, "high-speed capture already requested");
-      case WAITING_FOR_CLEAR -> observeWaitingForClear(observation);
+      case ARM_REQUESTED -> observeArmed(observation, previousTimestampNs);
+      case WAITING_FOR_CLEAR -> observeWaitingForClear(observation, previousTimestampNs);
     };
   }
 
@@ -180,7 +260,39 @@ public final class PoseTriggerController {
     }
     lastTimestampNs = timestampNs;
     enterWaitingForClear(timestampNs);
-    return decision(Command.NONE, "capture ended; waiting for the golfer to clear");
+    return decision(
+        Command.NONE,
+        "capture ended; waiting for the golfer to clear",
+        TransitionReason.CAPTURE_ENDED);
+  }
+
+  /**
+   * Records that a paired leader has started this node's high-speed capture.
+   *
+   * <p>Shadow nodes still run the local pose controller for diagnostics, so the controller may be
+   * watching, qualifying, or already locally arm-requested when the leader request arrives. This
+   * transition makes the subsequent capture lifecycle explicit and keeps {@link #captureEnded}
+   * valid. A node waiting for the golfer to clear must reject a new paired capture rather than
+   * bypassing the finish-pose suppression latch.
+   */
+  public Decision externalCaptureStarted(long timestampNs) {
+    requireIncreasingTimestamp(timestampNs);
+    if (state == State.WAITING_FOR_CLEAR) {
+      throw new IllegalStateException("external capture cannot bypass WAITING_FOR_CLEAR");
+    }
+    lastTimestampNs = timestampNs;
+    state = State.ARM_REQUESTED;
+    qualificationStartedNs = -1;
+    lastQualifiedNs = -1;
+    armRequestedNs = timestampNs;
+    thermalHardStopNs = saturatedAdd(timestampNs, config.thermalHardCapNs());
+    activeUntilNs =
+        Math.min(saturatedAdd(timestampNs, config.maximumArmedDurationNs()), thermalHardStopNs);
+    clearStartedNs = -1;
+    return decision(
+        Command.NONE,
+        "paired leader started high-speed capture",
+        TransitionReason.EXTERNAL_CAPTURE_STARTED);
   }
 
   public void reset() {
@@ -189,6 +301,8 @@ public final class PoseTriggerController {
     qualificationStartedNs = -1;
     lastQualifiedNs = -1;
     armRequestedNs = -1;
+    activeUntilNs = -1;
+    thermalHardStopNs = -1;
     cooldownUntilNs = -1;
     clearStartedNs = -1;
   }
@@ -199,18 +313,24 @@ public final class PoseTriggerController {
 
   private Decision observeWatching(Observation observation) {
     if (!qualifies(observation)) {
-      return decision(Command.NONE, "waiting for a golfer approaching address");
+      return decision(
+          Command.NONE,
+          "waiting for a golfer approaching address",
+          TransitionReason.WAITING_FOR_ADDRESS);
     }
     state = State.QUALIFYING;
     qualificationStartedNs = observation.timestampNs();
     lastQualifiedNs = observation.timestampNs();
-    return decision(Command.NONE, "first qualifying pose observation");
+    return decision(
+        Command.NONE,
+        "first qualifying pose observation",
+        TransitionReason.QUALIFICATION_STARTED);
   }
 
   private Decision observeQualifying(Observation observation, long previousTimestampNs) {
     if (elapsedNs(observation.timestampNs(), previousTimestampNs)
         > config.maximumObservationGapNs()) {
-      return restartOrClearQualification(observation, "observation gap reset qualification");
+      return restartOrClearQualification(observation);
     }
 
     if (qualifies(observation)) {
@@ -219,42 +339,127 @@ public final class PoseTriggerController {
           >= config.minimumQualificationNs()) {
         state = State.ARM_REQUESTED;
         armRequestedNs = observation.timestampNs();
+        qualificationStartedNs = -1;
+        lastQualifiedNs = -1;
+        thermalHardStopNs = saturatedAdd(armRequestedNs, config.thermalHardCapNs());
+        activeUntilNs =
+            Math.min(
+                saturatedAdd(armRequestedNs, config.maximumArmedDurationNs()),
+                thermalHardStopNs);
         return decision(
-            Command.START_HIGH_SPEED, "stable address approach requested high-speed capture");
+            Command.START_HIGH_SPEED,
+            "stable address approach requested high-speed capture",
+            TransitionReason.ADDRESS_STABLE_ARMED);
       }
-      return decision(Command.NONE, "address approach is still qualifying");
+      return decision(
+          Command.NONE,
+          "address approach is still qualifying",
+          TransitionReason.QUALIFICATION_CONTINUING);
     }
 
     if (elapsedNs(observation.timestampNs(), lastQualifiedNs)
         > config.qualificationDropoutGraceNs()) {
       clearQualification();
-      return decision(Command.NONE, "pose evidence dropped out before qualification");
+      return decision(
+          Command.NONE,
+          "pose evidence dropped out before qualification",
+          TransitionReason.QUALIFICATION_DROPPED);
     }
-    return decision(Command.NONE, "isolated pose dropout tolerated");
+    return decision(
+        Command.NONE,
+        "isolated pose dropout tolerated",
+        TransitionReason.QUALIFICATION_DROPOUT_TOLERATED);
   }
 
-  private Decision observeWaitingForClear(Observation observation) {
+  private Decision observeArmed(Observation observation, long previousTimestampNs) {
+    if (observation.timestampNs() >= thermalHardStopNs) {
+      enterWaitingForClear(observation.timestampNs());
+      updateClearEvidence(observation);
+      return decision(
+          Command.STOP_HIGH_SPEED,
+          "absolute thermal hard cap stopped high-speed capture",
+          TransitionReason.THERMAL_HARD_CAP_REACHED);
+    }
+
+    if (observation.timestampNs() >= activeUntilNs) {
+      enterWaitingForClear(observation.timestampNs());
+      updateClearEvidence(observation);
+      return decision(
+          Command.STOP_HIGH_SPEED,
+          "active pose evidence expired before the thermal hard cap",
+          TransitionReason.ACTIVE_EVIDENCE_EXPIRED);
+    }
+
+    if (isEngaged(observation)) {
+      clearStartedNs = -1;
+      activeUntilNs =
+          Math.min(
+              saturatedAdd(observation.timestampNs(), config.maximumArmedDurationNs()),
+              thermalHardStopNs);
+      return decision(
+          Command.NONE,
+          "golfer remains engaged; active high-speed window extended",
+          TransitionReason.ACTIVE_WINDOW_EXTENDED);
+    }
+
+    if (previousTimestampNs >= 0
+        && elapsedNs(observation.timestampNs(), previousTimestampNs)
+            > config.maximumObservationGapNs()) {
+      clearStartedNs = -1;
+    }
     updateClearEvidence(observation);
     if (clearStartedNs >= 0
-        && observation.timestampNs() >= cooldownUntilNs
         && elapsedNs(observation.timestampNs(), clearStartedNs) >= config.clearDurationNs()) {
-      state = State.WATCHING;
-      armRequestedNs = -1;
-      cooldownUntilNs = -1;
-      clearStartedNs = -1;
-      return decision(Command.NONE, "golfer cleared; standby trigger is ready again");
+      enterWaitingForClear(observation.timestampNs());
+      updateClearEvidence(observation);
+      return decision(
+          Command.STOP_HIGH_SPEED,
+          "golfer cleared; stopped high-speed capture and entered rearm cooldown",
+          TransitionReason.ACTIVE_CLEAR_STOPPED);
     }
-    return decision(Command.NONE, "waiting for cooldown and a clear hitting region");
+    return decision(
+        Command.NONE,
+        "clear-region evidence is accumulating while high-speed remains active",
+        TransitionReason.ACTIVE_CLEARING);
   }
 
-  private Decision restartOrClearQualification(Observation observation, String reason) {
+  private Decision observeWaitingForClear(
+      Observation observation, long previousTimestampNs) {
+    if (previousTimestampNs >= 0
+        && elapsedNs(observation.timestampNs(), previousTimestampNs)
+            > config.maximumObservationGapNs()) {
+      clearStartedNs = -1;
+    }
+    updateClearEvidence(observation);
+    if (clearStartedNs >= 0
+        && elapsedNs(observation.timestampNs(), clearStartedNs) >= config.clearDurationNs()
+        && observation.timestampNs() >= cooldownUntilNs) {
+      enterWatchingAfterClear();
+      return decision(
+          Command.NONE,
+          "golfer cleared and cooldown elapsed; standby trigger is ready again",
+          TransitionReason.CLEAR_COMPLETE_REARMED);
+    }
+    return decision(
+        Command.NONE,
+        "waiting for continuous clear-region evidence",
+        TransitionReason.WAITING_FOR_CLEAR);
+  }
+
+  private Decision restartOrClearQualification(Observation observation) {
     if (qualifies(observation)) {
       qualificationStartedNs = observation.timestampNs();
       lastQualifiedNs = observation.timestampNs();
-      return decision(Command.NONE, reason + "; current observation starts a new candidate");
+      return decision(
+          Command.NONE,
+          "observation gap reset qualification; current observation starts a new candidate",
+          TransitionReason.OBSERVATION_GAP_RESTARTED);
     }
     clearQualification();
-    return decision(Command.NONE, reason);
+    return decision(
+        Command.NONE,
+        "observation gap reset qualification",
+        TransitionReason.OBSERVATION_GAP_CLEARED);
   }
 
   private void clearQualification() {
@@ -265,26 +470,45 @@ public final class PoseTriggerController {
 
   private void enterWaitingForClear(long timestampNs) {
     state = State.WAITING_FOR_CLEAR;
-    cooldownUntilNs = Math.addExact(timestampNs, config.cooldownNs());
+    cooldownUntilNs = saturatedAdd(timestampNs, config.cooldownNs());
     clearStartedNs = -1;
     qualificationStartedNs = -1;
     lastQualifiedNs = -1;
+    activeUntilNs = -1;
+    thermalHardStopNs = -1;
+  }
+
+  private void enterWatchingAfterClear() {
+    state = State.WATCHING;
+    qualificationStartedNs = -1;
+    lastQualifiedNs = -1;
+    armRequestedNs = -1;
+    activeUntilNs = -1;
+    thermalHardStopNs = -1;
+    cooldownUntilNs = -1;
+    clearStartedNs = -1;
   }
 
   private void updateClearEvidence(Observation observation) {
-    boolean clear =
-        !observation.insideHittingRegion()
-            || observation.personConfidence() <= config.maximumClearPersonConfidence();
-    if (!clear) {
+    if (!isClear(observation)) {
       clearStartedNs = -1;
     } else if (clearStartedNs < 0) {
       clearStartedNs = observation.timestampNs();
     }
   }
 
-  private boolean qualifies(Observation observation) {
+  private boolean isClear(Observation observation) {
+    return !observation.insideHittingRegion()
+        || observation.personConfidence() <= config.maximumClearPersonConfidence();
+  }
+
+  private boolean isEngaged(Observation observation) {
     return observation.insideHittingRegion()
-        && observation.personConfidence() >= config.minimumPersonConfidence()
+        && observation.personConfidence() >= config.minimumPersonConfidence();
+  }
+
+  private boolean qualifies(Observation observation) {
+    return isEngaged(observation)
         && observation.addressConfidence() >= config.minimumAddressConfidence()
         && observation.motionMagnitude() <= config.maximumMotionMagnitude();
   }
@@ -302,7 +526,14 @@ public final class PoseTriggerController {
     return Math.subtractExact(laterNs, earlierNs);
   }
 
-  private Decision decision(Command command, String reason) {
+  private static long saturatedAdd(long value, long increment) {
+    if (value > Long.MAX_VALUE - increment) {
+      return Long.MAX_VALUE;
+    }
+    return value + increment;
+  }
+
+  private Decision decision(Command command, String reason, TransitionReason transitionReason) {
     return new Decision(
         state,
         command,
@@ -310,6 +541,9 @@ public final class PoseTriggerController {
         qualificationStartedNs >= 0
             ? OptionalLong.of(qualificationStartedNs)
             : OptionalLong.empty(),
-        armRequestedNs >= 0 ? OptionalLong.of(armRequestedNs) : OptionalLong.empty());
+        armRequestedNs >= 0 ? OptionalLong.of(armRequestedNs) : OptionalLong.empty(),
+        activeUntilNs >= 0 ? OptionalLong.of(activeUntilNs) : OptionalLong.empty(),
+        thermalHardStopNs >= 0 ? OptionalLong.of(thermalHardStopNs) : OptionalLong.empty(),
+        transitionReason);
   }
 }

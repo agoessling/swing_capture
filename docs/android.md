@@ -13,13 +13,16 @@ foreground-service capture engine, local audio triggering, bounded encoded
 retention, atomic session publication, a single-node HTTP/browser path, and a
 browser-owned dual-node coordinator with durable coordination evidence. Short
 single-device, sequential two-device, screen-off, concurrent one-event, and
-live paired-browser HIL milestones have passed. A requested 15-minute Pixel 6
-1080p240 continuous-capture run completed without a frame-continuity failure,
-but it failed thermal acceptance after reaching Android thermal status
-`SEVERE`. A controlled 15-minute Pixel 6 720p240 run subsequently passed the
-same isolation gate without exceeding `MODERATE`. Publication-heavy and
-screen-off thermal qualification, the five-minute qualification workflow, and
-a 30-minute soak have not passed and are not claimed here.
+live paired-browser HIL milestones have passed. The paired pose-standby gate
+also passed with real 5 Hz inference on both phones, production peer arming,
+concurrent warm transition to 720p240, and one Feather event. A requested
+15-minute Pixel 6 1080p240 continuous-capture run completed without a
+frame-continuity failure, but it failed thermal acceptance after reaching
+Android thermal status `SEVERE`. A controlled 15-minute Pixel 6 720p240 run
+subsequently passed the same isolation gate without exceeding `MODERATE`.
+Publication-heavy and screen-off thermal qualification, the five-minute
+qualification workflow, and a 30-minute soak have not passed and are not
+claimed here.
 
 The existing Daheng implementation remains the qualified behavioral reference
 while this work is experimental. It should not be deleted until the Android
@@ -63,10 +66,15 @@ Audio detector tuning follows the same isolation rule. `ImpactDetector` defaults
 remain unchanged for Pixel 6 and every other or unknown device: the minimum
 peak amplitude is 0.015 and all adaptive/noise/confirmation settings use the
 default configuration. Only a Google device whose model string is exactly
-`Pixel 5a`, compared case-insensitively, gets a 0.012 minimum peak. This policy
+`Pixel 5a`, compared case-insensitively, gets a 0.010 minimum peak. This policy
 is independent of role and capture profile. The separate Pixel 5a
 `VOICE_RECOGNITION` microphone-source compatibility branch is likewise
 isolated; neither accommodation trades away Pixel 6 performance or tuning.
+The exact-model floor was selected after a concurrent HIL attempt measured a
+real 0.011505 Feather peak below the former 0.012 floor; an earlier passing run
+had only 0.012238 of margin. The subsequent paired pose gate passed at 0.011139
+against 0.010. The adaptive eight-times-noise-floor requirement remains in
+force, so this does not make the detector a fixed low-threshold trigger.
 
 ## Evidence from the initial hardware check
 
@@ -146,8 +154,8 @@ path with independent profiles:
 - a camera-and-microphone foreground service owns a partial wake lock only
   while armed, so capture is independent of the browser and activity lifecycle;
 - Camera2 feeds the hardware H.264 encoder directly through an input surface at
-  1920x1080p240 on Pixel 6 or 1280x720p240 on Pixel 5a; raw frames never cross
-  Java or JNI;
+  the standard 1280x720p240 on either phone; Pixel 6 also exposes an explicit
+  1920x1080p240 option. Raw frames never cross Java or JNI;
 - a fixed 48 MiB block pool retains at most four seconds or 1,200 compressed
   access units. Triggered snapshots lease pool entries so encoding can continue
   while an earlier swing is muxed;
@@ -192,12 +200,17 @@ The APK hermetically packages `//web:static_app`, and the foreground service
 serves it at `/` on the same port as the node API. The setup activity displays
 a selectable single-node review URL containing the local control credential;
 the capture phone's display may then remain off while a PC, tablet, or another
-phone reviews the clips. Both capture phones ship the same assets. A dual-node
-browser URL still supplies both explicit node origins and credentials; peer
-discovery and a station setup wizard remain future work.
+phone reviews the clips. Both capture phones ship the same assets. The browser
+Phone setup flow configures one phone or two explicit phone origins through
+authenticated, revision-checked setup endpoints. Network discovery, live setup
+preview, and a user-friendly production pairing exchange remain future work.
+For pose capture, a ready two-phone station has distinct camera roles, exactly
+one leader, and one shadow; the leader must resolve its stored peer origin and
+verify that peer's distinct node ID, opposite role, and shadow mode. Setup
+readiness and updates reject any other pose topology.
 
-Until that wizard exists, a dual-node review bookmark has this shape (URL-encode
-the two origin values in a real bookmark):
+A dual-node review bookmark has this shape (URL-encode the two origin values in
+a real bookmark):
 
 ```text
 http://<leader-phone>:8088/?dtl_node=http://<dtl-phone>:8088&dtl_token=<dtl-token>&face_node=http://<face-phone>:8088&face_token=<face-token>#review
@@ -225,10 +238,11 @@ The field-diagnostic routes are:
   available. The archive never contains the control credential.
 
 The pure diagnostics core also implements a 60-second, 300-entry, 32 MiB ring
-for exact compressed 5 Hz preview inputs plus pose/controller decisions. That
-ring is not yet populated on device because the low-rate pose model has not
-been integrated into the foreground service; manifests state this explicitly
-instead of claiming absent preview evidence.
+for every 5 Hz pose/controller row plus sparse preview images. The foreground
+service populates that ring when debug evidence is enabled and publishes its
+thermally bounded one-Hz JPEGs, priority arm frame, complete pose trace, and
+controller decisions through the diagnostic archive. The normal non-debug path
+avoids retaining that additional evidence.
 A live Pixel 6 check passed monotonic clock exchange, 401 unauthorized control,
 400 malformed authenticated JSON, session/manifest retrieval, and MP4 byte
 ranges.
@@ -243,8 +257,8 @@ unrelated, ambiguous, or excessive-uncertainty pairs. An accepted alignment is
 stored through authenticated `GET`/`POST`
 `/api/v1/coordination/{shared_session_id}` as an immutable record on both
 phones. The browser recovers that record after reload and refuses conflicting
-replicas. Discovery, production pairing/security, setup preview, long-duration
-lifecycle, and thermal qualification remain open.
+replicas. Discovery, production pairing/security, live setup preview,
+long-duration lifecycle, and thermal qualification remain open.
 
 ## Validated physical milestones
 
@@ -427,9 +441,11 @@ one stable name.
 
 Role and profile assignment are persisted app configuration, not an inference
 from model, USB port, IP address, discovery order, or which phone detected
-impact first. The current UI allows either canonical role and either supported
-profile; it rejects changing capture identity while a capture is starting,
-armed, retaining post-roll, or publishing. A future pairing/setup flow should:
+impact first. The current Phone setup UI allows either canonical role and
+supported profile; it rejects changing capture identity while a capture is
+starting, armed, retaining post-roll, or publishing. It manually associates
+explicit phone origins and tokens and validates the configured peer descriptor.
+Future discovery and production pairing should:
 
 1. discover or pair both application installations;
 2. show a live preview and stable installation identity for each node;
@@ -560,7 +576,7 @@ The profile environment variable defaults to `720p240`; specify `1080p240`
 explicitly for the optional Pixel 6 full-HD path. Profiles express requested
 capture performance and the runner verifies the exact result. Capture-profile
 selection is not inferred from the model. The only current model-specific
-behavior is the isolated Pixel 5a audio-source and 0.012 detector-floor policy
+behavior is the isolated Pixel 5a audio-source and 0.010 detector-floor policy
 described above; Pixel 6 and unknown devices retain the complete default
 detector configuration including the 0.015 floor.
 
@@ -646,6 +662,18 @@ pair, and persists the coordination record. The successful physical run at
 passed that complete contract, including durable create/read-back on both
 nodes.
 
+`//android/dual_hil:dual_phone_paired_pose_arm_hil_test` extends that contract
+through the low-rate standby path. The latest passing evidence is preserved at
+[`artifacts/android_pose_field_readiness_20260821/dual_paired_passed_000604/report.json`](../artifacts/android_pose_field_readiness_20260821/dual_paired_passed_000604/report.json).
+Both phones ran real 5 Hz on-device inference; an explicitly HIL-gated Pixel 6
+leader candidate exercised the production authenticated peer client and the
+Pixel 5a recorded the inbound arm. Both cameras then transitioned concurrently
+to 720p240 and captured one Feather event. Pixel 6 retained 588 frames at
+238.876 fps and Pixel 5a retained 582 at 239.353 fps. Both decoded exactly,
+passed commanded-tone and optical checks, and retained AprilTag 0 across the
+impact. The durable coordination record passed on both nodes with 10.890 ms
+maximum mapped trigger separation and 7.359 ms combined pair uncertainty.
+
 After the foreground service has been launched, a development browser can
 review its latest sessions at `http://<phone-address>:8088`. Serve the
 checked-in web app and point it at that node with a query parameter:
@@ -670,9 +698,9 @@ tokens, and the Chrome executable explicitly:
 
 ```bash
 bazel test //web:android_browser_hil_test \
-  --test_env=SWING_CAPTURE_ANDROID_DTL_NODE_URL=http://dtl-phone:4315 \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_NODE_URL=http://dtl-phone:8088 \
   --test_env=SWING_CAPTURE_ANDROID_DTL_TOKEN=replace_with_dtl_node_token \
-  --test_env=SWING_CAPTURE_ANDROID_FACE_NODE_URL=http://face-phone:4315 \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_NODE_URL=http://face-phone:8088 \
   --test_env=SWING_CAPTURE_ANDROID_FACE_TOKEN=replace_with_face_node_token \
   --test_env=SWING_CAPTURE_CHROME_EXECUTABLE=/usr/bin/google-chrome \
   --test_output=streamed --nocache_test_results
@@ -730,8 +758,11 @@ browser coordinator, combined dual-view manifest, and durable record
 replication to both phone APIs are implemented and hermetically tested. The
 strict sequential physical gate passed both local pipelines and cross-node
 identity contracts, and the one-event concurrent physical gate passed both
-captures, bounded timing, and durable coordination. The live browser HIL also
-passed paired H.264 review. Discovery and production pairing remain.
+captures, bounded timing, and durable coordination. The paired pose-standby
+gate additionally passed real low-rate inference, production peer arming, both
+warm transitions, and one-event capture. The live browser HIL also passed
+paired H.264 review. Automatic discovery and a production pairing ceremony
+remain.
 
 ### 4. Qualification
 
@@ -744,8 +775,8 @@ passed paired H.264 review. Discovery and production pairing remain.
 
 ## Open decisions
 
-- Whether later Pixel 5a thermal and end-to-end trigger qualification justify
-  retaining its provisional 720p240 profile.
+- Whether field and longer thermal evidence for the Pixel 5a justify retaining
+  its provisional 720p240 profile; its paired pose-to-impact gate now passes.
 - Whether the passing Pixel 6 720p240 isolation remains at or below `MODERATE`
   with production trigger/publication load and with the screen explicitly off;
   the corresponding 1080p240 isolation reached `SEVERE`.

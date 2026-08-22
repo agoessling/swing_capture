@@ -231,7 +231,18 @@ public final class PoseLandmarkObservationExtractor {
                 ramp((kneeCenter.y() - hipCenter.y()) / bodyScale, 0.10, 0.35),
                 ramp((ankleCenter.y() - kneeCenter.y()) / bodyScale, 0.10, 0.35)));
 
-    return clampUnit(0.50 * gripGeometry + 0.25 * kneeFlex + 0.10 * stance + 0.15 * verticalOrder);
+    double addressGeometry =
+        clampUnit(0.50 * gripGeometry + 0.25 * kneeFlex + 0.10 * stance + 0.15 * verticalOrder);
+    if (projection == PoseProjection.DOWN_THE_LINE) {
+      // In a side projection, shoulder displacement from the hips is strong evidence of the
+      // golfer's forward hip hinge. Without it, an upright golfer carrying a club with both hands
+      // below the hips can otherwise look deceptively similar to address. This cue is deliberately
+      // DTL-only because a correct face-on address has little projected torso displacement.
+      double torsoHinge =
+          ramp(Math.abs(shoulderCenter.x() - hipCenter.x()) / bodyScale, 0.08, 0.25);
+      addressGeometry *= 0.25 + 0.75 * torsoHinge;
+    }
+    return clampUnit(addressGeometry);
   }
 
   /** Mean landmark displacement normalized by torso length, saturated into [0, 1]. */

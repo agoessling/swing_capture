@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from typing import cast
@@ -42,12 +43,37 @@ class CorpusEvaluateTest(unittest.TestCase):
 
     def test_replay_result_is_strict(self) -> None:
         """Reject malformed child-stage output before publishing an aggregate."""
-        self.assertTrue(
-            corpus_evaluate.parse_replay_result('{"schema_version":1,"passed":true}', "A")["passed"]
-        )
+        valid = {
+            "schema_version": 1,
+            "observation_count": 10,
+            "arm_request_ns": "1400000000",
+            "arm_offset_from_preferred_ns": "-200000000",
+            "high_speed_ready_ns": "2200000000",
+            "ready_lead_before_takeaway_ns": "800000000",
+            "armed_before_safe_window": False,
+            "armed_in_forbidden_interval": False,
+            "ready_by_takeaway": True,
+            "passed": True,
+            "outcome": "acceptable_early",
+            "arm_request_count": 1,
+            "final_state": "arm_requested",
+        }
+        self.assertTrue(corpus_evaluate.parse_replay_result(json.dumps(valid), "A")["passed"])
+        invalid = dict(valid)
+        invalid["arm_request_count"] = 0
+        with self.assertRaises(ValueError):
+            corpus_evaluate.parse_replay_result(json.dumps(invalid), "A")
+        invalid = dict(valid)
+        invalid["outcome"] = "forbidden_arm"
+        with self.assertRaises(ValueError):
+            corpus_evaluate.parse_replay_result(json.dumps(invalid), "A")
+        invalid = dict(valid)
+        invalid["unexpected"] = True
+        with self.assertRaises(ValueError):
+            corpus_evaluate.parse_replay_result(json.dumps(invalid), "A")
         with self.assertRaises(ValueError):
             corpus_evaluate.parse_replay_result('{"schema_version":2,"passed":true}', "A")
-        with self.assertRaises(TypeError):
+        with self.assertRaises(ValueError):
             corpus_evaluate.parse_replay_result('{"schema_version":1}', "A")
 
     @staticmethod

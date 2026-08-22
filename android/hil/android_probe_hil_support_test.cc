@@ -527,6 +527,28 @@ void TestDisplayPowerStateInspection() {
   assert(asleep.non_interactive);
   assert(asleep.display_off);
 
+  const auto android_16_dozing = InspectDisplayPowerState(DisplayPowerStateDumps{
+      .power = "mWakefulness=Dozing\nmInteractive=false\n",
+      .display = "mScreenState=OFF\n",
+  });
+  assert(android_16_dozing.confirmed_off());
+  assert(android_16_dozing.non_interactive);
+  assert(android_16_dozing.display_off);
+
+  const auto dozing_with_display_on = InspectDisplayPowerState(DisplayPowerStateDumps{
+      .power = "mWakefulness=Dozing\nmInteractive=false\n",
+      .display = "mScreenState=ON\n",
+  });
+  assert(!dozing_with_display_on.confirmed_off());
+  assert(dozing_with_display_on.non_interactive);
+  assert(!dozing_with_display_on.display_off);
+
+  const auto dozing_with_display_doze = InspectDisplayPowerState(DisplayPowerStateDumps{
+      .power = "mWakefulness=Dozing\nmInteractive=false\nDisplay Power: state=OFF\n",
+      .display = "mScreenState=DOZE\n",
+  });
+  assert(!dozing_with_display_doze.confirmed_off());
+
   const auto vendor_variant = InspectDisplayPowerState(DisplayPowerStateDumps{
       .power = "mInteractive=false\n",
       .display = R"(DisplayDeviceInfo{"Built-in Screen": state=OFF, committedState=OFF})",
@@ -534,7 +556,7 @@ void TestDisplayPowerStateInspection() {
   assert(vendor_variant.confirmed_off());
 
   const auto awake_with_off_text = InspectDisplayPowerState(DisplayPowerStateDumps{
-      .power = "mWakefulness=Awake\nDisplay Power: state=OFF\n",
+      .power = "mWakefulness=Awake\nmInteractive=false\nDisplay Power: state=OFF\n",
       .display = "",
   });
   assert(!awake_with_off_text.confirmed_off());

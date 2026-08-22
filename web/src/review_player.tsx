@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import type {
   ClipFrame,
   ClipManifest,
@@ -14,6 +21,11 @@ type PresentationMethod = "requestVideoFrameCallback" | "seeked-paint-fallback";
 interface ImpactFramePresentation {
   performance_ms: number;
   method: PresentationMethod;
+}
+
+interface TimelinePreview {
+  frameIndex: number;
+  leftPercent: number;
 }
 
 export interface BrowserPipelineTiming {
@@ -37,10 +49,12 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
   const [playing, setPlaying] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [timelinePreview, setTimelinePreview] = useState<TimelinePreview | null>(null);
   const [impactPresentations, setImpactPresentations] = useState<
     Partial<Record<ReviewRole, ImpactFramePresentation>>
   >({});
   const videoRefs = useRef<Partial<Record<ReviewRole, HTMLVideoElement>>>({});
+  const timelinePreviewVideoRef = useRef<HTMLVideoElement | null>(null);
   const presentationCleanupsRef = useRef<Partial<Record<ReviewRole, () => void>>>({});
   const initializedRef = useRef(false);
   const initializedSessionRef = useRef(manifest.session_id);
@@ -280,8 +294,73 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
   const step = (amount: number) => seekFrame(currentFrame + amount);
   const browserTiming = buildBrowserPipelineTiming(manifest, impactPresentations);
 
+  useEffect(() => {
+    const previewVideo = timelinePreviewVideoRef.current;
+    if (previewVideo === null || timelinePreview === null) {
+      return;
+    }
+    const mediaTimeSeconds =
+      requiredFrame(referenceTrack.frames, timelinePreview.frameIndex).media_time_us / 1_000_000;
+    if (Math.abs(previewVideo.currentTime - mediaTimeSeconds) > 0.000_001) {
+      previewVideo.currentTime = mediaTimeSeconds;
+    }
+  }, [referenceTrack.frames, timelinePreview]);
+
+  const updateTimelinePreview = (event: ReactPointerEvent<HTMLInputElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.width <= 0) {
+      return;
+    }
+    const fraction = clamp((event.clientX - bounds.left) / bounds.width, 0, 1);
+    setTimelinePreview({
+      frameIndex: Math.round(fraction * (referenceTrack.frame_count - 1)),
+      leftPercent: fraction * 100,
+    });
+  };
+
+  const handlePlayerKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (isInteractiveTarget(event.target)) {
+      return;
+    }
+    if (
+      event.key === " " &&
+      event.target instanceof HTMLElement &&
+      event.target.closest("button") !== null
+    ) {
+      return;
+    }
+    if (event.key === " " || event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      void togglePlayback();
+      return;
+    }
+    if (event.key === "ArrowLeft" || event.key === ",") {
+      event.preventDefault();
+      step(-1);
+      return;
+    }
+    if (event.key === "ArrowRight" || event.key === ".") {
+      event.preventDefault();
+      step(1);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      seekFrame(0);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      seekFrame(referenceTrack.frame_count - 1);
+    }
+  };
+
   return (
-    <section aria-label="Synchronized clip player" className="review-player">
+    <section
+      aria-describedby="review-keyboard-help"
+      aria-label="Synchronized clip player"
+      className="review-player"
+    >
       <div className={`review-video-grid${tracks.length === 1 ? " single-view" : ""}`}>
         {tracks.map((track, index) => {
           const mappedFrame = nearestImpactFrame(track, frame.time_from_impact_us);
@@ -419,19 +498,57 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
           <span>{impactFrameLabel(impactOffsetFrames)}</span>
           <span>{formatImpactTime(frame)}</span>
         </div>
-        <label className="sr-only" htmlFor="review-timeline">
-          Review timeline
-        </label>
-        <input
-          aria-valuetext={`Frame ${currentFrame + 1}, ${formatImpactTime(frame)}`}
-          id="review-timeline"
-          max={referenceTrack.frame_count - 1}
-          min={0}
-          onChange={(event) => seekFrame(event.currentTarget.valueAsNumber)}
-          step={1}
-          type="range"
-          value={currentFrame}
-        />
+        <div className="timeline-scrubber" onPointerLeave={() => setTimelinePreview(null)}>
+          {timelinePreview === null ? null : (
+            <div
+              aria-hidden="true"
+              className="timeline-thumbnail"
+              style={{
+                left: `${timelinePreview.leftPercent}%`,
+                transform: `translateX(-${timelinePreview.leftPercent}%)`,
+              }}
+            >
+              <video
+                data-timeline-thumbnail
+                muted
+                onLoadedMetadata={(event) => {
+                  const mediaTimeSeconds =
+                    requiredFrame(referenceTrack.frames, timelinePreview.frameIndex).media_time_us /
+                    1_000_000;
+                  event.currentTarget.currentTime = mediaTimeSeconds;
+                }}
+                playsInline
+                preload="metadata"
+                ref={timelinePreviewVideoRef}
+                tabIndex={-1}
+              >
+                <source
+                  src={referenceTrack.media.url ?? referenceTrack.media.path}
+                  type={`${referenceTrack.media.mime_type}; codecs="${referenceTrack.media.codec}"`}
+                />
+              </video>
+              <span>
+                Frame {timelinePreview.frameIndex + 1} ·{" "}
+                {formatImpactTime(requiredFrame(referenceTrack.frames, timelinePreview.frameIndex))}
+              </span>
+            </div>
+          )}
+          <label className="sr-only" htmlFor="review-timeline">
+            Review timeline
+          </label>
+          <input
+            aria-valuetext={`Frame ${currentFrame + 1}, ${formatImpactTime(frame)}`}
+            aria-keyshortcuts="Home End"
+            id="review-timeline"
+            max={referenceTrack.frame_count - 1}
+            min={0}
+            onChange={(event) => seekFrame(event.currentTarget.valueAsNumber)}
+            onPointerMove={updateTimelinePreview}
+            step={1}
+            type="range"
+            value={currentFrame}
+          />
+        </div>
         <div className="timeline-markers" aria-hidden="true">
           <span>Start</span>
           <span
@@ -442,27 +559,43 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
           </span>
           <span>End</span>
         </div>
-        <div className="transport-controls">
+        <div
+          aria-describedby="review-keyboard-help"
+          aria-label="Playback controls"
+          className="transport-controls"
+          onKeyDown={handlePlayerKeyDown}
+          role="toolbar"
+        >
           <button
             aria-label="Previous frame"
+            aria-keyshortcuts="ArrowLeft ,"
             className="transport-button secondary"
             disabled={currentFrame === 0}
             onClick={() => step(-1)}
             type="button"
           >
-            −1 frame
+            <span aria-hidden="true">‹</span>
+            <small>1 frame</small>
           </button>
-          <button className="play-button" onClick={() => void togglePlayback()} type="button">
+          <button
+            aria-keyshortcuts="Space K"
+            className="play-button"
+            onClick={() => void togglePlayback()}
+            type="button"
+          >
+            <span aria-hidden="true">{playing ? "Ⅱ" : "▶"}</span>
             {playing ? "Pause" : "Play"}
           </button>
           <button
             aria-label="Next frame"
+            aria-keyshortcuts="ArrowRight ."
             className="transport-button secondary"
             disabled={currentFrame === referenceTrack.frame_count - 1}
             onClick={() => step(1)}
             type="button"
           >
-            +1 frame
+            <small>1 frame</small>
+            <span aria-hidden="true">›</span>
           </button>
           <label className="speed-control">
             <span>Playback speed</span>
@@ -478,6 +611,9 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
             </select>
           </label>
         </div>
+        <p className="keyboard-help" id="review-keyboard-help">
+          Keyboard: Space or K play/pause · ←/→ or ,/. step one frame · Home/End jump
+        </p>
       </div>
     </section>
   );
@@ -844,6 +980,14 @@ function impactMarkerPosition(track: ClipTrack): number {
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+function isInteractiveTarget(target: EventTarget): boolean {
+  return (
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      target.closest("input, select, textarea, a[href], summary") !== null)
+  );
 }
 
 function errorMessage(caught: unknown): string {

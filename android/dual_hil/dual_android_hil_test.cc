@@ -25,6 +25,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <random>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -56,6 +57,7 @@ using swing_capture::android::dual_hil::EvaluateTimingCorrelation;
 using swing_capture::android::dual_hil::NodeApiIdentity;
 using swing_capture::android::dual_hil::NodeEvidence;
 using swing_capture::android::dual_hil::NodeEvidenceInspection;
+using swing_capture::android::dual_hil::PoseConfiguredDescriptorInspection;
 using swing_capture::android::dual_hil::RetainedAudioEvidence;
 using swing_capture::android::dual_hil::RetainedAudioEvidenceInspection;
 using swing_capture::android::dual_hil::RgbFrameTiming;
@@ -69,6 +71,8 @@ using swing_capture::android::dual_hil::ValidateDualSession;
 using swing_capture::android::dual_hil::ValidateFfprobeTimeline;
 using swing_capture::android::dual_hil::ValidateNodeDescriptor;
 using swing_capture::android::dual_hil::ValidateNodeEvidence;
+using swing_capture::android::dual_hil::ValidatePairedPoseHilReport;
+using swing_capture::android::dual_hil::ValidatePoseConfiguredNodeDescriptor;
 using swing_capture::android::dual_hil::ValidateRequiredAprilTagPersistence;
 using swing_capture::android::dual_hil::ValidateTriggerReport;
 
@@ -79,7 +83,10 @@ constexpr std::string_view kPackageName = "com.agoessling.swingcapture";
 constexpr std::string_view kReportPath = "files/reports/latest.json";
 constexpr std::uint32_t kMaximumAnalysisWidth = 640U;
 constexpr std::uint16_t kNodeHttpPort = 8088U;
+constexpr std::uint16_t kPosePeerTunnelPort = 18089U;
 constexpr std::size_t kClockExchangeSampleCount = 5U;
+
+bool SafeSessionId(std::string_view session_id);
 
 struct RoleCaptureProfile {
   std::string_view name;
@@ -193,25 +200,39 @@ void WriteArtifact(const std::filesystem::path &path, std::string_view contents)
 
 CommandResult RunCommand(const std::filesystem::path &executable,
                          const std::vector<std::string> &arguments,
-                         std::chrono::steady_clock::time_point deadline) {
+                         std::chrono::steady_clock::time_point deadline,
+                         std::string_view input = {}) {
   int output_pipe[2] = {-1, -1};
+  int input_pipe[2] = {-1, -1};
   if (pipe2(output_pipe, O_CLOEXEC) != 0) {
     throw std::runtime_error(std::string("cannot create command output pipe: ") +
                              std::strerror(errno));
+  }
+  if (pipe2(input_pipe, O_CLOEXEC) != 0) {
+    const int saved_errno = errno;
+    close(output_pipe[0]);
+    close(output_pipe[1]);
+    throw std::runtime_error(std::string("cannot create command input pipe: ") +
+                             std::strerror(saved_errno));
   }
   const pid_t child = fork();
   if (child < 0) {
     const int saved_errno = errno;
     close(output_pipe[0]);
     close(output_pipe[1]);
+    close(input_pipe[0]);
+    close(input_pipe[1]);
     throw std::runtime_error(std::string("cannot fork adb: ") + std::strerror(saved_errno));
   }
   if (child == 0) {
     close(output_pipe[0]);
-    if (dup2(output_pipe[1], STDOUT_FILENO) < 0 || dup2(output_pipe[1], STDERR_FILENO) < 0) {
+    close(input_pipe[1]);
+    if (dup2(output_pipe[1], STDOUT_FILENO) < 0 || dup2(output_pipe[1], STDERR_FILENO) < 0 ||
+        dup2(input_pipe[0], STDIN_FILENO) < 0) {
       _exit(126);
     }
     close(output_pipe[1]);
+    close(input_pipe[0]);
     std::vector<char *> command;
     command.reserve(arguments.size() + 2U);
     command.push_back(const_cast<char *>(executable.c_str()));
@@ -224,6 +245,26 @@ CommandResult RunCommand(const std::filesystem::path &executable,
   }
 
   close(output_pipe[1]);
+  close(input_pipe[0]);
+  std::size_t input_offset = 0;
+  while (input_offset < input.size()) {
+    const ssize_t count =
+        write(input_pipe[1], input.data() + input_offset, input.size() - input_offset);
+    if (count > 0) {
+      input_offset += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    close(input_pipe[1]);
+    close(output_pipe[0]);
+    static_cast<void>(kill(child, SIGKILL));
+    while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) {
+    }
+    throw std::runtime_error(std::string("cannot write command input: ") + std::strerror(errno));
+  }
+  close(input_pipe[1]);
   const int flags = fcntl(output_pipe[0], F_GETFL, 0);
   if (flags >= 0) {
     static_cast<void>(fcntl(output_pipe[0], F_SETFL, flags | O_NONBLOCK));
@@ -297,6 +338,22 @@ std::string RunRequiredCommand(const std::filesystem::path &executable,
   if (result.exit_code != 0) {
     throw std::runtime_error(executable.filename().string() + " failed with exit " +
                              std::to_string(result.exit_code) + ": " + result.output);
+  }
+  return result.output;
+}
+
+std::string RunRequiredCommandWithInput(const std::filesystem::path &executable,
+                                        const std::vector<std::string> &arguments,
+                                        std::string_view input,
+                                        std::chrono::steady_clock::time_point deadline) {
+  const CommandResult result = RunCommand(executable, arguments, deadline, input);
+  if (result.timed_out) {
+    throw std::runtime_error(executable.filename().string() +
+                             " input command exceeded its stage deadline");
+  }
+  if (result.exit_code != 0) {
+    throw std::runtime_error(executable.filename().string() + " input command failed with exit " +
+                             std::to_string(result.exit_code));
   }
   return result.output;
 }
@@ -703,6 +760,19 @@ std::string RunRequiredAdb(const std::filesystem::path &adb,
   return result.output;
 }
 
+std::string ReadDeviceModel(const std::filesystem::path &adb, std::string_view serial,
+                            std::chrono::steady_clock::time_point deadline) {
+  std::string model = RunRequiredAdb(
+      adb, DeviceArguments(serial, {"shell", "getprop", "ro.product.model"}), deadline);
+  while (!model.empty() && (model.back() == '\n' || model.back() == '\r')) {
+    model.pop_back();
+  }
+  if (model.empty()) {
+    throw std::runtime_error("Android HIL device model is unavailable");
+  }
+  return model;
+}
+
 void StopPackage(const std::filesystem::path &adb, std::string_view serial) {
   const CommandResult result =
       RunAdb(adb, DeviceArguments(serial, {"shell", "am", "force-stop", kPackageName}),
@@ -727,7 +797,71 @@ class StopBothGuard {
     forwards_.emplace_back(std::move(serial), host_port);
   }
 
+  void RegisterReverse(std::string serial, std::uint16_t device_port) {
+    reverses_.emplace_back(std::move(serial), device_port);
+  }
+
+  void SnapshotNodeConfiguration(std::string serial) {
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    const CommandResult installed =
+        RunAdb(adb_, DeviceArguments(serial, {"shell", "pm", "path", kPackageName}), deadline);
+    if (installed.timed_out || installed.exit_code != 0) {
+      throw std::runtime_error("cannot determine whether Android HIL package is installed");
+    }
+    if (!installed.output.contains("package:")) {
+      configuration_snapshots_.push_back(
+          {.serial = std::move(serial), .existed = false, .contents = {}});
+      return;
+    }
+    const CommandResult exists =
+        RunAdb(adb_,
+               DeviceArguments(serial, {"shell", "run-as", kPackageName, "test", "-e",
+                                        "shared_prefs/node_configuration.xml"}),
+               deadline);
+    if (exists.timed_out || (exists.exit_code != 0 && exists.exit_code != 1) ||
+        (exists.exit_code == 1 && !exists.output.empty())) {
+      throw std::runtime_error("cannot inspect existing private node configuration");
+    }
+    if (exists.exit_code == 1) {
+      configuration_snapshots_.push_back(
+          {.serial = std::move(serial), .existed = false, .contents = {}});
+      return;
+    }
+    const std::string contents =
+        RunRequiredAdb(adb_,
+                       DeviceArguments(serial, {"exec-out", "run-as", kPackageName, "cat",
+                                                "shared_prefs/node_configuration.xml"}),
+                       deadline);
+    configuration_snapshots_.push_back(
+        {.serial = std::move(serial), .existed = true, .contents = contents});
+  }
+
+  void RestoreNodeConfigurationsChecked() {
+    if (configuration_snapshots_.size() != 2U) {
+      throw std::runtime_error("paired HIL did not snapshot both node configurations");
+    }
+    StopPackage(adb_, down_the_line_serial_);
+    StopPackage(adb_, face_on_serial_);
+    for (const ConfigurationSnapshot &snapshot : configuration_snapshots_) {
+      RestoreNodeConfiguration(snapshot);
+    }
+    configurations_restored_ = true;
+    for (ConfigurationSnapshot &snapshot : configuration_snapshots_) {
+      snapshot.contents.clear();
+      snapshot.contents.shrink_to_fit();
+    }
+  }
+
   ~StopBothGuard() {
+    for (const auto &[serial, device_port] : reverses_) {
+      const CommandResult result = RunAdb(
+          adb_,
+          DeviceArguments(serial, {"reverse", "--remove", "tcp:" + std::to_string(device_port)}),
+          std::chrono::steady_clock::now() + 2s);
+      if (result.timed_out || result.exit_code != 0) {
+        std::cerr << "Warning: could not remove Android HIL adb reverse on " << serial << '\n';
+      }
+    }
     for (const auto &[serial, host_port] : forwards_) {
       const CommandResult result = RunAdb(
           adb_,
@@ -744,13 +878,98 @@ class StopBothGuard {
         std::cerr << "Warning: dual Android HIL cleanup failed: " << failure.what() << '\n';
       }
     }
+    if (!configurations_restored_) {
+      for (const ConfigurationSnapshot &snapshot : configuration_snapshots_) {
+        try {
+          RestoreNodeConfiguration(snapshot);
+        } catch (const std::exception &failure) {
+          std::cerr << "Warning: could not restore Android HIL node configuration on "
+                    << snapshot.serial << ": " << failure.what() << '\n';
+        }
+      }
+    }
   }
 
  private:
+  struct ConfigurationSnapshot {
+    std::string serial;
+    bool existed = false;
+    std::string contents;
+  };
+
+  void RestoreNodeConfiguration(const ConfigurationSnapshot &snapshot) const {
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    constexpr std::string_view staging_path = "shared_prefs/.node_configuration.xml.hil-restore";
+    if (!snapshot.existed) {
+      RunRequiredAdb(adb_,
+                     DeviceArguments(snapshot.serial, {"shell", "run-as", kPackageName, "rm", "-f",
+                                                       "shared_prefs/node_configuration.xml",
+                                                       std::string(staging_path)}),
+                     deadline);
+      const CommandResult verification =
+          RunAdb(adb_,
+                 DeviceArguments(snapshot.serial, {"exec-out", "run-as", kPackageName, "cat",
+                                                   "shared_prefs/node_configuration.xml"}),
+                 deadline);
+      if (verification.timed_out || verification.exit_code == 0) {
+        throw std::runtime_error("absent node configuration was not restored exactly");
+      }
+      return;
+    }
+    RunRequiredAdb(adb_,
+                   DeviceArguments(snapshot.serial,
+                                   {"shell", "run-as", kPackageName, "rm", "-f", staging_path}),
+                   deadline);
+    try {
+      // `adb exec-in` does not forward stdin with every packaged platform-tools build. A
+      // non-interactive shell explicitly does, and direct dd/chmod/mv arguments avoid exposing
+      // the configuration (including bearer credentials) in a shell command or process output.
+      RunRequiredCommandWithInput(
+          adb_,
+          DeviceArguments(snapshot.serial, {"shell", "-T", "run-as", kPackageName, "dd",
+                                            "of=" + std::string(staging_path), "status=none"}),
+          snapshot.contents, deadline);
+      RunRequiredAdb(adb_,
+                     DeviceArguments(snapshot.serial, {"shell", "run-as", kPackageName, "chmod",
+                                                       "0600", staging_path}),
+                     deadline);
+      RunRequiredAdb(
+          adb_,
+          DeviceArguments(snapshot.serial, {"shell", "run-as", kPackageName, "mv", "-f",
+                                            staging_path, "shared_prefs/node_configuration.xml"}),
+          deadline);
+    } catch (...) {
+      static_cast<void>(RunAdb(adb_,
+                               DeviceArguments(snapshot.serial, {"shell", "run-as", kPackageName,
+                                                                 "rm", "-f", staging_path}),
+                               deadline));
+      throw;
+    }
+    const std::string restored =
+        RunRequiredAdb(adb_,
+                       DeviceArguments(snapshot.serial, {"exec-out", "run-as", kPackageName, "cat",
+                                                         "shared_prefs/node_configuration.xml"}),
+                       deadline);
+    if (restored != snapshot.contents) {
+      throw std::runtime_error("node configuration restore verification failed");
+    }
+    const CommandResult staging =
+        RunAdb(adb_,
+               DeviceArguments(snapshot.serial,
+                               {"shell", "run-as", kPackageName, "test", "-e", staging_path}),
+               deadline);
+    if (staging.timed_out || staging.exit_code != 1 || !staging.output.empty()) {
+      throw std::runtime_error("node configuration restore staging was not removed");
+    }
+  }
+
   std::filesystem::path adb_;
   std::string down_the_line_serial_;
   std::string face_on_serial_;
   std::vector<std::pair<std::string, std::uint16_t>> forwards_;
+  std::vector<std::pair<std::string, std::uint16_t>> reverses_;
+  std::vector<ConfigurationSnapshot> configuration_snapshots_;
+  bool configurations_restored_ = false;
 };
 
 struct StartRequest {
@@ -787,8 +1006,9 @@ std::vector<std::string> StartArguments(const StartRequest &request) {
 }
 
 std::vector<std::string> ConfigureArguments(std::string_view serial, std::string_view role,
-                                            const RoleCaptureProfile &profile) {
-  return {
+                                            const RoleCaptureProfile &profile,
+                                            bool enable_pose_arm_hil = false) {
+  std::vector<std::string> arguments = {
       "-s",
       std::string(serial),
       "shell",
@@ -804,6 +1024,10 @@ std::vector<std::string> ConfigureArguments(std::string_view serial, std::string
       "capture_profile",
       std::string(profile.name),
   };
+  if (enable_pose_arm_hil) {
+    arguments.insert(arguments.end(), {"--ez", "enable_pose_arm_hil", "true"});
+  }
+  return arguments;
 }
 
 std::uint16_t EstablishForward(const std::filesystem::path &adb, std::string_view serial,
@@ -821,6 +1045,15 @@ std::uint16_t EstablishForward(const std::filesystem::path &adb, std::string_vie
     throw std::runtime_error("adb did not return a valid ephemeral HTTP forward port");
   }
   return static_cast<std::uint16_t>(port);
+}
+
+void EstablishReverse(const std::filesystem::path &adb, std::string_view serial,
+                      std::uint16_t device_port, std::uint16_t host_port,
+                      std::chrono::steady_clock::time_point deadline) {
+  RunRequiredAdb(adb,
+                 DeviceArguments(serial, {"reverse", "tcp:" + std::to_string(device_port),
+                                          "tcp:" + std::to_string(host_port)}),
+                 deadline);
 }
 
 std::string ReadControlToken(const std::filesystem::path &adb, std::string_view serial,
@@ -1375,7 +1608,8 @@ void GrantCapturePermissions(const std::filesystem::path &adb, std::string_view 
 
 ConcurrentNode ConfigureConcurrentNode(const std::filesystem::path &adb,
                                        const std::filesystem::path &apk, std::string serial,
-                                       std::string role, StopBothGuard *cleanup) {
+                                       std::string role, StopBothGuard *cleanup,
+                                       bool enable_pose_arm_hil = false) {
   const auto stage_started = std::chrono::steady_clock::now();
   const auto deadline = stage_started + kStageDeadline;
   const RoleCaptureProfile profile = ProfileForRole(role);
@@ -1402,13 +1636,16 @@ ConcurrentNode ConfigureConcurrentNode(const std::filesystem::path &adb,
       adb, DeviceArguments(node.serial, {"shell", "run-as", kPackageName, "rm", "-f", kReportPath}),
       deadline);
   GrantCapturePermissions(adb, node.serial, deadline);
-  RunRequiredAdb(adb, ConfigureArguments(node.serial, node.role, node.profile), deadline);
+  RunRequiredAdb(adb, ConfigureArguments(node.serial, node.role, node.profile, enable_pose_arm_hil),
+                 deadline);
   node.host_port = EstablishForward(adb, node.serial, deadline);
   cleanup->RegisterForward(node.serial, node.host_port);
 
   std::string latest_error = "node HTTP API did not start";
+  std::string current_check = "GET /api/v1/node";
   while (std::chrono::steady_clock::now() < deadline) {
     try {
+      current_check = "GET /api/v1/node";
       const HttpResponse descriptor = RequireNodeHttp({.port = node.host_port,
                                                        .method = "GET",
                                                        .path = "/api/v1/node",
@@ -1421,17 +1658,302 @@ ConcurrentNode ConfigureConcurrentNode(const std::filesystem::path &adb,
                                                  ? coordination::CaptureRole::kDownTheLine
                                                  : coordination::CaptureRole::kFaceOn,
                                              node.profile.name);
+      current_check = "GET /";
+      const HttpResponse hosted_root = RequireNodeHttp({.port = node.host_port,
+                                                        .method = "GET",
+                                                        .path = "/",
+                                                        .bearer_token = {},
+                                                        .body = {},
+                                                        .deadline = deadline},
+                                                       200);
+      current_check = "GET /app.css";
+      const HttpResponse hosted_css = RequireNodeHttp({.port = node.host_port,
+                                                       .method = "GET",
+                                                       .path = "/app.css",
+                                                       .bearer_token = {},
+                                                       .body = {},
+                                                       .deadline = deadline},
+                                                      200);
+      if (!hosted_root.body.starts_with("<!doctype html>") ||
+          !hosted_root.body.contains("/app.js") || !hosted_root.body.contains("/app.css") ||
+          hosted_css.body.empty()) {
+        throw std::runtime_error("phone-hosted review root/static asset smoke failed");
+      }
       node.control_token = ReadControlToken(adb, node.serial, deadline);
-      WriteArtifact(OutputDirectory() / node.role / "node-descriptor.json", descriptor.body);
+      WriteArtifact(
+          OutputDirectory() / node.role /
+              (enable_pose_arm_hil ? "node-descriptor-initial.json" : "node-descriptor.json"),
+          descriptor.body);
+      WriteArtifact(OutputDirectory() / node.role / "hosted-root.html", hosted_root.body);
       node.setup_stage_milliseconds = ElapsedMilliseconds(stage_started);
       return node;
     } catch (const std::exception &failure) {
-      latest_error = failure.what();
+      latest_error = current_check + ": " + failure.what();
       std::this_thread::sleep_for(kPollInterval);
     }
   }
   throw std::runtime_error("concurrent Android HIL node setup exceeded 15 seconds: " +
                            latest_error);
+}
+
+void ConfigurePoseMode(const ConcurrentNode &node, std::string_view mode,
+                       std::optional<std::string_view> peer_origin,
+                       std::optional<std::string_view> peer_token,
+                       std::chrono::steady_clock::time_point deadline) {
+  if (peer_origin.has_value() != peer_token.has_value()) {
+    throw std::invalid_argument("paired pose HIL peer origin and token must be supplied together");
+  }
+  const HttpResponse current = RequireNodeHttp({.port = node.host_port,
+                                                .method = "GET",
+                                                .path = "/api/v1/setup",
+                                                .bearer_token = node.control_token,
+                                                .body = {},
+                                                .deadline = deadline},
+                                               200);
+  const Json existing = Json::parse(current.body);
+  const Json peer_update =
+      peer_origin.has_value()
+          ? Json{{"operation", "replace"}, {"origin", *peer_origin}, {"control_token", *peer_token}}
+          : Json{{"operation", "clear"}};
+  const Json request = {
+      {"schema_version", 1},
+      {"expected_revision", existing.at("revision")},
+      {"configuration",
+       {{"role", node.role},
+        {"capture_profile", node.profile.name},
+        {"pose",
+         {{"mode", mode},
+          {"inference_delegate", "gpu_preferred"},
+          {"debug_evidence_enabled", true},
+          {"hitting_region", {{"left", 0.15}, {"top", 0.30}, {"right", 0.85}, {"bottom", 1.0}}},
+          {"peer_update", peer_update}}}}},
+  };
+  const HttpResponse updated = RequireNodeHttp({.port = node.host_port,
+                                                .method = "PUT",
+                                                .path = "/api/v1/setup",
+                                                .bearer_token = node.control_token,
+                                                .body = request.dump(),
+                                                .deadline = deadline},
+                                               200);
+  const Json response = Json::parse(updated.body);
+  const Json &pose = response.at("configuration").at("pose");
+  if (response.value("schema_version", 0) != 1 || pose.value("mode", "") != mode ||
+      updated.body.contains("control_token") ||
+      (peer_token.has_value() && updated.body.contains(*peer_token))) {
+    throw std::runtime_error("paired pose HIL setup response is invalid or exposes a token");
+  }
+  if (peer_origin.has_value()) {
+    if (!pose.at("peer").is_object() || pose.at("peer").value("origin", "") != *peer_origin) {
+      throw std::runtime_error("paired pose leader did not persist its redacted peer origin");
+    }
+  } else if (!pose.at("peer").is_null()) {
+    throw std::runtime_error("paired pose shadow unexpectedly retained a peer credential");
+  }
+  WriteArtifact(OutputDirectory() / node.role / "pose-setup.json", updated.body);
+}
+
+void PreservePoseConfiguredNodeDescriptor(const ConcurrentNode &node, std::string_view mode,
+                                          bool peer_configured,
+                                          std::chrono::steady_clock::time_point deadline) {
+  const HttpResponse descriptor = RequireNodeHttp({.port = node.host_port,
+                                                   .method = "GET",
+                                                   .path = "/api/v1/node",
+                                                   .bearer_token = {},
+                                                   .body = {},
+                                                   .deadline = deadline},
+                                                  200);
+  ValidatePoseConfiguredNodeDescriptor(PoseConfiguredDescriptorInspection{
+      .descriptor_json = descriptor.body,
+      .identity = node.identity,
+      .expected_mode = mode,
+      .expected_peer_configured = peer_configured,
+  });
+  WriteArtifact(OutputDirectory() / node.role / "node-descriptor-pose-configured.json",
+                descriptor.body);
+}
+
+std::set<std::string, std::less<>> ReadyCaptureSessionIds(
+    const ConcurrentNode &node, std::chrono::steady_clock::time_point deadline) {
+  const HttpResponse response = RequireNodeHttp({.port = node.host_port,
+                                                 .method = "GET",
+                                                 .path = "/api/v1/sessions",
+                                                 .bearer_token = {},
+                                                 .body = {},
+                                                 .deadline = deadline},
+                                                200);
+  std::set<std::string, std::less<>> ids;
+  for (const Json &session : Json::parse(response.body).at("sessions")) {
+    if (session.value("state", "") == "ready" && session.value("session_kind", "") == "capture") {
+      const std::string id = session.value("session_id", "");
+      if (!SafeSessionId(id) || !ids.insert(id).second) {
+        throw std::runtime_error("paired pose HIL session list is unsafe or duplicated");
+      }
+    }
+  }
+  return ids;
+}
+
+void ArmPoseStandby(const ConcurrentNode &node, std::chrono::steady_clock::time_point deadline) {
+  const Json request = {{"armed", true}};
+  static_cast<void>(RequireNodeHttp({.port = node.host_port,
+                                     .method = "POST",
+                                     .path = "/api/v1/capture/arm",
+                                     .bearer_token = node.control_token,
+                                     .body = request.dump(),
+                                     .deadline = deadline},
+                                    202));
+}
+
+void WaitForPairedPosePhase(const ConcurrentNode &leader, const ConcurrentNode &shadow,
+                            std::string_view phase,
+                            std::chrono::steady_clock::time_point deadline) {
+  if (phase != "monitoring" && phase != "high_speed") {
+    throw std::invalid_argument("paired pose HIL phase does not have an evidence contract");
+  }
+  const std::string latest_filename = "pose-status-" + std::string(phase) + "-latest.json";
+  const std::string accepted_filename = "pose-status-" + std::string(phase) + ".json";
+  std::optional<std::chrono::steady_clock::time_point> stable_since;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const HttpResponse leader_response = RequireNodeHttp({.port = leader.host_port,
+                                                          .method = "GET",
+                                                          .path = "/api/v1/capture/status",
+                                                          .bearer_token = {},
+                                                          .body = {},
+                                                          .deadline = deadline},
+                                                         200);
+    const HttpResponse shadow_response = RequireNodeHttp({.port = shadow.host_port,
+                                                          .method = "GET",
+                                                          .path = "/api/v1/capture/status",
+                                                          .bearer_token = {},
+                                                          .body = {},
+                                                          .deadline = deadline},
+                                                         200);
+    WriteArtifact(OutputDirectory() / leader.role / latest_filename, leader_response.body);
+    WriteArtifact(OutputDirectory() / shadow.role / latest_filename, shadow_response.body);
+    const Json leader_status = Json::parse(leader_response.body);
+    const Json shadow_status = Json::parse(shadow_response.body);
+    if (leader_status.value("state", "") == "error" ||
+        shadow_status.value("state", "") == "error") {
+      throw std::runtime_error("paired pose HIL node entered ERROR");
+    }
+    const Json &leader_pose = leader_status.at("pose");
+    const Json &shadow_pose = shadow_status.at("pose");
+    const bool phase_ready =
+        leader_status.value("state", "") == "armed" && leader_status.value("armed", false) &&
+        shadow_status.value("state", "") == "armed" && shadow_status.value("armed", false) &&
+        leader_pose.value("phase", "") == phase && shadow_pose.value("phase", "") == phase &&
+        leader_pose.value("mode", "") == "leader" && shadow_pose.value("mode", "") == "shadow";
+    bool ready = phase_ready;
+    if (phase == "monitoring") {
+      ready = ready && leader_pose.at("metrics").value("successful_inferences", 0L) >= 2L &&
+              shadow_pose.at("metrics").value("successful_inferences", 0L) >= 2L &&
+              leader_pose.value("hil_pose_arm_enabled", false) &&
+              leader_pose.at("standby_audio").value("ready", false) &&
+              shadow_pose.at("standby_audio").value("ready", false);
+    } else {
+      ready = ready && leader_status.value("ring_duration_us", 0L) >= 1'300'000L &&
+              shadow_status.value("ring_duration_us", 0L) >= 1'300'000L &&
+              leader_pose.at("peer_arm").value("state", "") == "accepted" &&
+              shadow_pose.at("peer_arm").value("state", "") == "inbound_accepted";
+    }
+    if (ready) {
+      if (!stable_since.has_value()) {
+        stable_since = std::chrono::steady_clock::now();
+      } else if (std::chrono::steady_clock::now() - *stable_since >= 300ms) {
+        WriteArtifact(OutputDirectory() / leader.role / accepted_filename, leader_response.body);
+        WriteArtifact(OutputDirectory() / shadow.role / accepted_filename, shadow_response.body);
+        return;
+      }
+    } else {
+      stable_since.reset();
+    }
+    std::this_thread::sleep_for(kPollInterval);
+  }
+  throw std::runtime_error("paired pose HIL nodes did not reach phase " + std::string(phase));
+}
+
+std::array<std::string, 2> WaitForNewPoseSessions(
+    const ConcurrentNode &leader, const ConcurrentNode &shadow,
+    const std::set<std::string, std::less<>> &leader_baseline,
+    const std::set<std::string, std::less<>> &shadow_baseline,
+    std::chrono::steady_clock::time_point deadline) {
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto leader_current = ReadyCaptureSessionIds(leader, deadline);
+    const auto shadow_current = ReadyCaptureSessionIds(shadow, deadline);
+    std::vector<std::string> leader_new;
+    std::vector<std::string> shadow_new;
+    std::ranges::set_difference(leader_current, leader_baseline, std::back_inserter(leader_new));
+    std::ranges::set_difference(shadow_current, shadow_baseline, std::back_inserter(shadow_new));
+    if (leader_new.size() > 1U || shadow_new.size() > 1U) {
+      throw std::runtime_error("paired pose HIL published ambiguous capture sessions");
+    }
+    if (leader_new.size() == 1U && shadow_new.size() == 1U) {
+      return {leader_new.front(), shadow_new.front()};
+    }
+    std::this_thread::sleep_for(kPollInterval);
+  }
+  throw std::runtime_error("paired pose HIL did not publish both Feather-triggered sessions");
+}
+
+std::string BuildPoseCaptureReport(const std::filesystem::path &adb, const ConcurrentNode &node,
+                                   std::string_view session_id,
+                                   std::chrono::steady_clock::time_point deadline) {
+  const std::string manifest_text = RunRequiredAdb(
+      adb,
+      DeviceArguments(node.serial,
+                      {"exec-out", "run-as", kPackageName, "cat",
+                       "files/sessions/" + std::string(session_id) + "/manifest.json"}),
+      deadline);
+  const Json manifest = Json::parse(manifest_text);
+  const Json &media = manifest.at("views").at(0).at("media");
+  Json audio = manifest.at("android_capture").at("audio_evidence");
+  const std::string audio_relative_path = audio.value("path", "");
+  if (audio_relative_path != "audio_evidence.wav") {
+    throw std::runtime_error("paired pose HIL manifest lacks exact retained audio evidence");
+  }
+  audio["path"] = "sessions/" + std::string(session_id) + "/" + audio_relative_path;
+  const Json report = {
+      {"schema_version", 1},
+      {"report_type", "android_continuous_capture"},
+      {"complete", true},
+      {"passed", true},
+      {"node_id", node.identity.node_id},
+      {"role", node.role},
+      {"retain_session_requested", true},
+      {"request",
+       {{"width", node.profile.capture.width},
+        {"height", node.profile.capture.height},
+        {"frames_per_second", 240},
+        {"duration_ms", 3000},
+        {"bitrate_bits_per_second", node.profile.capture.bitrate_bits_per_second},
+        {"mime", "video/avc"}}},
+      {"retained_session",
+       {{"session_id", session_id},
+        {"manifest", "sessions/" + std::string(session_id) + "/manifest.json"},
+        {"media", "sessions/" + std::string(session_id) + "/" + node.role + ".mp4"},
+        {"encoded_bytes", media.at("encoded_bytes")},
+        {"audio_evidence", std::move(audio)}}},
+  };
+  return report.dump(2) + "\n";
+}
+
+Json ValidatePersistedPeerArm(std::string_view manifest_text, std::string_view expected_state,
+                              std::string_view shared_session_id) {
+  const Json manifest = Json::parse(manifest_text);
+  const Json &peer_arm = manifest.at("android_capture").at("peer_arm");
+  if (peer_arm.value("state", "") != expected_state ||
+      peer_arm.value("shared_session_id", "") != shared_session_id ||
+      !peer_arm.at("failure_type").is_null()) {
+    throw std::runtime_error("retained manifest peer-arm evidence is not nominal");
+  }
+  if (expected_state == "accepted") {
+    if (peer_arm.value("http_status", 0) != 202) {
+      throw std::runtime_error("leader manifest lacks the accepted peer HTTP response");
+    }
+  } else if (!peer_arm.at("http_status").is_null()) {
+    throw std::runtime_error("shadow manifest unexpectedly reports outbound peer HTTP status");
+  }
+  return peer_arm;
 }
 
 coordination::FourTimestampClockExchange ReadClockExchange(
@@ -2051,6 +2573,225 @@ std::string FirstLine(std::string_view text) {
   return std::string(text.substr(0U, text.find('\n')));
 }
 
+int RunPairedPose(int argument_count, char **arguments) {
+  if (argument_count != 4 || std::string_view(arguments[3]) != "paired-pose") {
+    throw std::runtime_error("expected Bazel runfiles: <adb> <APK> paired-pose");
+  }
+  const std::filesystem::path adb = std::filesystem::absolute(arguments[1]);
+  const std::filesystem::path apk = std::filesystem::absolute(arguments[2]);
+  if (!std::filesystem::is_regular_file(adb) || access(adb.c_str(), X_OK) != 0 ||
+      !std::filesystem::is_regular_file(apk)) {
+    throw std::runtime_error("paired pose-arm dual Android HIL runfiles are missing");
+  }
+  const std::string leader_serial = RequiredEnvironment("SWING_CAPTURE_ANDROID_DTL_SERIAL");
+  const std::string shadow_serial = RequiredEnvironment("SWING_CAPTURE_ANDROID_FACE_ON_SERIAL");
+  if (leader_serial == shadow_serial) {
+    throw std::runtime_error("paired pose-arm HIL requires two distinct devices");
+  }
+
+  StopBothGuard cleanup(adb, leader_serial, shadow_serial);
+  StopPackage(adb, leader_serial);
+  StopPackage(adb, shadow_serial);
+  cleanup.SnapshotNodeConfiguration(leader_serial);
+  cleanup.SnapshotNodeConfiguration(shadow_serial);
+  const auto identity_deadline = std::chrono::steady_clock::now() + 3s;
+  const std::string leader_model = ReadDeviceModel(adb, leader_serial, identity_deadline);
+  const std::string shadow_model = ReadDeviceModel(adb, shadow_serial, identity_deadline);
+  if (!leader_model.starts_with("Pixel 6") || shadow_model != "Pixel 5a") {
+    throw std::runtime_error(
+        "paired pose-arm HIL requires Pixel 6-family leader and Pixel 5a shadow");
+  }
+  const ExternalTools external_tools = DiscoverExternalTools();
+  ConcurrentNode leader =
+      ConfigureConcurrentNode(adb, apk, leader_serial, "down_the_line", &cleanup, true);
+  ConcurrentNode shadow =
+      ConfigureConcurrentNode(adb, apk, shadow_serial, "face_on", &cleanup, true);
+  if (leader.identity.node_id == shadow.identity.node_id) {
+    throw std::runtime_error("paired pose-arm HIL nodes reuse one persistent identity");
+  }
+
+  const auto association_started = std::chrono::steady_clock::now();
+  const auto association_deadline = association_started + kStageDeadline;
+  EstablishReverse(adb, leader.serial, kPosePeerTunnelPort, shadow.host_port, association_deadline);
+  cleanup.RegisterReverse(leader.serial, kPosePeerTunnelPort);
+  ConfigurePoseMode(shadow, "shadow", std::nullopt, std::nullopt, association_deadline);
+  const std::string peer_origin = "http://127.0.0.1:" + std::to_string(kPosePeerTunnelPort);
+  ConfigurePoseMode(leader, "leader", peer_origin, shadow.control_token, association_deadline);
+  PreservePoseConfiguredNodeDescriptor(shadow, "shadow", false, association_deadline);
+  PreservePoseConfiguredNodeDescriptor(leader, "leader", true, association_deadline);
+  CollectClockExchanges(&leader, &shadow, association_deadline);
+  WriteArtifact(OutputDirectory() / leader.role / "clock.json",
+                ClockEvidenceJson(leader).dump(2) + "\n");
+  WriteArtifact(OutputDirectory() / shadow.role / "clock.json",
+                ClockEvidenceJson(shadow).dump(2) + "\n");
+  const std::int64_t association_stage_milliseconds = ElapsedMilliseconds(association_started);
+
+  const auto capture_started = std::chrono::steady_clock::now();
+  const auto capture_deadline = capture_started + kStageDeadline;
+  const auto leader_baseline = ReadyCaptureSessionIds(leader, capture_deadline);
+  const auto shadow_baseline = ReadyCaptureSessionIds(shadow, capture_deadline);
+  ArmPoseStandby(shadow, capture_deadline);
+  ArmPoseStandby(leader, capture_deadline);
+  WaitForPairedPosePhase(leader, shadow, "monitoring", capture_deadline);
+
+  const HttpResponse transition = RequireNodeHttp({.port = leader.host_port,
+                                                   .method = "POST",
+                                                   .path = "/api/v1/hil/pose-arm",
+                                                   .bearer_token = leader.control_token,
+                                                   .body = {},
+                                                   .deadline = capture_deadline},
+                                                  202);
+  WriteArtifact(OutputDirectory() / leader.role / "pose-arm-response.json", transition.body);
+  const Json transition_json = Json::parse(transition.body);
+  const std::string shared_session_id = transition_json.value("shared_session_id", "");
+  if (transition_json.value("schema_version", 0) != 1 ||
+      transition_json.value("state", "") != "transitioning_to_high_speed" ||
+      !SafeSessionId(shared_session_id)) {
+    throw std::runtime_error("leader deterministic pose-arm response is invalid");
+  }
+  WaitForPairedPosePhase(leader, shadow, "high_speed", capture_deadline);
+  const swing_capture::hil::FeatherSwingReceipt feather = RunFeatherSwing(OutputDirectory());
+  const std::array<std::string, 2> session_ids =
+      WaitForNewPoseSessions(leader, shadow, leader_baseline, shadow_baseline, capture_deadline);
+  const std::int64_t capture_stage_milliseconds = ElapsedMilliseconds(capture_started);
+  if (capture_stage_milliseconds >
+      std::chrono::duration_cast<std::chrono::milliseconds>(kStageDeadline).count()) {
+    throw std::runtime_error("paired pose-arm capture exceeded 15 seconds");
+  }
+
+  const auto report_deadline = std::chrono::steady_clock::now() + kStageDeadline;
+  std::array<std::string, 2> reports = {
+      BuildPoseCaptureReport(adb, leader, session_ids[0], report_deadline),
+      BuildPoseCaptureReport(adb, shadow, session_ids[1], report_deadline),
+  };
+  CapturedNode leader_capture = PullConcurrentNode(
+      adb, leader, shared_session_id, std::move(reports[0]), feather, capture_stage_milliseconds);
+  CapturedNode shadow_capture = PullConcurrentNode(
+      adb, shadow, shared_session_id, std::move(reports[1]), feather, capture_stage_milliseconds);
+  AnalyzeNodeMedia(&leader_capture, OutputDirectory() / leader.role, external_tools);
+  WriteArtifact(OutputDirectory() / leader.role / "evidence.json",
+                EvidenceJson(leader_capture).dump(2) + "\n");
+  ValidateCompletedNode(leader_capture);
+  AnalyzeNodeMedia(&shadow_capture, OutputDirectory() / shadow.role, external_tools);
+  WriteArtifact(OutputDirectory() / shadow.role / "evidence.json",
+                EvidenceJson(shadow_capture).dump(2) + "\n");
+  ValidateCompletedNode(shadow_capture);
+  ValidateDualSession(leader_capture.evidence, shadow_capture.evidence);
+  const Json leader_peer_manifest =
+      ValidatePersistedPeerArm(leader_capture.manifest, "accepted", shared_session_id);
+  const Json shadow_peer_manifest =
+      ValidatePersistedPeerArm(shadow_capture.manifest, "inbound_accepted", shared_session_id);
+  if (leader_capture.evidence.node_id != leader.identity.node_id ||
+      shadow_capture.evidence.node_id != shadow.identity.node_id ||
+      leader_capture.april_tags.front().family != shadow_capture.april_tags.front().family ||
+      leader_capture.april_tags.front().id != shadow_capture.april_tags.front().id) {
+    throw std::runtime_error("paired pose-arm evidence identity cross-check failed");
+  }
+  CoordinationRunEvidence coordination_evidence = BuildAndPersistCoordination(
+      leader, shadow, leader_capture, shadow_capture, shared_session_id);
+  if (coordination_evidence.stage_milliseconds >
+      std::chrono::duration_cast<std::chrono::milliseconds>(kStageDeadline).count()) {
+    throw std::runtime_error("paired pose-arm coordination persistence exceeded 15 seconds");
+  }
+
+  Json aggregate = {
+      {"schema_version", 1},
+      {"report_type", "android_dual_phone_paired_pose_arm_hil"},
+      {"passed", true},
+      {"camera_jobs_concurrent", true},
+      {"single_feather_swing_count", 1},
+      {"shared_session_id", shared_session_id},
+      {"pose_transition",
+       {
+           {"passed", true},
+           {"leader_role", leader.role},
+           {"shadow_role", shadow.role},
+           {"leader_device_model", leader_model},
+           {"shadow_device_model", shadow_model},
+           {"leader_candidate_source", "explicit_hil_endpoint"},
+           {"peer_dispatch", "production_pose_peer_arm_client"},
+           {"peer_transport", "adb_reverse_to_shadow_http_api"},
+           {"standby_inference", "real_5hz_on_device"},
+           {"high_speed_profile", "720p240"},
+           {"endpoint_hil_launch_gated", true},
+           {"persisted_peer_arm",
+            {{"leader", leader_peer_manifest}, {"shadow", shadow_peer_manifest}}},
+       }},
+      {"cross_node_checks",
+       {
+           {"passed", true},
+           {"distinct_node_identities", true},
+           {"roles_complete", true},
+           {"shared_session_id_matches", true},
+           {"distinct_local_session_ids", true},
+           {"same_april_tag_identity", true},
+       }},
+      {"clock_exchanges",
+       {
+           {"down_the_line", ClockEvidenceJson(leader)},
+           {"face_on", ClockEvidenceJson(shadow)},
+       }},
+      {"coordination", std::move(coordination_evidence.report)},
+      {"stages",
+       {
+           {"down_the_line_setup", StageJson(leader.setup_stage_milliseconds)},
+           {"face_on_setup", StageJson(shadow.setup_stage_milliseconds)},
+           {"peer_association", StageJson(association_stage_milliseconds)},
+           {"standby_transition_and_capture", StageJson(capture_stage_milliseconds)},
+           {"coordination", StageJson(coordination_evidence.stage_milliseconds)},
+       }},
+      {"decoder",
+       {
+           {"ownership", "local_nonhermetic_manual_hil"},
+           {"ffmpeg", FirstLine(external_tools.ffmpeg_version)},
+           {"ffprobe", FirstLine(external_tools.ffprobe_version)},
+       }},
+      {"artifacts",
+       {
+           {"report", "report.json"},
+           {"feather_receipt", "feather.json"},
+           {"feather_transaction", "feather-transaction.json"},
+           {"coordination_record", "coordination.json"},
+           {"leader_pose_arm_response", "down_the_line/pose-arm-response.json"},
+           {"down_the_line",
+            {
+                {"initial_node_descriptor", "down_the_line/node-descriptor-initial.json"},
+                {"pose_configured_node_descriptor",
+                 "down_the_line/node-descriptor-pose-configured.json"},
+                {"pose_setup", "down_the_line/pose-setup.json"},
+                {"pose_status_monitoring", "down_the_line/pose-status-monitoring.json"},
+                {"pose_status_high_speed", "down_the_line/pose-status-high-speed.json"},
+                {"clock", "down_the_line/clock.json"},
+                {"trigger_report", "down_the_line/trigger-report.json"},
+                {"evidence", "down_the_line/evidence.json"},
+            }},
+           {"face_on",
+            {
+                {"initial_node_descriptor", "face_on/node-descriptor-initial.json"},
+                {"pose_configured_node_descriptor", "face_on/node-descriptor-pose-configured.json"},
+                {"pose_setup", "face_on/pose-setup.json"},
+                {"pose_status_monitoring", "face_on/pose-status-monitoring.json"},
+                {"pose_status_high_speed", "face_on/pose-status-high-speed.json"},
+                {"clock", "face_on/clock.json"},
+                {"trigger_report", "face_on/trigger-report.json"},
+                {"evidence", "face_on/evidence.json"},
+            }},
+       }},
+      {"nodes", Json::array({EvidenceJson(leader_capture), EvidenceJson(shadow_capture)})},
+  };
+  cleanup.RestoreNodeConfigurationsChecked();
+  aggregate["configuration_restore"] = {
+      {"passed", true},
+      {"scope", "complete_private_node_configuration_generation"},
+      {"temporary_peer_configuration_removed", true},
+      {"secret_material_preserved_in_artifacts", false},
+  };
+  ValidatePairedPoseHilReport(aggregate.dump());
+  WriteArtifact(OutputDirectory() / "report.json", aggregate.dump(2) + "\n");
+  std::cout << "Published paired pose-arm dual-phone Android HIL evidence\n";
+  return 0;
+}
+
 int RunConcurrent(int argument_count, char **arguments) {
   if (argument_count != 4 || std::string_view(arguments[3]) != "concurrent") {
     throw std::runtime_error("expected Bazel runfiles: <adb> <APK> concurrent");
@@ -2321,17 +3062,25 @@ Json LatestNodeDiagnostics(std::string_view role) {
 }  // namespace
 
 int main(int argument_count, char **arguments) {
+  std::signal(SIGPIPE, SIG_IGN);
   const bool concurrent = argument_count == 4 && std::string_view(arguments[3]) == "concurrent";
+  const bool paired_pose = argument_count == 4 && std::string_view(arguments[3]) == "paired-pose";
   try {
+    if (paired_pose) {
+      return RunPairedPose(argument_count, arguments);
+    }
     return concurrent ? RunConcurrent(argument_count, arguments) : Run(argument_count, arguments);
   } catch (const std::exception &failure) {
     try {
+      const std::string_view report_type = paired_pose
+                                               ? "android_dual_phone_paired_pose_arm_hil"
+                                               : (concurrent ? "android_dual_phone_concurrent_hil"
+                                                             : "android_dual_phone_sequential_hil");
       const Json report = {
           {"schema_version", 1},
-          {"report_type",
-           concurrent ? "android_dual_phone_concurrent_hil" : "android_dual_phone_sequential_hil"},
+          {"report_type", report_type},
           {"passed", false},
-          {"camera_jobs_concurrent", concurrent},
+          {"camera_jobs_concurrent", concurrent || paired_pose},
           {"diagnostic", failure.what()},
           {"last_node_diagnostics",
            {
@@ -2343,7 +3092,7 @@ int main(int argument_count, char **arguments) {
     } catch (const std::exception &write_failure) {
       std::cerr << "Could not publish failing dual-phone report: " << write_failure.what() << '\n';
     }
-    std::cerr << (concurrent ? "Concurrent" : "Sequential")
+    std::cerr << (paired_pose ? "Paired pose-arm" : (concurrent ? "Concurrent" : "Sequential"))
               << " dual-phone Android HIL failed: " << failure.what() << '\n';
     return 1;
   }

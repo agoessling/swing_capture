@@ -44,6 +44,36 @@ public record WarmCaptureTransitionTiming(
     return Math.subtractExact(firstUsableEncodedFrameNs, transitionRequestedNs);
   }
 
+  /** Camera2 reports FLUSHED for an in-flight standby request during an intentional abort. */
+  public static boolean standbyCaptureFailureIsFatal(boolean transitioning, boolean closed) {
+    return !transitioning && !closed;
+  }
+
+  /** Maps device-global Camera2 frame numbers to the encoder's zero-based session ordinal. */
+  public static long highSpeedOrdinal(long firstHighSpeedFrameNumber, long frameNumber) {
+    if (firstHighSpeedFrameNumber < 0 || frameNumber < firstHighSpeedFrameNumber) {
+      throw new IllegalArgumentException("high-speed Camera2 frame numbers are invalid");
+    }
+    return Math.subtractExact(frameNumber, firstHighSpeedFrameNumber);
+  }
+
+  /**
+   * Estimates BOOTTIME minus MONOTONIC using one BOOTTIME reading bracketed by MONOTONIC reads.
+   */
+  public static long midpointClockOffsetNanos(
+      long monotonicBeforeNanos, long boottimeNanos, long monotonicAfterNanos) {
+    if (monotonicBeforeNanos < 0
+        || boottimeNanos < 0
+        || monotonicAfterNanos < monotonicBeforeNanos) {
+      throw new IllegalArgumentException("clock anchor samples are invalid");
+    }
+    long midpoint =
+        monotonicBeforeNanos
+            + Math.floorDiv(
+                Math.subtractExact(monotonicAfterNanos, monotonicBeforeNanos), 2L);
+    return Math.subtractExact(boottimeNanos, midpoint);
+  }
+
   private static void requireNonnegative(long value, String name) {
     if (value < 0) {
       throw new IllegalArgumentException(name + " cannot be negative");

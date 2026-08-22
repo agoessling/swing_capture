@@ -3,7 +3,7 @@ package com.agoessling.swingcapture.diagnostics;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
-/** One immutable 5 Hz inference input plus the complete decision evidence derived from it. */
+/** One immutable 5 Hz observation plus an optional lower-cadence compressed preview frame. */
 public final class PreviewEvidence {
   public static final int MAXIMUM_MODEL_ID_BYTES = 128;
   public static final int MAXIMUM_REASON_BYTES = 512;
@@ -42,9 +42,6 @@ public final class PreviewEvidence {
       throw new IllegalArgumentException("preview timestamp must permit a positive exclusive end");
     }
     Objects.requireNonNull(compressedFrame, "compressedFrame");
-    if (compressedFrame.length == 0) {
-      throw new IllegalArgumentException("compressed preview frame must be nonempty");
-    }
     requireBoundedText(modelId, MAXIMUM_MODEL_ID_BYTES, "modelId", false);
     if (inferenceDurationNanos < 0) {
       throw new IllegalArgumentException("inference duration must be nonnegative");
@@ -74,6 +71,29 @@ public final class PreviewEvidence {
 
   public int compressedFrameBytes() {
     return compressedFrame.length;
+  }
+
+  public boolean hasCompressedFrame() {
+    return compressedFrame.length > 0;
+  }
+
+  /** Returns the same observation with a detached encoded frame attached. */
+  public PreviewEvidence withCompressedFrame(byte[] frame) {
+    Objects.requireNonNull(frame, "frame");
+    if (frame.length == 0) {
+      throw new IllegalArgumentException("attached preview frame must be nonempty");
+    }
+    return new PreviewEvidence(
+        timestampBoottimeNanos,
+        frame,
+        modelId,
+        inferenceDurationNanos,
+        personConfidence,
+        addressConfidence,
+        motionMagnitude,
+        hittingRegionOccupied,
+        controllerState,
+        decisionReason);
   }
 
   /** Returns a detached copy; callers cannot mutate retained or snapshotted evidence. */

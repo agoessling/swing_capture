@@ -8,12 +8,26 @@ import java.util.Set;
 
 /** Pure retention policy. The Android storage layer performs the validated deletions. */
 public final class SessionRetentionPlanner {
+  public enum RetentionClass {
+    PRIMARY_CAPTURE,
+    DIAGNOSTIC
+  }
+
   public static final class Entry {
     private final String sessionId;
     private final long createdAtEpochMillis;
     private final long bytes;
+    private final RetentionClass retentionClass;
 
     public Entry(String sessionId, long createdAtEpochMillis, long bytes) {
+      this(sessionId, createdAtEpochMillis, bytes, RetentionClass.PRIMARY_CAPTURE);
+    }
+
+    public Entry(
+        String sessionId,
+        long createdAtEpochMillis,
+        long bytes,
+        RetentionClass retentionClass) {
       if (sessionId == null || !sessionId.matches("[A-Za-z0-9._-]+")) {
         throw new IllegalArgumentException("invalid session id");
       }
@@ -23,6 +37,7 @@ public final class SessionRetentionPlanner {
       this.sessionId = sessionId;
       this.createdAtEpochMillis = createdAtEpochMillis;
       this.bytes = bytes;
+      this.retentionClass = java.util.Objects.requireNonNull(retentionClass, "retentionClass");
     }
 
     public String sessionId() {
@@ -36,6 +51,10 @@ public final class SessionRetentionPlanner {
     public long bytes() {
       return bytes;
     }
+
+    public RetentionClass retentionClass() {
+      return retentionClass;
+    }
   }
 
   private SessionRetentionPlanner() {}
@@ -48,8 +67,10 @@ public final class SessionRetentionPlanner {
     Set<String> protectedSet = protectedIds == null ? Set.of() : new HashSet<>(protectedIds);
     List<Entry> newestFirst = new ArrayList<>(entries);
     newestFirst.sort(
-        Comparator.comparingLong(Entry::createdAtEpochMillis)
-            .reversed()
+        Comparator.comparingInt(
+                (Entry entry) ->
+                    entry.retentionClass() == RetentionClass.PRIMARY_CAPTURE ? 0 : 1)
+            .thenComparing(Comparator.comparingLong(Entry::createdAtEpochMillis).reversed())
             .thenComparing(Entry::sessionId));
 
     long keptBytes = 0;

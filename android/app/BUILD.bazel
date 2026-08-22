@@ -17,6 +17,343 @@ java_test(
 )
 
 java_library(
+    name = "pose_node_mode",
+    srcs = ["java/com/agoessling/swingcapture/PoseNodeMode.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "pose_node_mode_test",
+    srcs = ["java/com/agoessling/swingcapture/PoseNodeModeTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseNodeModeTest",
+    use_testrunner = False,
+    deps = [":pose_node_mode"],
+)
+
+java_library(
+    name = "pose_hil_endpoint_access",
+    srcs = ["java/com/agoessling/swingcapture/PoseHilEndpointAccess.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "pose_hil_endpoint_access_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseHilEndpointAccessTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseHilEndpointAccessTest",
+    use_testrunner = False,
+    deps = [":pose_hil_endpoint_access"],
+)
+
+java_library(
+    name = "pose_peer_arm_client",
+    srcs = ["java/com/agoessling/swingcapture/PosePeerArmClient.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/node:node_core"],
+)
+
+java_test(
+    name = "pose_peer_arm_client_test",
+    srcs = ["java/com/agoessling/swingcapture/PosePeerArmClientTest.java"],
+    main_class = "com.agoessling.swingcapture.PosePeerArmClientTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/node:node_core",
+        ":pose_peer_arm_client",
+    ],
+)
+
+java_library(
+    name = "pose_station_configuration_snapshot",
+    srcs = ["java/com/agoessling/swingcapture/PoseStationConfigurationSnapshot.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/node:node_core",
+        "//android/core/pose:pose_landmark_features",
+        "//android/pose_inference:pose_inference_core",
+        ":pose_node_mode",
+    ],
+)
+
+java_test(
+    name = "pose_station_configuration_snapshot_test",
+    srcs = ["java/com/agoessling/swingcapture/PoseStationConfigurationSnapshotTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseStationConfigurationSnapshotTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/node:node_core",
+        "//android/core/pose:pose_landmark_features",
+        "//android/pose_inference:pose_inference_core",
+        ":pose_node_mode",
+        ":pose_station_configuration_snapshot",
+    ],
+)
+
+java_library(
+    name = "arm_evidence_flush",
+    srcs = ["java/com/agoessling/swingcapture/ArmEvidenceFlush.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "arm_evidence_flush_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/ArmEvidenceFlushTest.java"],
+    main_class = "com.agoessling.swingcapture.ArmEvidenceFlushTest",
+    use_testrunner = False,
+    deps = [
+        ":arm_evidence_flush",
+        ":latest_frame_slot",
+    ],
+)
+
+java_library(
+    name = "latest_frame_slot",
+    srcs = ["java/com/agoessling/swingcapture/LatestFrameSlot.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "latest_frame_slot_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/LatestFrameSlotTest.java"],
+    main_class = "com.agoessling.swingcapture.LatestFrameSlotTest",
+    use_testrunner = False,
+    deps = [":latest_frame_slot"],
+)
+
+java_library(
+    name = "yuv_420_plane_packer",
+    srcs = ["java/com/agoessling/swingcapture/Yuv420PlanePacker.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "yuv_420_plane_packer_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/Yuv420PlanePackerTest.java"],
+    main_class = "com.agoessling.swingcapture.Yuv420PlanePackerTest",
+    use_testrunner = False,
+    deps = [":yuv_420_plane_packer"],
+)
+
+java_library(
+    name = "pose_standby_metrics",
+    srcs = ["java/com/agoessling/swingcapture/PoseStandbyMetrics.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/pose_inference:pose_inference_core",
+        ":arm_evidence_flush",
+    ],
+)
+
+java_test(
+    name = "pose_standby_metrics_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseStandbyMetricsTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseStandbyMetricsTest",
+    use_testrunner = False,
+    deps = [
+        "//android/pose_inference:pose_inference_core",
+        ":arm_evidence_flush",
+        ":pose_standby_metrics",
+    ],
+)
+
+java_library(
+    name = "pose_standby_policy",
+    srcs = ["java/com/agoessling/swingcapture/PoseStandbyPolicy.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        "//android/core/pose:pose_landmark_features",
+        "//android/core/pose:pose_trigger_core",
+        ":capture_role",
+    ],
+)
+
+java_test(
+    name = "pose_standby_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseStandbyPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseStandbyPolicyTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        "//android/core/pose:pose_landmark_features",
+        "//android/core/pose:pose_trigger_core",
+        ":capture_role",
+        ":pose_standby_policy",
+    ],
+)
+
+java_library(
+    name = "pose_trigger_controller_lease",
+    srcs = ["java/com/agoessling/swingcapture/PoseTriggerControllerLease.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/pose:pose_trigger_core"],
+)
+
+java_test(
+    name = "pose_trigger_controller_lease_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseTriggerControllerLeaseTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseTriggerControllerLeaseTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/pose:pose_trigger_core",
+        ":pose_trigger_controller_lease",
+    ],
+)
+
+java_library(
+    name = "pose_external_arm_lifecycle",
+    srcs = ["java/com/agoessling/swingcapture/PoseExternalArmLifecycle.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/pose:pose_trigger_core",
+        ":pose_trigger_controller_lease",
+    ],
+)
+
+java_test(
+    name = "pose_external_arm_lifecycle_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseExternalArmLifecycleTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseExternalArmLifecycleTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/pose:pose_trigger_core",
+        ":pose_external_arm_lifecycle",
+        ":pose_trigger_controller_lease",
+    ],
+)
+
+java_library(
+    name = "pose_transition_precedence",
+    srcs = ["java/com/agoessling/swingcapture/PoseTransitionPrecedence.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "pose_transition_precedence_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseTransitionPrecedenceTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseTransitionPrecedenceTest",
+    use_testrunner = False,
+    deps = [":pose_transition_precedence"],
+)
+
+java_library(
+    name = "session_staging_cleanup",
+    srcs = ["java/com/agoessling/swingcapture/SessionStagingCleanup.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "session_staging_cleanup_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/SessionStagingCleanupTest.java"],
+    main_class = "com.agoessling.swingcapture.SessionStagingCleanupTest",
+    use_testrunner = False,
+    deps = [":session_staging_cleanup"],
+)
+
+java_library(
+    name = "node_configuration_process_lock",
+    srcs = ["java/com/agoessling/swingcapture/NodeConfigurationProcessLock.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "node_configuration_process_lock_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/NodeConfigurationProcessLockTest.java"],
+    main_class = "com.agoessling.swingcapture.NodeConfigurationProcessLockTest",
+    use_testrunner = False,
+    deps = [":node_configuration_process_lock"],
+)
+
+java_library(
+    name = "debug_evidence_cadence",
+    srcs = ["java/com/agoessling/swingcapture/DebugEvidenceCadence.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "debug_evidence_cadence_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/DebugEvidenceCadenceTest.java"],
+    main_class = "com.agoessling.swingcapture.DebugEvidenceCadenceTest",
+    use_testrunner = False,
+    deps = [":debug_evidence_cadence"],
+)
+
+java_library(
+    name = "peer_arm_status_tracker",
+    srcs = ["java/com/agoessling/swingcapture/PeerArmStatusTracker.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "peer_arm_status_tracker_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerArmStatusTrackerTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerArmStatusTrackerTest",
+    use_testrunner = False,
+    deps = [":peer_arm_status_tracker"],
+)
+
+java_library(
+    name = "node_setup_policy",
+    srcs = ["java/com/agoessling/swingcapture/NodeSetupPolicy.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "node_setup_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/NodeSetupPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.NodeSetupPolicyTest",
+    use_testrunner = False,
+    deps = [":node_setup_policy"],
+)
+
+java_library(
+    name = "pose_high_speed_no_impact_deadline",
+    srcs = ["java/com/agoessling/swingcapture/PoseHighSpeedNoImpactDeadline.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/pose:pose_trigger_core"],
+)
+
+java_test(
+    name = "pose_high_speed_no_impact_deadline_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseHighSpeedNoImpactDeadlineTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseHighSpeedNoImpactDeadlineTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/pose:pose_trigger_core",
+        ":pose_high_speed_no_impact_deadline",
+    ],
+)
+
+java_library(
+    name = "pose_high_speed_timeout_lifecycle",
+    srcs = ["java/com/agoessling/swingcapture/PoseHighSpeedTimeoutLifecycle.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "pose_high_speed_timeout_lifecycle_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseHighSpeedTimeoutLifecycleTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseHighSpeedTimeoutLifecycleTest",
+    use_testrunner = False,
+    deps = [":pose_high_speed_timeout_lifecycle"],
+)
+
+java_library(
     name = "capture_profile",
     srcs = ["java/com/agoessling/swingcapture/CaptureProfile.java"],
     visibility = ["//visibility:private"],
@@ -232,6 +569,98 @@ java_test(
 )
 
 java_library(
+    name = "pose_diagnostic_files",
+    srcs = ["java/com/agoessling/swingcapture/PoseDiagnosticFiles.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/diagnostics:diagnostics_core"],
+)
+
+java_test(
+    name = "pose_diagnostic_files_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseDiagnosticFilesTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseDiagnosticFilesTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        ":pose_diagnostic_files",
+    ],
+)
+
+java_library(
+    name = "standby_diagnostic_session_publisher",
+    srcs = [
+        "java/com/agoessling/swingcapture/StandbyDiagnosticSessionPublisher.java",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        "//android/core/standby_diagnostics:standby_diagnostic_core",
+        ":diagnostic_pcm16_wav_file",
+        ":pose_diagnostic_files",
+        ":session_staging_cleanup",
+    ],
+)
+
+java_test(
+    name = "standby_diagnostic_session_publisher_test",
+    size = "small",
+    srcs = [
+        "java/com/agoessling/swingcapture/StandbyDiagnosticSessionPublisherTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.StandbyDiagnosticSessionPublisherTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        "//android/core/standby_diagnostics:standby_diagnostic_core",
+        ":pose_diagnostic_files",
+        ":standby_diagnostic_session_publisher",
+    ],
+)
+
+android_library(
+    name = "standby_audio_recorder",
+    srcs = ["java/com/agoessling/swingcapture/StandbyAudioRecorder.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/audio:impact_timing_core",
+        "//android/core/diagnostics:diagnostics_core",
+        "//android/core/standby_diagnostics:standby_diagnostic_core",
+        ":device_audio_detector_policy",
+    ],
+)
+
+java_library(
+    name = "standby_diagnostic_session_registry",
+    srcs = ["java/com/agoessling/swingcapture/StandbyDiagnosticSessionRegistry.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "standby_diagnostic_session_registry_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/StandbyDiagnosticSessionRegistryTest.java"],
+    main_class = "com.agoessling.swingcapture.StandbyDiagnosticSessionRegistryTest",
+    use_testrunner = False,
+    deps = [":standby_diagnostic_session_registry"],
+)
+
+java_library(
+    name = "standby_diagnostic_telemetry",
+    srcs = ["java/com/agoessling/swingcapture/StandbyDiagnosticTelemetry.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "standby_diagnostic_telemetry_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/StandbyDiagnosticTelemetryTest.java"],
+    main_class = "com.agoessling.swingcapture.StandbyDiagnosticTelemetryTest",
+    use_testrunner = False,
+    deps = [":standby_diagnostic_telemetry"],
+)
+
+java_library(
     name = "http_byte_range",
     srcs = ["java/com/agoessling/swingcapture/HttpByteRange.java"],
     visibility = ["//visibility:private"],
@@ -264,6 +693,22 @@ java_library(
     name = "session_diagnostic_archive",
     srcs = ["java/com/agoessling/swingcapture/SessionDiagnosticArchive.java"],
     visibility = ["//visibility:private"],
+    deps = [":session_staging_cleanup"],
+)
+
+java_library(
+    name = "diagnostic_export_workspace_manager",
+    srcs = ["java/com/agoessling/swingcapture/DiagnosticExportWorkspaceManager.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "diagnostic_export_workspace_manager_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/DiagnosticExportWorkspaceManagerTest.java"],
+    main_class = "com.agoessling.swingcapture.DiagnosticExportWorkspaceManagerTest",
+    use_testrunner = False,
+    deps = [":diagnostic_export_workspace_manager"],
 )
 
 java_test(
@@ -272,7 +717,10 @@ java_test(
     srcs = ["java/com/agoessling/swingcapture/SessionDiagnosticArchiveTest.java"],
     main_class = "com.agoessling.swingcapture.SessionDiagnosticArchiveTest",
     use_testrunner = False,
-    deps = [":session_diagnostic_archive"],
+    deps = [
+        ":session_diagnostic_archive",
+        ":session_staging_cleanup",
+    ],
 )
 
 java_library(
@@ -427,6 +875,8 @@ android_library(
     srcs = glob(
         ["java/com/agoessling/swingcapture/*.java"],
         exclude = [
+            "java/com/agoessling/swingcapture/ArmEvidenceFlush.java",
+            "java/com/agoessling/swingcapture/ArmEvidenceFlushTest.java",
             "java/com/agoessling/swingcapture/AvcCodecDescriptor.java",
             "java/com/agoessling/swingcapture/AvcCodecDescriptorTest.java",
             "java/com/agoessling/swingcapture/AudioEvidencePolicy.java",
@@ -455,30 +905,73 @@ android_library(
             "java/com/agoessling/swingcapture/ContinuousCaptureContinuityException.java",
             "java/com/agoessling/swingcapture/DeviceAudioDetectorPolicy.java",
             "java/com/agoessling/swingcapture/DeviceAudioDetectorPolicyTest.java",
+            "java/com/agoessling/swingcapture/DebugEvidenceCadence.java",
+            "java/com/agoessling/swingcapture/DebugEvidenceCadenceTest.java",
             "java/com/agoessling/swingcapture/DiagnosticPcm16WavFile.java",
             "java/com/agoessling/swingcapture/DiagnosticPcm16WavFileTest.java",
+            "java/com/agoessling/swingcapture/DiagnosticExportWorkspaceManager.java",
+            "java/com/agoessling/swingcapture/DiagnosticExportWorkspaceManagerTest.java",
             "java/com/agoessling/swingcapture/DiagnosticAudioWindow.java",
             "java/com/agoessling/swingcapture/DiagnosticAudioWindowTest.java",
             "java/com/agoessling/swingcapture/HttpByteRange.java",
             "java/com/agoessling/swingcapture/HttpByteRangeTest.java",
             "java/com/agoessling/swingcapture/LowRateCaptureSchedule.java",
             "java/com/agoessling/swingcapture/LowRateCaptureScheduleTest.java",
+            "java/com/agoessling/swingcapture/LatestFrameSlot.java",
+            "java/com/agoessling/swingcapture/LatestFrameSlotTest.java",
             "java/com/agoessling/swingcapture/ProbeStatistics.java",
             "java/com/agoessling/swingcapture/ProbeStatisticsTest.java",
+            "java/com/agoessling/swingcapture/PoseDiagnosticFiles.java",
+            "java/com/agoessling/swingcapture/PoseDiagnosticFilesTest.java",
+            "java/com/agoessling/swingcapture/PoseHighSpeedNoImpactDeadline.java",
+            "java/com/agoessling/swingcapture/PoseHighSpeedNoImpactDeadlineTest.java",
+            "java/com/agoessling/swingcapture/PoseHighSpeedTimeoutLifecycle.java",
+            "java/com/agoessling/swingcapture/PoseHighSpeedTimeoutLifecycleTest.java",
+            "java/com/agoessling/swingcapture/PoseHilEndpointAccess.java",
+            "java/com/agoessling/swingcapture/PoseHilEndpointAccessTest.java",
+            "java/com/agoessling/swingcapture/PoseExternalArmLifecycle.java",
+            "java/com/agoessling/swingcapture/PoseExternalArmLifecycleTest.java",
+            "java/com/agoessling/swingcapture/PeerArmStatusTracker.java",
+            "java/com/agoessling/swingcapture/PeerArmStatusTrackerTest.java",
+            "java/com/agoessling/swingcapture/PosePeerArmClient.java",
+            "java/com/agoessling/swingcapture/PosePeerArmClientTest.java",
+            "java/com/agoessling/swingcapture/PoseStandbyMetrics.java",
+            "java/com/agoessling/swingcapture/PoseStandbyMetricsTest.java",
+            "java/com/agoessling/swingcapture/PoseStandbyPolicy.java",
+            "java/com/agoessling/swingcapture/PoseStandbyPolicyTest.java",
+            "java/com/agoessling/swingcapture/PoseTriggerControllerLease.java",
+            "java/com/agoessling/swingcapture/PoseTriggerControllerLeaseTest.java",
+            "java/com/agoessling/swingcapture/PoseTransitionPrecedence.java",
+            "java/com/agoessling/swingcapture/PoseTransitionPrecedenceTest.java",
             "java/com/agoessling/swingcapture/Pcm16WavFile.java",
             "java/com/agoessling/swingcapture/Pcm16WavFileTest.java",
             "java/com/agoessling/swingcapture/StreamingTimestampCalibrator.java",
             "java/com/agoessling/swingcapture/StreamingTimestampCalibratorTest.java",
+            "java/com/agoessling/swingcapture/StandbyDiagnosticSessionPublisher.java",
+            "java/com/agoessling/swingcapture/StandbyDiagnosticSessionPublisherTest.java",
+            "java/com/agoessling/swingcapture/StandbyDiagnosticSessionRegistry.java",
+            "java/com/agoessling/swingcapture/StandbyDiagnosticSessionRegistryTest.java",
+            "java/com/agoessling/swingcapture/StandbyDiagnosticTelemetry.java",
+            "java/com/agoessling/swingcapture/StandbyDiagnosticTelemetryTest.java",
+            "java/com/agoessling/swingcapture/StandbyAudioRecorder.java",
             "java/com/agoessling/swingcapture/SingleViewManifestTiming.java",
             "java/com/agoessling/swingcapture/SingleViewManifestTimingTest.java",
             "java/com/agoessling/swingcapture/SessionDiagnosticArchive.java",
             "java/com/agoessling/swingcapture/SessionDiagnosticArchiveTest.java",
             "java/com/agoessling/swingcapture/SessionDiagnosticStore.java",
             "java/com/agoessling/swingcapture/SessionDiagnosticStoreTest.java",
+            "java/com/agoessling/swingcapture/SessionStagingCleanup.java",
+            "java/com/agoessling/swingcapture/SessionStagingCleanupTest.java",
+            "java/com/agoessling/swingcapture/NodeConfigurationProcessLock.java",
+            "java/com/agoessling/swingcapture/NodeConfigurationProcessLockTest.java",
+            "java/com/agoessling/swingcapture/NodeSetupPolicy.java",
+            "java/com/agoessling/swingcapture/NodeSetupPolicyTest.java",
             "java/com/agoessling/swingcapture/StaticWebAssetRoute.java",
             "java/com/agoessling/swingcapture/StaticWebAssetRouteTest.java",
             "java/com/agoessling/swingcapture/WarmCaptureTransitionTiming.java",
             "java/com/agoessling/swingcapture/WarmCaptureTransitionTimingTest.java",
+            "java/com/agoessling/swingcapture/Yuv420PlanePacker.java",
+            "java/com/agoessling/swingcapture/Yuv420PlanePackerTest.java",
         ],
     ),
     manifest = "AndroidManifest.xml",
@@ -488,7 +981,13 @@ android_library(
         "//android/core/coordination:coordination_record_store",
         "//android/core/diagnostics:diagnostics_core",
         "//android/core/node:node_core",
+        "//android/core/pose:pose_landmark_features",
+        "//android/core/pose:pose_trigger_core",
         "//android/core/retention:encoded_access_unit_retention",
+        "//android/core/standby_diagnostics:standby_diagnostic_core",
+        "//android/pose_inference:pose_inference_android",
+        "//android/pose_inference:pose_inference_core",
+        ":arm_evidence_flush",
         ":audio_frame_marker",
         ":avc_codec_descriptor",
         ":camera_encoder_timestamp_alignment",
@@ -502,18 +1001,40 @@ android_library(
         ":coordination_http_endpoint",
         ":continuous_capture_continuity_diagnostic",
         ":device_audio_detector_policy",
+        ":debug_evidence_cadence",
         ":diagnostic_audio_window",
+        ":diagnostic_export_workspace_manager",
         ":diagnostic_pcm16_wav_file",
         ":http_byte_range",
         ":low_rate_capture_schedule",
         ":pcm16_wav_file",
+        ":pose_diagnostic_files",
+        ":pose_high_speed_no_impact_deadline",
+        ":pose_high_speed_timeout_lifecycle",
+        ":pose_hil_endpoint_access",
+        ":pose_external_arm_lifecycle",
+        ":peer_arm_status_tracker",
+        ":pose_peer_arm_client",
+        ":latest_frame_slot",
+        ":pose_standby_metrics",
+        ":pose_standby_policy",
+        ":pose_trigger_controller_lease",
+        ":pose_transition_precedence",
+        ":node_configuration_process_lock",
+        ":node_setup_policy",
         ":probe_statistics",
         ":streaming_timestamp_calibrator",
         ":single_view_manifest_timing",
+        ":standby_diagnostic_session_publisher",
+        ":standby_diagnostic_session_registry",
+        ":standby_diagnostic_telemetry",
+        ":standby_audio_recorder",
         ":session_diagnostic_archive",
         ":session_diagnostic_store",
+        ":session_staging_cleanup",
         ":static_web_asset_route",
         ":warm_capture_transition_timing",
+        ":yuv_420_plane_packer",
     ],
 )
 
@@ -524,6 +1045,7 @@ android_binary(
     visibility = [
         "//android/dual_hil:__pkg__",
         "//android/hil:__pkg__",
+        "//android/pose_hil:__pkg__",
     ],
     deps = [":app_lib"],
 )
