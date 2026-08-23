@@ -1,5 +1,12 @@
 # Codex Working Agreement
 
+## Current project handoff
+
+- Before continuing Android dual-phone field-readiness work, read
+  `docs/CURRENT_HANDOFF.md` and `TODO.md`. The handoff records the exact device/APK state, retained
+  evidence, recent failures, and ordered recovery commands that are intentionally too transient for
+  this working agreement.
+
 ## Default validation loop
 
 - Treat Bazel targets as the canonical build and test interface. Do not add
@@ -10,13 +17,27 @@
   wrappers enforce `-Wall -Wextra -Wpedantic -Werror`; bypass them only for a
   documented vendor or toolchain boundary.
 - Run `bazel test //...` after software-only changes.
+- Keep formatting, lint, and static-analysis aspects out of the ordinary test
+  and physical-HIL loops. Run them once at the pre-commit checkpoint:
+
+  ```bash
+  bazel test --config=precommit -c opt //...
+  ```
+
+- The default wildcard excludes manual tests from compilation. After changing
+  HIL-only code, statically check every manual target without executing it:
+
+  ```bash
+  bazel build --config=manual_test_static_check //...
+  ```
+
 - Keep ASan and UBSan out of the normal iteration loop because the full builds
   are expensive. Run them immediately before committing capture, timing,
   retention, or encoding changes, or earlier only when investigating a
-  sanitizer-relevant failure. The pre-commit validation is:
+  sanitizer-relevant failure. The sanitizer portion of pre-commit validation
+  is:
 
   ```bash
-  bazel test -c opt //...
   bazel test --config=asan //...
   bazel test --config=ubsan //...
   ```
