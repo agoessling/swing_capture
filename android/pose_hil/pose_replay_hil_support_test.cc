@@ -48,6 +48,9 @@ int main() {
       "--es", "pose_replay_clip",           "input.mp4",
   };
   assert(extras == expected);
+  const pose_hil::PoseReplayHilInputs npu =
+      pose_hil::ResolvePoseReplayHilInputs("", "", "", "npu_required", "", "");
+  assert(npu.delegate_policy == "npu_required");
   assert(pose_hil::PoseReplayReportReadShellCommand() ==
          "test -f files/reports/latest.json && cat files/reports/latest.json");
 

@@ -66,6 +66,17 @@ CameraStatus FakeStatus(CameraRole role, std::string serial) {
               .resize_milliseconds = 0.0,
               .encode_milliseconds = 1.0,
               .total_milliseconds = 5.0,
+              .latest_capture_frame_id = 811,
+              .latest_capture_age_milliseconds = 3.0,
+              .latest_sink_frame_id = 810,
+              .latest_sink_completion_age_milliseconds = 4.0,
+              .latest_sampler_frame_id = 809,
+              .latest_sampler_completion_age_milliseconds = 5.0,
+              .sampled_sequence = 44,
+              .sampled_age_milliseconds = 7.0,
+              .render_queue_milliseconds = 1.0,
+              .renderer_stage = "idle",
+              .render_pending = false,
           },
   };
 }
@@ -98,6 +109,25 @@ class FakeBackend final : public StationBackend {
         .height = full_resolution ? 2U : 1U,
         .media_type = "image/png",
         .bytes = std::string("\x89PNG\r\n\x1a\n", 8),
+        .performance =
+            PreviewPerformanceStatus{
+                .media_type = "image/png",
+                .encoded_bytes = 8,
+                .source_age_milliseconds = 18.0,
+                .rendered_age_milliseconds = 12.0,
+                .total_milliseconds = 5.0,
+                .latest_capture_frame_id = 811,
+                .latest_capture_age_milliseconds = 3.0,
+                .latest_sink_frame_id = 810,
+                .latest_sink_completion_age_milliseconds = 4.0,
+                .latest_sampler_frame_id = 809,
+                .latest_sampler_completion_age_milliseconds = 5.0,
+                .sampled_sequence = 44,
+                .sampled_age_milliseconds = 7.0,
+                .render_queue_milliseconds = 1.0,
+                .renderer_stage = "idle",
+                .render_pending = false,
+            },
     };
   }
 
@@ -248,12 +278,36 @@ void TestStatusAndPreviewRoutes() {
   assert(status->get_header_value("Content-Type").starts_with("application/json"));
   const nlohmann::json parsed = nlohmann::json::parse(status->body);
   assert(parsed.at("schema_version") == 1);
+  assert(parsed.at("service_instance_id").is_string());
+  assert(!parsed.at("service_instance_id").get<std::string>().empty());
   assert(parsed.at("mode") == "setup_preview");
   assert(parsed.at("cameras").size() == 2);
   assert(parsed.at("cameras").at(0).at("role") == "down_the_line");
   assert(parsed.at("cameras").at(0).at("error") == "");
   assert(parsed.at("cameras").at(0).at("preview_performance").at("media_type") == "image/jpeg");
   assert(parsed.at("cameras").at(0).at("preview_performance").at("total_ms") == 5.0);
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("latest_capture_frame_id") ==
+         "811");
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("latest_sink_frame_id") == "810");
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("latest_sampler_frame_id") ==
+         "809");
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("sampled_sequence") == 44);
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("render_queue_ms") == 1.0);
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("renderer_stage") == "idle");
+  assert(parsed.at("cameras").at(0).at("preview_performance").at("render_pending") == false);
+
+  const auto repeated_status = client.Get("/api/v1/status");
+  assert(repeated_status && repeated_status->status == 200);
+  assert(nlohmann::json::parse(repeated_status->body).at("service_instance_id") ==
+         parsed.at("service_instance_id"));
+
+  FakeBackend second_backend;
+  TestServer second_server(second_backend);
+  httplib::Client second_client("127.0.0.1", second_server.port());
+  const auto second_status = second_client.Get("/api/v1/status");
+  assert(second_status && second_status->status == 200);
+  assert(nlohmann::json::parse(second_status->body).at("service_instance_id") !=
+         parsed.at("service_instance_id"));
 
   const auto png = client.Get("/api/v1/cameras/down_the_line/preview?sequence=41");
   assert(png);
@@ -261,6 +315,28 @@ void TestStatusAndPreviewRoutes() {
   assert(png->get_header_value("Content-Type").starts_with("image/png"));
   assert(png->get_header_value("Cache-Control") == "no-store");
   assert(png->get_header_value("X-Preview-Sequence") == "42");
+  assert(png->get_header_value("X-Preview-Requested-Sequence") == "41");
+  assert(png->get_header_value("X-Preview-Latest-Capture-Frame-Id") == "811");
+  assert(png->get_header_value("X-Preview-Latest-Capture-Age-Ms") == "3.000000");
+  assert(png->get_header_value("X-Preview-Latest-Sink-Frame-Id") == "810");
+  assert(png->get_header_value("X-Preview-Latest-Sink-Completion-Age-Ms") == "4.000000");
+  assert(png->get_header_value("X-Preview-Latest-Sampler-Frame-Id") == "809");
+  assert(png->get_header_value("X-Preview-Latest-Sampler-Completion-Age-Ms") == "5.000000");
+  assert(png->get_header_value("X-Preview-Sampled-Sequence") == "44");
+  assert(png->get_header_value("X-Preview-Renderer-Stage") == "idle");
+  assert(png->get_header_value("X-Preview-Render-Pending") == "false");
+  assert(!png->get_header_value("X-Preview-Server-Handler-Ms").empty());
+  const double backend_milliseconds =
+      std::stod(png->get_header_value("X-Preview-Server-Backend-Ms"));
+  const double response_prepare_milliseconds =
+      std::stod(png->get_header_value("X-Preview-Server-Response-Prepare-Ms"));
+  const double handler_milliseconds =
+      std::stod(png->get_header_value("X-Preview-Server-Handler-Ms"));
+  assert(backend_milliseconds >= 0.0);
+  assert(response_prepare_milliseconds >= 0.0);
+  assert(handler_milliseconds >= backend_milliseconds);
+  assert(handler_milliseconds >= response_prepare_milliseconds);
+  assert(png->get_header_value("Server-Timing").find("preview_handler;dur=") != std::string::npos);
   assert(png->body == std::string("\x89PNG\r\n\x1a\n", 8));
 
   const auto full = client.Get("/api/v1/cameras/down_the_line/preview?sequence=42&full=1");

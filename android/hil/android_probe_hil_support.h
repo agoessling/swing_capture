@@ -55,9 +55,16 @@ struct RetainedManifestInspection {
 struct DisplayPowerStateInspection {
   bool non_interactive = false;
   bool display_off = false;
+  bool interaction_state_known = false;
+  bool display_state_known = false;
   std::string diagnostic;
 
-  [[nodiscard]] bool confirmed_off() const noexcept { return non_interactive && display_off; }
+  [[nodiscard]] bool confirmed_off() const noexcept {
+    return interaction_state_known && display_state_known && non_interactive && display_off;
+  }
+  [[nodiscard]] bool confirmed_on() const noexcept {
+    return interaction_state_known && display_state_known && !non_interactive && !display_off;
+  }
 };
 
 struct DisplayPowerStateDumps {

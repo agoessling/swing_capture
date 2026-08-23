@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,6 +31,13 @@ struct FeatherDeviceInfo {
   std::uint32_t tone_maximum_frequency_hz = 0;
   std::uint32_t tone_minimum_level_permille = 0;
   std::uint32_t tone_maximum_level_permille = 0;
+  std::uint32_t pcm_sample_rate_hz = 0;
+  std::uint32_t pcm_maximum_samples = 0;
+  std::uint32_t pcm_maximum_chunk_bytes = 0;
+  std::uint32_t pcm_minimum_lead_microseconds = 0;
+  std::uint32_t pcm_minimum_gain_permille = 0;
+  std::uint32_t pcm_maximum_gain_permille = 0;
+  std::uint32_t pcm_white_microseconds = 0;
   std::uint32_t swing_start_lead_microseconds = 0;
   std::uint32_t swing_step_microseconds = 0;
   std::uint32_t swing_pre_steps = 0;
@@ -178,6 +186,62 @@ struct FeatherSwingReceipt {
   FeatherResponse done;
 };
 
+struct FeatherPcmUploadReceipt {
+  std::uint32_t request_id = 0;
+  std::uint32_t sample_rate_hz = 0;
+  std::uint32_t sample_count = 0;
+  std::uint32_t byte_count = 0;
+  std::uint32_t source_crc32 = 0;
+  std::uint32_t committed_crc32 = 0;
+  std::vector<FeatherResponse> acknowledgements;
+  std::chrono::steady_clock::time_point host_upload_started;
+  std::chrono::steady_clock::time_point host_commit_received;
+};
+
+struct FeatherPcmPlaybackReceipt {
+  std::uint32_t request_id = 0;
+  std::uint64_t accepted_device_microseconds = 0;
+  std::uint64_t scheduled_audio_device_microseconds = 0;
+  std::uint64_t audio_command_device_microseconds = 0;
+  std::uint64_t audio_lateness_microseconds = 0;
+  std::uint64_t scheduled_marker_device_microseconds = 0;
+  std::uint64_t marker_device_microseconds = 0;
+  std::uint64_t marker_lateness_microseconds = 0;
+  std::uint64_t marker_offset_microseconds = 0;
+  std::uint64_t command_delta_microseconds = 0;
+  std::uint64_t command_delta_error_microseconds = 0;
+  std::uint64_t white_end_device_microseconds = 0;
+  std::uint64_t audio_done_observed_device_microseconds = 0;
+  std::uint64_t end_device_microseconds = 0;
+  std::uint64_t elapsed_device_microseconds = 0;
+  std::uint32_t requested_lead_microseconds = 0;
+  std::uint32_t sample_rate_hz = 0;
+  std::uint32_t sample_count = 0;
+  std::uint32_t marker_sample = 0;
+  std::uint32_t gain_permille = 0;
+  std::uint32_t brightness = 0;
+  std::uint32_t source_crc32 = 0;
+  std::uint32_t expected_played_crc32 = 0;
+  std::uint32_t played_crc32 = 0;
+  std::uint32_t white_microseconds = 0;
+  std::string prepare_source;
+  bool rail_powered_at_acknowledgement = false;
+  bool prepared_at_acknowledgement = false;
+  bool outputs_inactive_at_completion = false;
+  bool pixel_off_at_completion = false;
+  bool i2s_inactive_at_completion = false;
+  bool rail_powered_at_completion = false;
+  bool prepared_at_completion = false;
+  std::chrono::steady_clock::time_point host_command_write_started;
+  std::chrono::steady_clock::time_point host_command_sent;
+  std::chrono::steady_clock::time_point host_acknowledgement_received;
+  std::chrono::steady_clock::time_point host_start_received;
+  std::chrono::steady_clock::time_point host_done_received;
+  FeatherResponse acknowledgement;
+  FeatherResponse started;
+  FeatherResponse done;
+};
+
 enum class FeatherHilTransactionStage {
   kQueryWrite,
   kQueryResponse,
@@ -189,6 +253,10 @@ enum class FeatherHilTransactionStage {
   kImpact,
   kPostPhase,
   kDone,
+  kPcmBegin,
+  kPcmChunk,
+  kPcmCommit,
+  kPcmAbort,
 };
 
 [[nodiscard]] std::string_view FeatherHilTransactionStageName(
@@ -206,6 +274,8 @@ struct FeatherHilFailureEvidence {
   std::optional<FeatherStimulusReceipt> stimulus_receipt;
   std::optional<FeatherCalibrationReceipt> calibration_receipt;
   std::optional<FeatherSwingReceipt> swing_receipt;
+  std::optional<FeatherPcmUploadReceipt> pcm_upload_receipt;
+  std::optional<FeatherPcmPlaybackReceipt> pcm_playback_receipt;
   std::optional<FeatherResponse> offending_response;
 };
 
@@ -233,6 +303,11 @@ class FeatherHilController final {
                                                 std::chrono::microseconds duration,
                                                 std::uint32_t frequency_hz,
                                                 std::uint32_t level_permille);
+  [[nodiscard]] FeatherPcmUploadReceipt UploadPcm16(std::span<const std::int16_t> samples);
+  [[nodiscard]] FeatherPcmPlaybackReceipt PlayUploadedPcm(std::chrono::microseconds lead,
+                                                          std::uint32_t gain_permille,
+                                                          std::uint32_t brightness,
+                                                          std::uint32_t marker_sample);
   [[nodiscard]] FeatherCalibrationReceipt CalibrateSwingBrightness();
   [[nodiscard]] FeatherSwingReceipt RunSyntheticSwing(std::uint32_t brightness);
 
@@ -252,12 +327,22 @@ class FeatherHilController final {
                                                    const StimulusCommand &command);
   [[nodiscard]] FeatherCalibrationReceipt RunCalibration(std::uint32_t request_id);
   [[nodiscard]] FeatherSwingReceipt RunSwing(std::uint32_t request_id, std::uint32_t brightness);
+  [[nodiscard]] FeatherPcmUploadReceipt RunPcmUpload(std::uint32_t request_id,
+                                                     std::span<const std::int16_t> samples);
+  [[nodiscard]] FeatherPcmPlaybackReceipt RunPcmPlayback(std::uint32_t request_id,
+                                                         std::uint32_t lead_microseconds,
+                                                         std::uint32_t gain_permille,
+                                                         std::uint32_t brightness,
+                                                         std::uint32_t marker_sample);
+  void BestEffortAbortPcm(std::uint32_t request_id) noexcept;
   [[nodiscard]] std::uint32_t NextRequestId();
   [[nodiscard]] const FeatherDeviceInfo &RequireNegotiated() const;
 
   FeatherHilSerial *serial_;
   std::uint32_t next_request_id_;
   std::optional<FeatherDeviceInfo> device_info_;
+  std::optional<FeatherPcmUploadReceipt> pcm_upload_;
+  std::vector<std::int16_t> pcm_samples_;
 };
 
 }  // namespace swing_capture::hil

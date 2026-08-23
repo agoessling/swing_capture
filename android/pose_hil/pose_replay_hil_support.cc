@@ -90,9 +90,11 @@ PoseReplayHilInputs ResolvePoseReplayHilInputs(
   inputs.hitting_region = compact_region;
   inputs.delegate_policy = delegate_policy.empty() ? "gpu_preferred" : std::string(delegate_policy);
   if (inputs.delegate_policy != "cpu_only" && inputs.delegate_policy != "gpu_preferred" &&
-      inputs.delegate_policy != "gpu_required") {
+      inputs.delegate_policy != "gpu_required" && inputs.delegate_policy != "npu_preferred" &&
+      inputs.delegate_policy != "npu_required") {
     throw std::invalid_argument(
-        "pose replay delegate must be cpu_only, gpu_preferred, or gpu_required");
+        "pose replay delegate must be cpu_only, gpu_preferred, gpu_required, npu_preferred, or "
+        "npu_required");
   }
   inputs.expectation = expectation.empty() ? "observe_only" : std::string(expectation);
   if (inputs.expectation != "observe_only" && inputs.expectation != "require_arm" &&

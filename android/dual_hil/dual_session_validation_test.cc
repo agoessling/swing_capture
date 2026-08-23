@@ -118,6 +118,25 @@ Fixture MakeFixture(std::string_view role, std::string_view node_id, std::string
            {"actual_post_roll_us", 499000},
            {"trigger_timestamp_uncertainty_ns", 400000},
            {"local_nearest_frame_residual_us", 0},
+           {"startup_timing",
+            {
+                {"schema_version", 1},
+                {"clock", "CLOCK_BOOTTIME"},
+                {"arm_requested_elapsed_realtime_ns", "100"},
+                {"engine_started_elapsed_realtime_ns", "120"},
+                {"first_camera_frame_elapsed_realtime_ns", "210"},
+                {"first_usable_encoded_frame_elapsed_realtime_ns", "260"},
+                {"full_pre_roll_ready_elapsed_realtime_ns", "2800"},
+                {"arm_to_engine_start_ns", "20"},
+                {"engine_start_to_first_camera_frame_ns", "90"},
+                {"arm_to_first_camera_frame_ns", "110"},
+                {"first_camera_frame_to_first_usable_encoded_frame_ns", "50"},
+                {"arm_to_first_usable_encoded_frame_ns", "160"},
+                {"first_usable_encoded_frame_to_full_pre_roll_ready_ns", "2540"},
+                {"arm_to_full_pre_roll_ready_ns", "2700"},
+                {"startup_continuity_reset_count", "0"},
+                {"maximum_startup_continuity_gap_ns", "0"},
+            }},
        }},
   };
   return {.report = report.dump(), .manifest = manifest.dump(), .media = media};
@@ -161,6 +180,8 @@ void NominalDualSessionPasses() {
   });
   assert(down_the_line_evidence.frame_count == 481U);
   assert(down_the_line_evidence.measured_sensor_fps > 239.9);
+  assert(down_the_line_evidence.startup_timing.arm_to_first_camera_frame_ns == 110U);
+  assert(down_the_line_evidence.startup_timing.arm_to_full_pre_roll_ready_ns == 2700U);
   assert(ValidateFfprobeTimeline(down_the_line_evidence, MakeFfprobe(481U, kPixel6Profile)) <=
          160L);
   assert(ValidateFfprobeTimeline(face_on_evidence, MakeFfprobe(481U, kPixel5aProfile)) <= 160L);
@@ -273,6 +294,30 @@ void InvalidEvidenceFails() {
   expect_invalid_manifest(invalid_manifest);
 
   invalid_manifest = Json::parse(nominal.manifest);
+  invalid_manifest["android_capture"]["startup_timing"]["arm_to_full_pre_roll_ready_ns"] = "2701";
+  expect_invalid_manifest(invalid_manifest);
+
+  invalid_manifest = Json::parse(nominal.manifest);
+  invalid_manifest["android_capture"]["startup_timing"]["first_camera_frame_elapsed_realtime_ns"] =
+      "0210";
+  expect_invalid_manifest(invalid_manifest);
+
+  invalid_manifest = Json::parse(nominal.manifest);
+  invalid_manifest["android_capture"]["startup_timing"]["startup_continuity_reset_count"] = "1";
+  invalid_manifest["android_capture"]["startup_timing"]["maximum_startup_continuity_gap_ns"] =
+      "5000000";
+  expect_invalid_manifest(invalid_manifest);
+
+  invalid_manifest = Json::parse(nominal.manifest);
+  invalid_manifest["android_capture"].erase("startup_timing");
+  expect_invalid_manifest(invalid_manifest);
+
+  invalid_manifest = Json::parse(nominal.manifest);
+  invalid_manifest["android_capture"]["startup_timing"]["engine_started_elapsed_realtime_ns"] =
+      "99";
+  expect_invalid_manifest(invalid_manifest);
+
+  invalid_manifest = Json::parse(nominal.manifest);
   const std::int64_t gapped_sensor =
       std::stoll(
           invalid_manifest["views"][0]["frames"][100]["device_timestamp"].get<std::string>()) +
@@ -317,6 +362,29 @@ void ConservativeTimingBoundIncludesResidual() {
   assert(failing.minimum_residual_us == -20001L);
   assert(failing.total_bound_us == 20001L);
   assert(!failing.passed);
+  const auto pcm_quantized_bound = EvaluateTimingCorrelation(TimingCorrelationInspection{
+      .acceptance_limit_us = 25000,
+      .optical_onset_lower_bound_us = -24000,
+      .optical_onset_upper_bound_us = -15000,
+      .audio_trigger_uncertainty_ns = 500000,
+      .media_pts_residual_us = 500,
+  });
+  assert(pcm_quantized_bound.minimum_residual_us == -25000L);
+  assert(pcm_quantized_bound.acceptance_limit_us == 25000L);
+  assert(pcm_quantized_bound.passed);
+  const auto retained_20260823_failure = EvaluateTimingCorrelation(TimingCorrelationInspection{
+      .acceptance_limit_us = 25000,
+      .optical_onset_lower_bound_us = -24999,
+      .optical_onset_upper_bound_us = -16665,
+      .audio_trigger_uncertainty_ns = 277241,
+      .media_pts_residual_us = 293,
+  });
+  assert(retained_20260823_failure.audio_trigger_uncertainty_us == 278L);
+  assert(retained_20260823_failure.accounted_uncertainty_us == 571L);
+  assert(retained_20260823_failure.minimum_residual_us == -25570L);
+  assert(retained_20260823_failure.maximum_residual_us == -16094L);
+  assert(retained_20260823_failure.total_bound_us == 25570L);
+  assert(!retained_20260823_failure.passed);
   const auto positive_endpoint = EvaluateTimingCorrelation(TimingCorrelationInspection{
       .optical_onset_lower_bound_us = 11000,
       .optical_onset_upper_bound_us = 19400,
@@ -339,6 +407,11 @@ void ConservativeTimingBoundIncludesResidual() {
         .optical_onset_lower_bound_us = 1,
         .optical_onset_upper_bound_us = 0,
         .audio_trigger_uncertainty_ns = -1,
+    }));
+  });
+  ExpectFailure([] {
+    static_cast<void>(EvaluateTimingCorrelation(TimingCorrelationInspection{
+        .acceptance_limit_us = 0,
     }));
   });
 }

@@ -62,9 +62,84 @@ test("production document uses root-relative bundle assets", async () => {
   const document = await readFile(path.join(path.resolve(staticRoot), "index.html"), "utf8");
   expect(document).toContain('href="/app.css"');
   expect(document).toContain('src="/app.js"');
+  expect(document).toContain('<meta name="referrer" content="no-referrer" />');
+});
+
+test("retains attributable setup-preview evidence in an accessible disclosure", async ({
+  page,
+}) => {
+  const setupUrl = new URL(stationUrl);
+  setupUrl.searchParams.set("preview_stall", "capture_sink");
+  setupUrl.hash = "setup";
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(setupUrl.toString());
+
+  await expect(page.getByRole("heading", { name: "Camera setup" })).toBeVisible();
+  const disclosure = page.locator("details.preview-timing-diagnostics");
+  const summary = disclosure.locator("summary");
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(disclosure).toHaveAttribute("open", "");
+  await expect(disclosure).toContainText("host capture-ring sink");
+  await expect(disclosure).toContainText("Concurrent evidence");
+  await expect(disclosure).toContainText("not causal proof");
+  await expect(disclosure.locator("time")).toHaveAttribute("datetime", /.+/);
+
+  const outputDirectory = process.env.TEST_UNDECLARED_OUTPUTS_DIR;
+  if (outputDirectory !== undefined) {
+    await writeFile(
+      path.join(outputDirectory, "preview-timing-diagnostics.png"),
+      await disclosure.screenshot({ animations: "disabled" }),
+    );
+  }
+});
+
+test("coordinates continuous field recording from the review page", async ({ page }) => {
+  const fieldUrl = new URL(stationUrl);
+  fieldUrl.searchParams.set("field_recording", "1");
+  await page.goto(fieldUrl.toString());
+
+  const panel = page.getByRole("region", { name: "Continuous test recording" });
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("Down the line");
+  await expect(panel).toContainText("Face on");
+  await panel.getByRole("button", { name: "Start field recording" }).click();
+  await expect(panel.getByRole("button", { name: "Stop both phones" })).toBeVisible();
+  await expect(panel.getByText("Recording", { exact: true })).toHaveCount(3);
+
+  await panel.getByRole("button", { name: "Stop both phones" }).click();
+  await expect(panel.getByRole("button", { name: "Start field recording" })).toBeVisible();
+  await panel.getByText("Completed recordings").click();
+  await expect(panel.getByRole("link", { name: "Video" })).toHaveCount(2);
+  await expect(panel.getByRole("link", { name: "Audio" })).toHaveCount(2);
+  await expect(panel.getByRole("link", { name: "Manifest" })).toHaveCount(2);
+
+  const outputDirectory = process.env.TEST_UNDECLARED_OUTPUTS_DIR;
+  if (outputDirectory !== undefined) {
+    await writeFile(
+      path.join(outputDirectory, "field-recording-controls.png"),
+      await panel.screenshot(),
+    );
+  }
 });
 
 test("plays and steps a synchronized fixture clip", async ({ page }) => {
+  // Reproduce the legal initialization race where requestVideoFrameCallback first reports the
+  // sample displayed before the player's seek. The recovery seek must still select the requested
+  // frame through an interior point rather than its ambiguous MP4 timestamp boundary.
+  await page.addInitScript(() => {
+    const requestVideoFrameCallback = HTMLVideoElement.prototype.requestVideoFrameCallback;
+    const injected = new WeakSet<HTMLVideoElement>();
+    HTMLVideoElement.prototype.requestVideoFrameCallback = function (callback) {
+      if (injected.has(this)) {
+        return requestVideoFrameCallback.call(this, callback);
+      }
+      injected.add(this);
+      return requestVideoFrameCallback.call(this, (now, metadata) =>
+        callback(now, { ...metadata, mediaTime: 0 }),
+      );
+    };
+  });
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto(stationUrl);
@@ -96,6 +171,7 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
   const browserTiming = JSON.parse(serializedBrowserTiming ?? "null") as {
     schema_version: number;
     presentation_method: string;
+    impact_frame_media_time_seconds: Record<string, number>;
     manifest_fetch_duration_ms: number;
     manifest_response_to_both_frames_ms: number;
     audio_confirmation_to_both_frames_lower_bound_ms: number;
@@ -103,6 +179,10 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
   };
   expect(browserTiming.schema_version).toBe(1);
   expect(browserTiming.presentation_method).toBe("requestVideoFrameCallback");
+  expect(browserTiming.impact_frame_media_time_seconds).toEqual({
+    down_the_line: 1.5,
+    face_on: 1.5,
+  });
   expect(browserTiming.manifest_fetch_duration_ms).toBeGreaterThanOrEqual(0);
   expect(browserTiming.manifest_response_to_both_frames_ms).toBeGreaterThanOrEqual(0);
   expect(
@@ -136,11 +216,7 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
     { duration: 3, seekable: 3 },
     { duration: 3, seekable: 3 },
   ]);
-  expect(
-    await videos.evaluateAll((elements) =>
-      elements.map((video) => Number((video as HTMLVideoElement).currentTime.toFixed(6))),
-    ),
-  ).toEqual([1.499985, 1.499985]);
+  expectVideoTimesInFrameInterval(await videoTimes(videos), 1.499985, 1.533318);
 
   const playbackControls = page.getByRole("toolbar", { name: "Playback controls" });
   await playbackControls.getByRole("button", { name: "Play" }).focus();
@@ -210,10 +286,7 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
 
   await page.getByRole("button", { name: "Next frame" }).click();
   await expect(page.getByText("Frame 47 of 90")).toBeVisible();
-  const steppedTimes = await videos.evaluateAll((elements) =>
-    elements.map((video) => Number((video as HTMLVideoElement).currentTime.toFixed(6))),
-  );
-  expect(steppedTimes).toEqual([1.533318, 1.533318]);
+  expectVideoTimesInFrameInterval(await videoTimes(videos), 1.533318, 1.566651);
 
   await page.getByRole("combobox", { name: "Playback speed" }).selectOption("0.5");
   expect(
@@ -521,6 +594,114 @@ test("configures and associates two Android phones at fixed viewports", async ({
   await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
   await expect(page.getByText("Frame 46 of 90")).toBeVisible();
 });
+
+test.describe("golden image visual regression", () => {
+  test.use({
+    colorScheme: "dark",
+    contextOptions: { reducedMotion: "reduce" },
+    deviceScaleFactor: 1,
+    locale: "en-US",
+    timezoneId: "UTC",
+    viewport: { width: 1440, height: 1000 },
+  });
+
+  test("keeps the synchronized review player stable at desktop and phone viewports", async ({
+    page,
+  }) => {
+    await page.goto(stationUrl);
+    await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
+    await expect(page.getByText("Frame 46 of 90")).toBeVisible();
+
+    const videos = page.locator('video[aria-label$="recorded swing"]');
+    await expect(videos).toHaveCount(2);
+    await expect
+      .poll(async () =>
+        videos.evaluateAll((elements) =>
+          elements.every((element) => {
+            const video = element as HTMLVideoElement;
+            return (
+              video.currentTime >= 1.499985 &&
+              video.currentTime < 1.533318 &&
+              video.readyState === HTMLMediaElement.HAVE_ENOUGH_DATA &&
+              !video.seeking
+            );
+          }),
+        ),
+      )
+      .toBe(true);
+    await normalizeRuntimeBrowserTiming(page);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect(page).toHaveScreenshot("review-desktop.png", {
+      animations: "disabled",
+      caret: "hide",
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    const playbackControls = page.getByRole("toolbar", { name: "Playback controls" });
+    // setViewportSize can resolve before Chromium has committed the responsive style pass. If the
+    // scroll is calculated while this toolbar still has its desktop flex geometry, scroll anchoring
+    // shifts the final mobile screenshot down to the page footer. Synchronize on the mobile layout
+    // itself before choosing the screenshot's semantic anchor.
+    await expect(playbackControls).toHaveCSS("display", "grid");
+    await normalizeRuntimeBrowserTiming(page);
+    await playbackControls.evaluate((element) =>
+      element.scrollIntoView({ block: "center", inline: "nearest" }),
+    );
+    await expect(playbackControls).toBeInViewport();
+    expect(
+      await page.evaluate(() => ({
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+      })),
+    ).toEqual({ documentWidth: 390, viewportWidth: 390 });
+    await expect(page).toHaveScreenshot("review-phone.png", {
+      animations: "disabled",
+      caret: "hide",
+    });
+  });
+
+  test("keeps two-phone setup stable at desktop and phone viewports", async ({ page }) => {
+    const phoneSetupUrl = new URL(stationUrl);
+    phoneSetupUrl.searchParams.set("phone_setup", "dual");
+    phoneSetupUrl.hash = "setup";
+    await page.goto(phoneSetupUrl.toString());
+
+    await expect(page.getByRole("heading", { name: "Phone setup" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Two-phone station configured" })).toBeVisible();
+    await expect(page.locator("article.phone-card")).toHaveCount(2);
+    await expect(page.getByText("Preview unavailable")).toHaveCount(2);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect(page).toHaveScreenshot("phone-setup-desktop.png", {
+      animations: "disabled",
+      caret: "hide",
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("heading", { name: "Phone setup" }).scrollIntoViewIfNeeded();
+    expect(
+      await page.evaluate(() => ({
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+      })),
+    ).toEqual({ documentWidth: 390, viewportWidth: 390 });
+    await expect(page).toHaveScreenshot("phone-setup-phone.png", {
+      animations: "disabled",
+      caret: "hide",
+    });
+  });
+});
+
+async function normalizeRuntimeBrowserTiming(page: Page): Promise<void> {
+  // These five values intentionally measure the current browser process. Preserve their labels,
+  // layout, and typography in the golden while replacing only the non-repeatable numeric samples.
+  const dynamicValues = page.locator(".browser-profile dl > div:not(:first-child) dd");
+  await expect(dynamicValues).toHaveCount(5);
+  await dynamicValues.evaluateAll((elements) => {
+    for (const element of elements) {
+      element.textContent = "0.00 ms";
+    }
+  });
+}
 
 test("rejects an incompatible two-phone pose topology", async ({ page }) => {
   const phoneSetupUrl = new URL(stationUrl);
@@ -1236,6 +1417,24 @@ function videoTimes(videos: import("@playwright/test").Locator): Promise<number[
   return videos.evaluateAll((elements) =>
     elements.map((element) => (element as HTMLVideoElement).currentTime),
   );
+}
+
+function expectVideoTimesInFrameInterval(
+  times: readonly number[],
+  frameMediaTimeSeconds: number,
+  nextFrameMediaTimeSeconds: number,
+): void {
+  expect(times).toHaveLength(2);
+  for (const [index, time] of times.entries()) {
+    expect(
+      time,
+      `video ${String(index)} currentTime must select the desired sample interval`,
+    ).toBeGreaterThanOrEqual(frameMediaTimeSeconds);
+    expect(
+      time,
+      `video ${String(index)} currentTime must remain before the next sample boundary`,
+    ).toBeLessThan(nextFrameMediaTimeSeconds);
+  }
 }
 
 async function serveFixture(

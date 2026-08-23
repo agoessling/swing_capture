@@ -18,6 +18,21 @@ cc_test(
 )
 
 cc_library(
+    name = "pcm_clip",
+    srcs = ["pcm_clip.c"],
+    hdrs = ["pcm_clip.h"],
+    visibility = ["//visibility:public"],
+    deps = [":hil_protocol"],
+)
+
+cc_test(
+    name = "pcm_clip_test",
+    size = "small",
+    srcs = ["pcm_clip_test.cc"],
+    deps = [":pcm_clip"],
+)
+
+cc_library(
     name = "swing_sequence",
     srcs = ["swing_sequence.c"],
     hdrs = ["swing_sequence.h"],
@@ -78,6 +93,7 @@ rp2040_firmware(
     deps = [
         ":audio_i2s_pio",
         ":hil_protocol",
+        ":pcm_clip",
         ":fixture_neopixel_pio",
         ":swing_sequence",
         "@pico-sdk//src/rp2_common/hardware_clocks",

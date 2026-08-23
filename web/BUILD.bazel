@@ -4,7 +4,11 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 load("@npm//web:@playwright/test/package_json.bzl", playwright_bin = "bin")
-load("//tools:strict_cc.bzl", strict_cc_test = "cc_test")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load(":browser_h264_qualification.bzl", "browser_h264_qualification_matrix")
+load("//tools:strict_cc.bzl", strict_cc_library = "cc_library", strict_cc_test = "cc_test")
 
 npm_link_all_packages(name = "node_modules")
 
@@ -19,18 +23,31 @@ ts_config(
     deps = ["//:tsconfig"],
 )
 
+ts_config(
+    name = "android_field_recording_hil_tsconfig",
+    testonly = True,
+    src = "android_field_recording_hil.tsconfig.json",
+    deps = ["//:tsconfig_base"],
+)
+
 APP_SRCS = [
     "src/api.ts",
     "src/app.tsx",
     "src/application.tsx",
     "src/assets.d.ts",
+    "src/control_credential.ts",
+    "src/control_credential_bootstrap.ts",
     "src/diagnostic_feedback.tsx",
     "src/dual_node_review_api.ts",
     "src/fake_api.ts",
     "src/fake_node_setup_api.ts",
     "src/fake_review_api.ts",
+    "src/field_recording.tsx",
+    "src/live_status.ts",
     "src/node_setup_api.ts",
     "src/node_setup_app.tsx",
+    "src/node_pairing.ts",
+    "src/operational_health.ts",
     "src/paired_preview.ts",
     "src/review_api.ts",
     "src/review_app.tsx",
@@ -58,9 +75,15 @@ ts_project(
     name = "typescript",
     srcs = APP_SRCS + [
         "src/app.test.tsx",
+        "src/control_credential_bootstrap.test.ts",
         "src/demo.tsx",
         "src/dual_node_review_api.test.ts",
         "src/main.tsx",
+        "src/live_status.test.ts",
+        "src/node_pairing.test.ts",
+        "src/node_setup_pairing.test.tsx",
+        "src/node_setup_preview.test.tsx",
+        "src/production_integration.e2e.spec.ts",
         "src/review_app.test.tsx",
         "src/review.e2e.spec.ts",
         "playwright.config.ts",
@@ -69,6 +92,25 @@ ts_project(
     no_emit = True,
     transpiler = "tsc",
     tsconfig = ":tsconfig",
+)
+
+esbuild(
+    name = "control_credential_bootstrap_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/control_credential_bootstrap.test.ts"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/control_credential_bootstrap.test.ts",
+    output = "control_credential_bootstrap_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "control_credential_bootstrap_test",
+    size = "small",
+    entry_point = ":control_credential_bootstrap_test.js",
 )
 
 esbuild(
@@ -94,6 +136,113 @@ js_test(
     name = "dual_node_review_api_test",
     size = "small",
     entry_point = ":dual_node_review_api_test.js",
+)
+
+esbuild(
+    name = "live_status_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/live_status.test.ts"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/live_status.test.ts",
+    external = [
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "live_status_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "live_status_test",
+    size = "small",
+    entry_point = ":live_status_test.js",
+)
+
+esbuild(
+    name = "node_pairing_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/node_pairing.test.ts"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/node_pairing.test.ts",
+    external = [
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "node_pairing_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "node_pairing_test",
+    size = "small",
+    entry_point = ":node_pairing_test.js",
+)
+
+esbuild(
+    name = "node_setup_pairing_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/node_setup_pairing.test.tsx"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/node_setup_pairing.test.tsx",
+    external = [
+        "@testing-library/react",
+        "axe-core",
+        "jsdom",
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "node_setup_pairing_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "node_setup_pairing_test",
+    size = "small",
+    data = NPM_TEST_DEPS,
+    entry_point = ":node_setup_pairing_test.js",
+)
+
+esbuild(
+    name = "node_setup_preview_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/node_setup_preview.test.tsx"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/node_setup_preview.test.tsx",
+    external = [
+        "@testing-library/react",
+        "jsdom",
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "node_setup_preview_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "node_setup_preview_test",
+    size = "small",
+    data = NPM_TEST_DEPS,
+    entry_point = ":node_setup_preview_test.js",
 )
 
 esbuild(
@@ -184,7 +333,14 @@ js_test(
     size = "small",
     data = NPM_TEST_DEPS,
     entry_point = ":review_component_test.js",
-    tags = ["manual"],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "requires-android-phone",
+        "requires-lan",
+    ],
 )
 
 strict_cc_test(
@@ -242,16 +398,181 @@ playwright_bin.playwright_test(
         ":fixture_demo",
         ":static_app",
         "playwright.config.ts",
+        "src/control_credential.ts",
+        "src/dual_node_review_api.ts",
+        "src/live_status.ts",
+        "src/operational_health.ts",
+        "src/production_integration.e2e.spec.ts",
+        "src/review_api.ts",
         "src/review.e2e.spec.ts",
         ":node_modules/@playwright/test",
+        ":node_modules/axe-core",
         "@playwright//:chromium-headless-shell",
-    ],
+        "fixtures/production_h264/down-the-line.mp4",
+        "fixtures/production_h264/down-the-line-gop30.mp4",
+        "fixtures/production_h264/face-on.mp4",
+        "fixtures/production_h264/face-on-gop30.mp4",
+        "fixtures/production_h264/scenario.json",
+    ] + glob(["src/review.e2e.spec.ts-snapshots/*.png"], allow_empty = True),
     env = {
         "PLAYWRIGHT_BROWSERS_PATH": "$(rootpath @playwright//:chromium-headless-shell)/../",
         "SWING_CAPTURE_FIXTURE_APP": "$(rootpath :fixture_demo)",
+        "SWING_CAPTURE_PRODUCTION_H264_FIXTURE": "$(rootpath fixtures/production_h264/scenario.json)/..",
         "SWING_CAPTURE_STATIC_APP": "$(rootpath :static_app)",
     },
+    # Four isolated Playwright workers keep the wall time below 20 seconds but
+    # together use about a GiB, materially more memory than a Bazel small test. Reserve a
+    # realistic scheduler class while keeping the short timeout fail-closed.
+    size = "enormous",
+    timeout = "short",
+)
+
+# The checksum-pinned Chromium headless shell intentionally lacks proprietary AVC decoding. This
+# local, opt-in companion runs the same checked-in two-origin fixture through an installed Chrome
+# so the H.264 decode, nonblack-pixel, seek, and exact-frame assertions are still executable via a
+# Bazel target without weakening the hermetic default browser suite.
+strict_cc_test(
+    name = "system_h264_browser_test",
     size = "small",
+    srcs = ["run_test_executable.cc"],
+    args = [
+        "$(rootpath :browser_test)",
+        "test",
+        "--config",
+        "web/playwright.config.ts",
+        "--grep",
+        "two.*origins",
+    ],
+    data = [
+        ":browser_test",
+    ],
+    env = {
+        "SWING_CAPTURE_CHROME_EXECUTABLE": "/usr/bin/google-chrome",
+        "SWING_CAPTURE_REQUIRE_H264_DECODE": "1",
+    },
+    tags = [
+        "exclusive",
+        "local",
+        "manual",
+    ],
+)
+
+# Playwright's Firefox protocol requires its patched browser, so the installed stock Firefox cannot
+# be driven by //web:browser_test. This local companion uses the matching installed geckodriver and
+# the same checked-in one-second-GOP fixtures to make codec, HTTP Range, RVFC media-time, decoded
+# pixels, bidirectional GOP seeks, IDR-boundary stepping, repeatability, and playback mandatory.
+py_test(
+    name = "system_firefox_h264_browser_test",
+    size = "small",
+    srcs = ["system_firefox_h264_test.py"],
+    data = [
+        "fixtures/production_h264/down-the-line-gop30.mp4",
+        "fixtures/production_h264/face-on-gop30.mp4",
+    ],
+    main = "system_firefox_h264_test.py",
+    tags = [
+        "exclusive",
+        "local",
+        "manual",
+    ],
+)
+
+# Playwright's checksum-pinned WebKit is built on Ubuntu 24.04. This opt-in
+# browser gate extracts a checksum-pinned compatibility closure into the test
+# temporary directory, without changing host packages or weakening the
+# hermetic Chromium suite.
+py_library(
+    name = "webkit_ubuntu24_compat",
+    srcs = ["webkit_ubuntu24_compat.py"],
+)
+
+py_binary(
+    name = "webkit_ubuntu24_launcher",
+    srcs = ["webkit_ubuntu24_launcher.py"],
+    main = "webkit_ubuntu24_launcher.py",
+    deps = [":webkit_ubuntu24_compat"],
+)
+
+py_test(
+    name = "webkit_ubuntu24_compat_test",
+    size = "small",
+    srcs = ["webkit_ubuntu24_compat_test.py"],
+    deps = [":webkit_ubuntu24_compat"],
+)
+
+py_test(
+    name = "webkit_h264_browser_test",
+    size = "small",
+    srcs = ["webkit_ubuntu24_test_runner.py"],
+    args = [
+        "--browser-test",
+        "$(rootpath :browser_test)",
+        "--browser-launcher",
+        "$(rootpath :webkit_ubuntu24_launcher)",
+        "--webkit-root",
+        "$(rootpath @playwright//:webkit)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libicu74//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libxml2//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libwoff1//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libvpx9//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libevent//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libavif16//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libgav1//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_librav1e0//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libsvtav1//file)",
+        "--deb",
+        "$(rootpath @webkit_ubuntu24_libabsl//file)",
+        "--",
+        "test",
+        "--config",
+        "web/playwright.config.ts",
+        "--grep",
+        "two.*origins",
+    ],
+    data = [
+        ":browser_test",
+        ":webkit_ubuntu24_launcher",
+        "@playwright//:webkit",
+        "@webkit_ubuntu24_libabsl//file",
+        "@webkit_ubuntu24_libavif16//file",
+        "@webkit_ubuntu24_libevent//file",
+        "@webkit_ubuntu24_libgav1//file",
+        "@webkit_ubuntu24_libicu74//file",
+        "@webkit_ubuntu24_librav1e0//file",
+        "@webkit_ubuntu24_libsvtav1//file",
+        "@webkit_ubuntu24_libvpx9//file",
+        "@webkit_ubuntu24_libwoff1//file",
+        "@webkit_ubuntu24_libxml2//file",
+    ],
+    main = "webkit_ubuntu24_test_runner.py",
+    tags = [
+        "exclusive",
+        "local",
+        "manual",
+    ],
+    deps = [":webkit_ubuntu24_compat"],
+)
+
+# This is an inventory of the current opt-in browser qualification candidates,
+# not a declaration of the product's supported browser set. The macro makes an
+# accidental omission an analysis failure and provides one reproducible entry
+# point when release policy wants the complete candidate evidence.
+browser_h264_qualification_matrix(
+    name = "browser_h264_candidate_matrix",
+    qualifications = {
+        "chromium": ":system_h264_browser_test",
+        "firefox": ":system_firefox_h264_browser_test",
+        "webkit": ":webkit_h264_browser_test",
+    },
 )
 
 strict_cc_test(
@@ -291,4 +612,183 @@ copy_to_directory(
         "demo.html",
     ] + glob(["fixtures/**"]),
     visibility = ["//visibility:public"],
+)
+
+# Isolated direct-LAN browser HIL for the production app hosted by the configured Android nodes.
+ts_project(
+    name = "android_field_recording_browser_hil_typescript",
+    testonly = True,
+    srcs = [
+        "android_field_recording_hil.playwright.config.ts",
+        "src/android_field_recording_hil_contract.ts",
+        "src/android_field_recording_hil_contract.test.ts",
+        "src/android_field_recording_hil.e2e.spec.ts",
+    ],
+    deps = NPM_TEST_DEPS,
+    no_emit = True,
+    transpiler = "tsc",
+    tsconfig = ":android_field_recording_hil_tsconfig",
+)
+
+esbuild(
+    name = "android_field_recording_hil_contract_test_bundle",
+    testonly = True,
+    srcs = [
+        "src/android_field_recording_hil_contract.ts",
+        "src/android_field_recording_hil_contract.test.ts",
+    ],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/android_field_recording_hil_contract.test.ts",
+    output = "android_field_recording_hil_contract_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "android_field_recording_hil_contract_test",
+    size = "small",
+    entry_point = ":android_field_recording_hil_contract_test.js",
+)
+
+strict_cc_library(
+    name = "android_browser_hil_credentials",
+    srcs = [
+        "android_browser_hil_credentials.cc",
+    ],
+    hdrs = [
+        "android_browser_hil_credentials.h",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+strict_cc_test(
+    name = "android_browser_hil_credentials_test",
+    size = "small",
+    srcs = [
+        "android_browser_hil_credentials_test.cc",
+    ],
+    deps = [":android_browser_hil_credentials"],
+)
+
+strict_cc_library(
+    name = "android_phone_http_readiness",
+    srcs = ["android_phone_http_readiness.cc"],
+    hdrs = ["android_phone_http_readiness.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":android_browser_hil_credentials",
+        "//android/dual_hil:hil_http_client",
+    ],
+)
+
+strict_cc_test(
+    name = "android_phone_http_readiness_test",
+    size = "small",
+    srcs = ["android_phone_http_readiness_test.cc"],
+    deps = [":android_phone_http_readiness"],
+)
+
+strict_cc_library(
+    name = "android_field_recording_browser_hil_report_validation",
+    srcs = ["android_field_recording_browser_hil_report_validation.cc"],
+    hdrs = ["android_field_recording_browser_hil_report_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":android_browser_hil_credentials",
+        "@nlohmann_json//:json",
+    ],
+)
+
+strict_cc_test(
+    name = "android_field_recording_browser_hil_report_validation_test",
+    size = "small",
+    srcs = ["android_field_recording_browser_hil_report_validation_test.cc"],
+    deps = [
+        ":android_field_recording_browser_hil_report_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+playwright_bin.playwright_test(
+    name = "android_field_recording_browser_hil_playwright",
+    args = [
+        "test",
+        "--config",
+        "web/android_field_recording_hil.playwright.config.ts",
+    ],
+    data = [
+        "android_field_recording_hil.playwright.config.ts",
+        "src/android_field_recording_hil_contract.ts",
+        "src/android_field_recording_hil.e2e.spec.ts",
+        ":node_modules/@playwright/test",
+        ":node_modules/axe-core",
+        "@playwright//:chromium-headless-shell",
+    ],
+    env = {
+        "PLAYWRIGHT_BROWSERS_PATH": "$(rootpath @playwright//:chromium-headless-shell)/../",
+        "SWING_CAPTURE_CHROME_EXECUTABLE": "/usr/bin/google-chrome",
+        "SWING_CAPTURE_REQUIRE_H264_DECODE": "1",
+    },
+    size = "medium",
+    tags = ["manual"],
+)
+
+strict_cc_test(
+    name = "android_field_recording_browser_hil_test",
+    size = "medium",
+    srcs = [
+        "android_field_recording_browser_hil_launcher.cc",
+    ],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "$(rootpath //tools:android_apk_installer)",
+        "$(rootpath :android_field_recording_browser_hil_playwright)",
+        "test",
+        "--config",
+        "web/android_field_recording_hil.playwright.config.ts",
+    ],
+    data = [
+        ":android_field_recording_browser_hil_playwright",
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_browser_hil_credentials",
+        ":android_field_recording_browser_hil_report_validation",
+        ":android_phone_http_readiness",
+        "//android/dual_hil:android_apk_install",
+        "//android/dual_hil:hil_command",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# Prototype release policy: Chrome is the supported desktop browser. The local
+# fixture gate makes proprietary AVC decode and exact-frame behavior mandatory;
+# the physical gate binds the same web bundle to the exact two-phone APK and
+# direct-LAN start/stop/publication flow. Firefox and WebKit remain separately
+# runnable compatibility candidates, not release blockers.
+test_suite(
+    name = "prototype_browser_release_gate",
+    tests = [
+        ":android_field_recording_browser_hil_test",
+        ":system_h264_browser_test",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
 )

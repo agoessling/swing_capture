@@ -36,9 +36,9 @@
       "template_version": "0.1.0"
     },
     ".bazelrc.bazel_devtools": {
-      "base": "# Do not synthesize empty __init__.py files in Python runfiles trees.\ncommon --incompatible_default_to_explicit_init_py\n\n# Compile and check manual tests selected by wildcard target patterns, but do\n# not execute them. Manual non-test targets retain Bazel's normal exclusion.\nbuild --build_manual_tests\n\n# Apply checks to every target requested by `bazel test`.\ntest --aspects=//tools/bazel_devtools:aspects.bzl%ruff\ntest --aspects=//tools/bazel_devtools:aspects.bzl%basedpyright\ntest --aspects=//tools/bazel_devtools:aspects.bzl%ruff_format\ntest --aspects=//tools/bazel_devtools:aspects.bzl%clang_tidy\ntest --aspects=//tools/bazel_devtools:aspects.bzl%clang_format\ntest --aspects=//tools/bazel_devtools:aspects.bzl%biome_lint\ntest --aspects=//tools/bazel_devtools:aspects.bzl%biome_format\ntest --@@aspect_rules_lint+//lint:fail_on_violation\n",
+      "base": "# Do not synthesize empty __init__.py files in Python runfiles trees.\ncommon --incompatible_default_to_explicit_init_py\n\n# Compile and check manual tests selected by wildcard target patterns, but do\n# not execute them. Manual non-test targets retain Bazel's normal exclusion.\nbuild --build_manual_tests\n\n# Apply the expensive repository checks only at an explicit pre-commit or CI\n# checkpoint. Plain `bazel test` remains the canonical software test loop.\ntest:precommit --aspects=//tools/bazel_devtools:aspects.bzl%ruff\ntest:precommit --aspects=//tools/bazel_devtools:aspects.bzl%basedpyright\ntest:precommit --aspects=//tools/bazel_devtools:aspects.bzl%ruff_format\ntest:precommit --aspects=//tools/bazel_devtools:aspects.bzl%clang_tidy\ntest:precommit --aspects=//tools/bazel_devtools:aspects.bzl%clang_format\ntest:precommit --aspects=//tools/bazel_devtools:aspects.bzl%biome_lint\ntest:precommit --aspects=//tools/bazel_devtools:aspects.bzl%biome_format\ntest:precommit --@@aspect_rules_lint+//lint:fail_on_violation\n",
       "block_id": "checks",
-      "digest": "52c562b4683d3bfd5adc0d739520485e39594dcc4267c8c7efb86afebf87130d",
+      "digest": "a05607fd78e5b73d6f2bd802202a0f70b5b3e192a4e293b251899bb1e323726d",
       "ownership": "managed_block",
       "template_version": "0.1.0"
     },
@@ -57,9 +57,9 @@
       "template_version": "0.1.0"
     },
     ".github/workflows/bazel-devtools.yml": {
-      "base": "name: Bazel presubmit\n\non:\n  pull_request:\n  push:\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: bazel-presubmit-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: true\n\njobs:\n  test:\n    name: Bazel test\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n        with:\n          persist-credentials: false\n      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0\n        with:\n          bazelisk-cache: true\n          disk-cache: bazel-presubmit\n          repository-cache: true\n          cache-save: ${{ github.event_name != 'pull_request' }}\n      - name: Test and check Bazel targets\n        run: bazel test //... --test_output=errors\n",
+      "base": "name: Bazel presubmit\n\non:\n  pull_request:\n  push:\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: bazel-presubmit-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: true\n\njobs:\n  test:\n    name: Bazel test\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n        with:\n          persist-credentials: false\n      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0\n        with:\n          bazelisk-cache: true\n          disk-cache: bazel-presubmit\n          repository-cache: true\n          cache-save: ${{ github.event_name != 'pull_request' }}\n      - name: Test and check Bazel targets\n        run: bazel test --config=precommit //... --test_output=errors\n",
       "block_id": null,
-      "digest": "8350396d7aefd0830abcd7cf870c13a1860d0f9e0e91b811baccb2adf41e754a",
+      "digest": "d583547974c4250cb4012d408927da8e684d56c3d0c0fcca25b27940cbfad798",
       "ownership": "managed_file",
       "template_version": "0.1.0"
     },
@@ -71,9 +71,9 @@
       "template_version": "0.1.0"
     },
     ".pre-commit-config.yaml": {
-      "base": "minimum_pre_commit_version: \"4.6.0\"\nrepos:\n  - repo: local\n    hooks:\n      - id: bazel-devtools-check\n        name: bazel_devtools checks\n        language: system\n        entry: bazel\n        args:\n          - test\n          - //...\n          - --test_output=errors\n        pass_filenames: false\n        always_run: true\n        require_serial: true\n        stages: [pre-commit]\n",
+      "base": "minimum_pre_commit_version: \"4.6.0\"\nrepos:\n  - repo: local\n    hooks:\n      - id: bazel-devtools-check\n        name: bazel_devtools checks\n        language: system\n        entry: bazel\n        args:\n          - test\n          - --config=precommit\n          - //...\n          - --test_output=errors\n        pass_filenames: false\n        always_run: true\n        require_serial: true\n        stages: [pre-commit]\n",
       "block_id": null,
-      "digest": "f31d46c86dff842637328472feb3bd54ff274d253295c67dd382c73fff1d5351",
+      "digest": "4144377f3a42d55147625d1b5771ffea0a6d5193c3be07d18824bbf860167c1e",
       "ownership": "managed_file",
       "template_version": "0.1.0"
     },

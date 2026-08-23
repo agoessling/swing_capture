@@ -1,0 +1,34 @@
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
+
+cc_library(
+    name = "consensus_evaluator_lib",
+    srcs = ["consensus_evaluator.cc"],
+    hdrs = ["consensus_evaluator.h"],
+    deps = [
+        "//capture/audio:pcm_wav",
+        "//capture/offline/experiments/benchmark:terminal_window_benchmark",
+        "//capture/trigger:impact_detector",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "consensus_evaluator",
+    srcs = ["main.cc"],
+    deps = [
+        ":consensus_evaluator_lib",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "consensus_evaluator_test",
+    size = "small",
+    srcs = ["consensus_evaluator_test.cc"],
+    deps = [
+        ":consensus_evaluator_lib",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)

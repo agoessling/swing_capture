@@ -11,6 +11,7 @@
 #include <limits>
 #include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -164,8 +165,8 @@ std::vector<std::uint32_t> ParseUnsignedList(std::string_view value) {
 }
 
 void ValidateDeviceInfo(const FeatherDeviceInfo &info) {
-  const std::set<std::string, std::less<>> expected_capabilities = {"calibrate", "led", "query",
-                                                                    "swing", "tone"};
+  const std::set<std::string, std::less<>> expected_capabilities = {"calibrate", "led",   "pcm",
+                                                                    "query",     "swing", "tone"};
   const bool compatible =
       info.firmware == kFeatherHilFirmware && info.protocol_version == kFeatherHilProtocolVersion &&
       info.capabilities == expected_capabilities &&
@@ -179,6 +180,13 @@ void ValidateDeviceInfo(const FeatherDeviceInfo &info) {
       info.tone_maximum_frequency_hz == kFeatherHilToneMaximumFrequencyHz &&
       info.tone_minimum_level_permille == kFeatherHilToneMinimumLevelPermille &&
       info.tone_maximum_level_permille == kFeatherHilToneMaximumLevelPermille &&
+      info.pcm_sample_rate_hz == kFeatherHilPcmSampleRateHz &&
+      info.pcm_maximum_samples == kFeatherHilPcmMaximumSamples &&
+      info.pcm_maximum_chunk_bytes == kFeatherHilPcmMaximumChunkBytes &&
+      info.pcm_minimum_lead_microseconds == kFeatherHilPcmMinimumLeadMicroseconds &&
+      info.pcm_minimum_gain_permille == kFeatherHilPcmMinimumGainPermille &&
+      info.pcm_maximum_gain_permille == kFeatherHilPcmMaximumGainPermille &&
+      info.pcm_white_microseconds == kFeatherHilPcmWhiteMicroseconds &&
       info.swing_start_lead_microseconds == SWING_HIL_SWING_START_LEAD_US &&
       info.swing_step_microseconds == SWING_HIL_SWING_STEP_US &&
       info.swing_pre_steps == SWING_HIL_SWING_PRE_STEPS &&
@@ -225,6 +233,13 @@ FeatherDeviceInfo DecodeDeviceInfo(const FeatherResponse &response) {
   info.tone_maximum_frequency_hz = RequiredUnsigned32Field(response, "tone_frequency_max_hz");
   info.tone_minimum_level_permille = RequiredUnsigned32Field(response, "tone_level_min_permille");
   info.tone_maximum_level_permille = RequiredUnsigned32Field(response, "tone_level_max_permille");
+  info.pcm_sample_rate_hz = RequiredUnsigned32Field(response, "pcm_sample_rate_hz");
+  info.pcm_maximum_samples = RequiredUnsigned32Field(response, "pcm_max_samples");
+  info.pcm_maximum_chunk_bytes = RequiredUnsigned32Field(response, "pcm_max_chunk_bytes");
+  info.pcm_minimum_lead_microseconds = RequiredUnsigned32Field(response, "pcm_lead_min_us");
+  info.pcm_minimum_gain_permille = RequiredUnsigned32Field(response, "pcm_gain_min_permille");
+  info.pcm_maximum_gain_permille = RequiredUnsigned32Field(response, "pcm_gain_max_permille");
+  info.pcm_white_microseconds = RequiredUnsigned32Field(response, "pcm_white_us");
   info.swing_start_lead_microseconds = RequiredUnsigned32Field(response, "swing_start_lead_us");
   info.swing_step_microseconds = RequiredUnsigned32Field(response, "swing_step_us");
   info.swing_pre_steps = RequiredUnsigned32Field(response, "swing_pre_steps");
@@ -666,6 +681,14 @@ std::string_view FeatherHilTransactionStageName(FeatherHilTransactionStage stage
       return "post_phase";
     case FeatherHilTransactionStage::kDone:
       return "done";
+    case FeatherHilTransactionStage::kPcmBegin:
+      return "pcm_begin";
+    case FeatherHilTransactionStage::kPcmChunk:
+      return "pcm_chunk";
+    case FeatherHilTransactionStage::kPcmCommit:
+      return "pcm_commit";
+    case FeatherHilTransactionStage::kPcmAbort:
+      return "pcm_abort";
   }
   return "unknown";
 }
@@ -691,6 +714,8 @@ FeatherHilController::FeatherHilController(FeatherHilSerial &serial,
 
 FeatherDeviceInfo FeatherHilController::QueryInfo() {
   device_info_.reset();
+  pcm_upload_.reset();
+  pcm_samples_.clear();
   const std::uint32_t request_id = NextRequestId();
   FeatherHilFailureEvidence evidence = {
       .request_id = request_id,
@@ -701,6 +726,8 @@ FeatherDeviceInfo FeatherHilController::QueryInfo() {
       .stimulus_receipt = std::nullopt,
       .calibration_receipt = std::nullopt,
       .swing_receipt = std::nullopt,
+      .pcm_upload_receipt = std::nullopt,
+      .pcm_playback_receipt = std::nullopt,
       .offending_response = std::nullopt,
   };
   const auto write_started = std::chrono::steady_clock::now();
@@ -775,6 +802,40 @@ FeatherStimulusReceipt FeatherHilController::PlayTone(std::chrono::microseconds 
                                   .level_permille = level_permille});
 }
 
+FeatherPcmUploadReceipt FeatherHilController::UploadPcm16(std::span<const std::int16_t> samples) {
+  const FeatherDeviceInfo &info = RequireNegotiated();
+  if (samples.empty() || samples.size() > info.pcm_maximum_samples) {
+    throw std::invalid_argument("PCM sample count exceeds negotiated Feather HIL limits");
+  }
+  pcm_upload_.reset();
+  pcm_samples_.clear();
+  FeatherPcmUploadReceipt receipt = RunPcmUpload(NextRequestId(), samples);
+  pcm_upload_ = receipt;
+  pcm_samples_.assign(samples.begin(), samples.end());
+  return receipt;
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+FeatherPcmPlaybackReceipt FeatherHilController::PlayUploadedPcm(std::chrono::microseconds lead,
+                                                                std::uint32_t gain_permille,
+                                                                std::uint32_t brightness,
+                                                                std::uint32_t marker_sample) {
+  const FeatherDeviceInfo &info = RequireNegotiated();
+  if (!pcm_upload_.has_value()) {
+    throw std::logic_error("UploadPcm16 must commit a clip before PCM playback");
+  }
+  const std::uint32_t lead_us = CheckedMicroseconds(lead, "PCM lead");
+  if (lead_us < info.pcm_minimum_lead_microseconds || lead_us > info.maximum_lead_microseconds ||
+      gain_permille < info.pcm_minimum_gain_permille ||
+      gain_permille > info.pcm_maximum_gain_permille ||
+      marker_sample >= pcm_upload_->sample_count ||
+      std::ranges::find(info.calibration_candidates, brightness) ==
+          info.calibration_candidates.end()) {
+    throw std::invalid_argument("PCM playback parameters exceed negotiated Feather HIL limits");
+  }
+  return RunPcmPlayback(NextRequestId(), lead_us, gain_permille, brightness, marker_sample);
+}
+
 FeatherCalibrationReceipt FeatherHilController::CalibrateSwingBrightness() {
   static_cast<void>(RequireNegotiated());
   return RunCalibration(NextRequestId());
@@ -824,6 +885,8 @@ FeatherStimulusReceipt FeatherHilController::RunStimulus(std::uint32_t request_i
       .stimulus_receipt = receipt,
       .calibration_receipt = std::nullopt,
       .swing_receipt = std::nullopt,
+      .pcm_upload_receipt = std::nullopt,
+      .pcm_playback_receipt = std::nullopt,
       .offending_response = std::nullopt,
   };
   receipt.host_command_write_started = std::chrono::steady_clock::now();
@@ -885,6 +948,284 @@ FeatherStimulusReceipt FeatherHilController::RunStimulus(std::uint32_t request_i
   }
 }
 
+FeatherPcmUploadReceipt FeatherHilController::RunPcmUpload(std::uint32_t request_id,
+                                                           std::span<const std::int16_t> samples) {
+  const FeatherDeviceInfo &info = RequireNegotiated();
+  const std::vector<std::uint8_t> bytes = FeatherPcm16LeBytes(samples);
+  FeatherPcmUploadReceipt receipt;
+  receipt.request_id = request_id;
+  receipt.sample_rate_hz = info.pcm_sample_rate_hz;
+  receipt.sample_count = static_cast<std::uint32_t>(samples.size());
+  receipt.byte_count = static_cast<std::uint32_t>(bytes.size());
+  receipt.source_crc32 = FeatherPcmCrc32(bytes);
+  receipt.host_upload_started = std::chrono::steady_clock::now();
+  FeatherHilFailureEvidence evidence = {
+      .request_id = request_id,
+      .subject = "PCM_UPLOAD",
+      .stage = FeatherHilTransactionStage::kPcmBegin,
+      .command_wire =
+          BuildFeatherPcmBeginCommand(request_id, receipt.sample_count, receipt.source_crc32),
+      .device_info = info,
+      .stimulus_receipt = std::nullopt,
+      .calibration_receipt = std::nullopt,
+      .swing_receipt = std::nullopt,
+      .pcm_upload_receipt = receipt,
+      .pcm_playback_receipt = std::nullopt,
+      .offending_response = std::nullopt,
+  };
+
+  const auto exchange = [&](std::string wire, std::string_view subject,
+                            FeatherHilTransactionStage stage) {
+    evidence.stage = stage;
+    evidence.command_wire = std::move(wire);
+    evidence.offending_response.reset();
+    serial_->Write(evidence.command_wire, kIoTimeout);
+    FeatherResponse response = ReadFor(request_id, kIoTimeout, false);
+    evidence.offending_response = response;
+    RequireResponseRequest(response, request_id);
+    RequireResponse(response, FeatherResponseKind::kAcknowledgement, subject);
+    receipt.acknowledgements.push_back(response);
+    evidence.pcm_upload_receipt = receipt;
+    return response;
+  };
+
+  try {
+    const FeatherResponse begin =
+        exchange(evidence.command_wire, "PCM_BEGIN", FeatherHilTransactionStage::kPcmBegin);
+    if (RequiredUnsigned32Field(begin, "sample_rate_hz") != receipt.sample_rate_hz ||
+        RequiredUnsigned32Field(begin, "sample_count") != receipt.sample_count ||
+        RequiredUnsigned32Field(begin, "byte_count") != receipt.byte_count ||
+        RequiredUnsigned32Field(begin, "crc32") != receipt.source_crc32 ||
+        RequiredUnsigned32Field(begin, "max_chunk_bytes") != info.pcm_maximum_chunk_bytes) {
+      throw std::runtime_error("inconsistent Feather PCM_BEGIN acknowledgement");
+    }
+
+    for (std::uint32_t offset = 0; offset < receipt.byte_count;) {
+      const std::uint32_t count =
+          std::min(info.pcm_maximum_chunk_bytes, receipt.byte_count - offset);
+      const FeatherResponse chunk = exchange(
+          BuildFeatherPcmChunkCommand(request_id, offset, std::span(bytes).subspan(offset, count)),
+          "PCM_CHUNK", FeatherHilTransactionStage::kPcmChunk);
+      if (RequiredUnsigned32Field(chunk, "byte_offset") != offset ||
+          RequiredUnsigned32Field(chunk, "byte_count") != count ||
+          RequiredUnsigned32Field(chunk, "received_bytes") != offset + count ||
+          RequiredUnsigned32Field(chunk, "total_bytes") != receipt.byte_count) {
+        throw std::runtime_error("inconsistent Feather PCM_CHUNK acknowledgement");
+      }
+      offset += count;
+    }
+
+    const FeatherResponse commit = exchange(BuildFeatherPcmCommitCommand(request_id), "PCM_COMMIT",
+                                            FeatherHilTransactionStage::kPcmCommit);
+    receipt.host_commit_received = std::chrono::steady_clock::now();
+    receipt.committed_crc32 = RequiredUnsigned32Field(commit, "crc32");
+    if (RequiredUnsigned32Field(commit, "sample_rate_hz") != receipt.sample_rate_hz ||
+        RequiredUnsigned32Field(commit, "sample_count") != receipt.sample_count ||
+        RequiredUnsigned32Field(commit, "byte_count") != receipt.byte_count ||
+        receipt.committed_crc32 != receipt.source_crc32) {
+      throw std::runtime_error("inconsistent Feather PCM_COMMIT acknowledgement");
+    }
+    return receipt;
+  } catch (const std::exception &error) {
+    evidence.pcm_upload_receipt = receipt;
+    BestEffortAbortPcm(request_id);
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+}
+
+void FeatherHilController::BestEffortAbortPcm(std::uint32_t request_id) noexcept {
+  try {
+    serial_->Write(BuildFeatherPcmAbortCommand(request_id), kIoTimeout);
+    const FeatherResponse response = ReadFor(request_id, kIoTimeout, false);
+    RequireResponseRequest(response, request_id);
+    RequireResponse(response, FeatherResponseKind::kAcknowledgement, "PCM_ABORT");
+    if (!RequiredBooleanField(response, "cleared")) {
+      throw std::runtime_error("Feather PCM_ABORT did not clear the upload");
+    }
+  } catch (const std::exception &) {  // NOLINT(bugprone-empty-catch)
+  }
+}
+
+FeatherPcmPlaybackReceipt FeatherHilController::RunPcmPlayback(std::uint32_t request_id,
+                                                               std::uint32_t lead_microseconds,
+                                                               std::uint32_t gain_permille,
+                                                               std::uint32_t brightness,
+                                                               std::uint32_t marker_sample) {
+  const FeatherDeviceInfo &info = RequireNegotiated();
+  if (!pcm_upload_.has_value()) {
+    throw std::logic_error("PCM upload disappeared before playback");
+  }
+  const FeatherPcmUploadReceipt &upload = pcm_upload_.value();
+  if (pcm_samples_.size() != upload.sample_count) {
+    throw std::logic_error("PCM source samples disappeared before playback");
+  }
+  FeatherPcmPlaybackReceipt receipt;
+  receipt.request_id = request_id;
+  receipt.requested_lead_microseconds = lead_microseconds;
+  receipt.sample_rate_hz = upload.sample_rate_hz;
+  receipt.sample_count = upload.sample_count;
+  receipt.marker_sample = marker_sample;
+  receipt.gain_permille = gain_permille;
+  receipt.brightness = brightness;
+  receipt.source_crc32 = upload.source_crc32;
+  receipt.expected_played_crc32 = FeatherScaledPcmCrc32(pcm_samples_, gain_permille);
+  receipt.white_microseconds = info.pcm_white_microseconds;
+  FeatherHilFailureEvidence evidence = {
+      .request_id = request_id,
+      .subject = "PCM_PLAY",
+      .stage = FeatherHilTransactionStage::kStimulusWrite,
+      .command_wire = BuildFeatherPcmPlayCommand(request_id, lead_microseconds, gain_permille,
+                                                 brightness, marker_sample),
+      .device_info = info,
+      .stimulus_receipt = std::nullopt,
+      .calibration_receipt = std::nullopt,
+      .swing_receipt = std::nullopt,
+      .pcm_upload_receipt = std::nullopt,
+      .pcm_playback_receipt = receipt,
+      .offending_response = std::nullopt,
+  };
+
+  receipt.host_command_write_started = std::chrono::steady_clock::now();
+  try {
+    serial_->Write(evidence.command_wire, kIoTimeout);
+    receipt.host_command_sent = std::chrono::steady_clock::now();
+
+    evidence.stage = FeatherHilTransactionStage::kAcknowledgement;
+    const FeatherResponse acknowledgement = ReadFor(request_id, kIoTimeout, false);
+    receipt.host_acknowledgement_received = std::chrono::steady_clock::now();
+    evidence.offending_response = acknowledgement;
+    RequireResponseRequest(acknowledgement, request_id);
+    RequireResponse(acknowledgement, FeatherResponseKind::kAcknowledgement, "PCM_PLAY");
+    receipt.acknowledgement = acknowledgement;
+    receipt.accepted_device_microseconds = RequiredUnsignedField(acknowledgement, "accepted_us");
+    receipt.scheduled_audio_device_microseconds =
+        RequiredUnsignedField(acknowledgement, "scheduled_audio_us");
+    receipt.scheduled_marker_device_microseconds =
+        RequiredUnsignedField(acknowledgement, "scheduled_marker_us");
+    receipt.marker_offset_microseconds = RequiredUnsignedField(acknowledgement, "marker_offset_us");
+    receipt.prepare_source = RequiredField(acknowledgement, "prepare_source");
+    receipt.rail_powered_at_acknowledgement = RequiredBooleanField(acknowledgement, "rail_powered");
+    receipt.prepared_at_acknowledgement = RequiredBooleanField(acknowledgement, "prepared");
+    const std::uint64_t expected_marker_offset =
+        (static_cast<std::uint64_t>(marker_sample) * 1'000'000U + info.pcm_sample_rate_hz / 2U) /
+        info.pcm_sample_rate_hz;
+    if (receipt.scheduled_audio_device_microseconds !=
+            receipt.accepted_device_microseconds + lead_microseconds ||
+        receipt.marker_offset_microseconds != expected_marker_offset ||
+        receipt.scheduled_marker_device_microseconds !=
+            receipt.scheduled_audio_device_microseconds + expected_marker_offset ||
+        RequiredUnsigned32Field(acknowledgement, "lead_us") != lead_microseconds ||
+        RequiredUnsigned32Field(acknowledgement, "marker_sample") != marker_sample ||
+        RequiredUnsigned32Field(acknowledgement, "gain_permille") != gain_permille ||
+        RequiredUnsigned32Field(acknowledgement, "brightness") != brightness ||
+        RequiredUnsigned32Field(acknowledgement, "sample_rate_hz") != upload.sample_rate_hz ||
+        RequiredUnsigned32Field(acknowledgement, "sample_count") != upload.sample_count ||
+        RequiredUnsigned32Field(acknowledgement, "source_crc32") != upload.source_crc32 ||
+        RequiredUnsigned32Field(acknowledgement, "white_us") != info.pcm_white_microseconds ||
+        (receipt.prepare_source != "calibration" && receipt.prepare_source != "self") ||
+        !receipt.rail_powered_at_acknowledgement || !receipt.prepared_at_acknowledgement) {
+      throw std::runtime_error("inconsistent Feather PCM_PLAY acknowledgement");
+    }
+
+    evidence.stage = FeatherHilTransactionStage::kStart;
+    evidence.pcm_playback_receipt = receipt;
+    const std::uint64_t clip_microseconds =
+        (static_cast<std::uint64_t>(upload.sample_count) * 1'000'000U + upload.sample_rate_hz -
+         1U) /
+        upload.sample_rate_hz;
+    const FeatherResponse started =
+        ReadFor(request_id,
+                CompletionTimeout(lead_microseconds, static_cast<std::uint32_t>(clip_microseconds) +
+                                                         info.pcm_white_microseconds),
+                false);
+    receipt.host_start_received = std::chrono::steady_clock::now();
+    evidence.offending_response = started;
+    RequireResponseRequest(started, request_id);
+    RequireResponse(started, FeatherResponseKind::kEvent, "PCM_PLAY", "START");
+    receipt.started = started;
+    receipt.audio_command_device_microseconds = RequiredUnsignedField(started, "audio_command_us");
+    receipt.audio_lateness_microseconds = RequiredUnsignedField(started, "audio_lateness_us");
+    receipt.marker_device_microseconds = RequiredUnsignedField(started, "marker_us");
+    receipt.marker_lateness_microseconds = RequiredUnsignedField(started, "marker_lateness_us");
+    receipt.command_delta_microseconds = RequiredUnsignedField(started, "command_delta_us");
+    receipt.command_delta_error_microseconds =
+        RequiredUnsignedField(started, "command_delta_error_us");
+    if (RequiredUnsignedField(started, "scheduled_audio_us") !=
+            receipt.scheduled_audio_device_microseconds ||
+        RequiredUnsignedField(started, "scheduled_marker_us") !=
+            receipt.scheduled_marker_device_microseconds ||
+        RequiredUnsigned32Field(started, "marker_sample") != marker_sample ||
+        RequiredUnsignedField(started, "marker_offset_us") != receipt.marker_offset_microseconds ||
+        receipt.audio_command_device_microseconds < receipt.scheduled_audio_device_microseconds ||
+        receipt.audio_lateness_microseconds != receipt.audio_command_device_microseconds -
+                                                   receipt.scheduled_audio_device_microseconds ||
+        receipt.marker_device_microseconds < receipt.scheduled_marker_device_microseconds ||
+        receipt.marker_lateness_microseconds !=
+            receipt.marker_device_microseconds - receipt.scheduled_marker_device_microseconds ||
+        receipt.command_delta_microseconds !=
+            receipt.marker_device_microseconds - receipt.audio_command_device_microseconds ||
+        receipt.command_delta_error_microseconds !=
+            (receipt.command_delta_microseconds > receipt.marker_offset_microseconds
+                 ? receipt.command_delta_microseconds - receipt.marker_offset_microseconds
+                 : receipt.marker_offset_microseconds - receipt.command_delta_microseconds) ||
+        receipt.audio_lateness_microseconds > kMaximumStartLatenessMicroseconds ||
+        receipt.marker_lateness_microseconds > kMaximumStartLatenessMicroseconds ||
+        receipt.command_delta_error_microseconds > kMaximumToneDurationOvershootMicroseconds) {
+      throw std::runtime_error("inconsistent or late Feather PCM_PLAY START");
+    }
+
+    evidence.stage = FeatherHilTransactionStage::kDone;
+    evidence.pcm_playback_receipt = receipt;
+    const FeatherResponse done = ReadFor(request_id, kIoTimeout, false);
+    receipt.host_done_received = std::chrono::steady_clock::now();
+    evidence.offending_response = done;
+    RequireResponseRequest(done, request_id);
+    RequireResponse(done, FeatherResponseKind::kEvent, "PCM_PLAY", "DONE");
+    receipt.done = done;
+    receipt.white_end_device_microseconds = RequiredUnsignedField(done, "white_end_us");
+    receipt.audio_done_observed_device_microseconds =
+        RequiredUnsignedField(done, "audio_done_observed_us");
+    receipt.end_device_microseconds = RequiredUnsignedField(done, "end_us");
+    receipt.elapsed_device_microseconds = RequiredUnsignedField(done, "elapsed_us");
+    receipt.played_crc32 = RequiredUnsigned32Field(done, "played_crc32");
+    receipt.outputs_inactive_at_completion = RequiredBooleanField(done, "outputs_inactive");
+    receipt.pixel_off_at_completion = RequiredBooleanField(done, "pixel_off");
+    receipt.i2s_inactive_at_completion = RequiredBooleanField(done, "i2s_inactive");
+    receipt.rail_powered_at_completion = RequiredBooleanField(done, "rail_powered");
+    receipt.prepared_at_completion = RequiredBooleanField(done, "prepared");
+    if (RequiredUnsignedField(done, "audio_command_us") !=
+            receipt.audio_command_device_microseconds ||
+        RequiredUnsignedField(done, "marker_us") != receipt.marker_device_microseconds ||
+        RequiredUnsigned32Field(done, "sample_rate_hz") != upload.sample_rate_hz ||
+        RequiredUnsigned32Field(done, "sample_count") != upload.sample_count ||
+        RequiredUnsigned32Field(done, "marker_sample") != marker_sample ||
+        RequiredUnsigned32Field(done, "gain_permille") != gain_permille ||
+        RequiredUnsigned32Field(done, "brightness") != brightness ||
+        receipt.played_crc32 != receipt.expected_played_crc32 ||
+        RequiredUnsigned32Field(done, "white_us") != info.pcm_white_microseconds ||
+        receipt.white_end_device_microseconds < receipt.marker_device_microseconds ||
+        receipt.white_end_device_microseconds - receipt.marker_device_microseconds <
+            info.pcm_white_microseconds ||
+        receipt.white_end_device_microseconds - receipt.marker_device_microseconds -
+                info.pcm_white_microseconds >
+            kMaximumLedDurationOvershootMicroseconds ||
+        receipt.audio_done_observed_device_microseconds <
+            receipt.audio_command_device_microseconds ||
+        receipt.end_device_microseconds < receipt.audio_done_observed_device_microseconds ||
+        receipt.elapsed_device_microseconds !=
+            receipt.end_device_microseconds - receipt.audio_command_device_microseconds ||
+        !receipt.outputs_inactive_at_completion || !receipt.pixel_off_at_completion ||
+        !receipt.i2s_inactive_at_completion || receipt.rail_powered_at_completion ||
+        receipt.prepared_at_completion) {
+      throw std::runtime_error("inconsistent Feather PCM_PLAY completion");
+    }
+    return receipt;
+  } catch (const std::exception &error) {
+    evidence.pcm_playback_receipt = receipt;
+    ThrowTransactionFailure(error, std::move(evidence));
+  }
+}
+
 FeatherCalibrationReceipt FeatherHilController::RunCalibration(std::uint32_t request_id) {
   const FeatherDeviceInfo &info = RequireNegotiated();
   FeatherCalibrationReceipt receipt;
@@ -898,6 +1239,8 @@ FeatherCalibrationReceipt FeatherHilController::RunCalibration(std::uint32_t req
       .stimulus_receipt = std::nullopt,
       .calibration_receipt = receipt,
       .swing_receipt = std::nullopt,
+      .pcm_upload_receipt = std::nullopt,
+      .pcm_playback_receipt = std::nullopt,
       .offending_response = std::nullopt,
   };
   receipt.host_command_write_started = std::chrono::steady_clock::now();
@@ -968,6 +1311,8 @@ FeatherSwingReceipt FeatherHilController::RunSwing(std::uint32_t request_id,
       .stimulus_receipt = std::nullopt,
       .calibration_receipt = std::nullopt,
       .swing_receipt = receipt,
+      .pcm_upload_receipt = std::nullopt,
+      .pcm_playback_receipt = std::nullopt,
       .offending_response = std::nullopt,
   };
   receipt.host_command_write_started = std::chrono::steady_clock::now();

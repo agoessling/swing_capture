@@ -34,6 +34,102 @@ add `--test_env=SWING_CAPTURE_ANDROID_ROLE=face_on`. Each invocation has a
 15-second main-stage deadline and is tagged `manual`, `local`, `exclusive`, and
 `requires-android-phone`.
 
+The first model invocation is an explicit warm-up. The service reports
+`pose.phase=warming_up`, does not feed that frame to the trigger controller, and
+records its duration separately from steady-state inference. A successful
+warm-up changes the phase to `monitoring`; a failed warm-up is a service error.
+This keeps cold delegate/model initialization visible without treating it as a
+recurring address-detection blind interval. The HIL validates that warm-up
+completed exactly once before it evaluates cadence or the steady-state latency
+distribution.
+
+For a short per-device delegate comparison, set
+`SWING_CAPTURE_ANDROID_POSE_DELEGATE` to `cpu_only`, `gpu_required`,
+`npu_preferred`, or `npu_required`. The report preserves inference and
+end-to-end decision-age p50/p90/p95/p99/max values plus deadline misses and
+outliers. `gpu_required` and `npu_required` fail rather than silently falling
+back. Set `SWING_CAPTURE_ANDROID_REQUIRE_POSE_LATENCY=true` to make the initial
+p95-at-or-below-200-ms and no-outlier-above-400-ms policy a hard gate; omit it
+while collecting comparison evidence. Every run remains a bounded two-second
+observation inside the 15-second physical stage.
+
+The 2026-08-22 delegate matrix found GPU to be the fastest policy on both
+phones; CPU and MediaPipe's experimental NPU delegate were not improvements.
+After warm-up isolation, bounded hard-gate runs measured Pixel 5a GPU at 199 ms
+p95 / 198.3 ms exact maximum (708 ms cold warm-up), and Pixel 6 GPU at 175 ms
+p95 / 174.5 ms exact maximum (155 ms cold warm-up). An immediately preceding
+Pixel 6 run narrowly failed at 202 ms p95 / 201.3 ms exact maximum with no
+400 ms outlier, so the 200 ms tail remains a qualification boundary rather
+than a claim that every short sample will pass. Reports are retained under
+`artifacts/pose_delegate_benchmark_20260822/`.
+
+## Model and input-size experiment matrix
+
+The same bounded standby target accepts `SWING_CAPTURE_ANDROID_POSE_MODEL`
+(`lite`, `full`, or `heavy`) and `SWING_CAPTURE_ANDROID_POSE_INPUT_SIZE`
+(`WIDTHxHEIGHT`) for manual experiments. These knobs use
+`//android/app:swing_capture_pose_experiment`, which is the only APK that
+packages Full and Heavy. The ordinary `//android/app:swing_capture` APK still
+packages only Lite; `PoseModelVariant.productionDefault()`,
+and `PoseStandbyEngine.Config.defaults` still select Lite, while
+`WarmCameraLease` still selects the nearest supported 16:9 YUV size to 640x360.
+Thus neither a Full/Heavy asset nor a Pixel 5a-specific setting can alter the
+Pixel 6 production path.
+
+The 2026-08-22 matrix ran all 18 phone/model/input combinations sequentially
+with GPU-preferred selection. The cells below report achieved inference rate,
+steady-state inference p95, and latest-frame drop fraction. Each cell's complete
+status history, exact applied model/input, telemetry, and cleanup is in
+`artifacts/pose_model_input_matrix_20260822/<phone>-<model>-<size>.json`.
+
+| Input and model | Pixel 6 | Pixel 5a | Result |
+| --- | --- | --- | --- |
+| 320x180, all three models | Exact YUV size unavailable | Exact YUV size unavailable | Unsupported by both Camera2 stream maps; no inference started. |
+| 640x360 Lite | 4.56 Hz, 195 ms p95, 0% drops | 5.39 Hz, 179 ms p95, 0% drops | Cadence and provisional 200 ms latency bounds pass. |
+| 640x360 Full | 4.57 Hz, 188 ms p95, 0% drops | 5.46 Hz, 184 ms p95, 0% drops | Short cadence and latency screen passes. |
+| 640x360 Heavy | 4.58 Hz, 243 ms p95, 0% drops | 4.91 Hz, 237 ms p95, 0% drops | Cadence passes, but both phones exceed the provisional 200 ms latency bound. |
+| 1280x720 Lite | 2.30 Hz, 487 ms p95, 54.5% drops | 2.48 Hz, 366 ms p95, 50.0% drops | Cadence fails on both phones. |
+| 1280x720 Full | 2.28 Hz, 471 ms p95, 45.5% drops | 2.44 Hz, 378 ms p95, 40.0% drops | Cadence fails on both phones. |
+| 1280x720 Heavy | 2.28 Hz, 544 ms p95, 54.5% drops | 1.96 Hz, 442 ms p95, 50.0% drops | Cadence fails on both phones. |
+
+The Heavy 640x360 reports have an overall collection result of `passed=true`
+because latency was intentionally observational for this matrix; their nested
+`latency_acceptance.passed=false` is the qualification result. Likewise, the
+1280x720 final status samples prove that the requested model and size were
+active before the cadence gate rejected them. These short, mostly static runs
+are neither motion-tail nor thermal qualifications.
+
+The host comparison under `artifacts/pose_model_corpus_compare_20260822/` then
+ran Lite, Full, and Heavy over the same seven currently labeled ATL/DTL
+positives. All three produced the same strict result: IN01, IN02, and C01
+passed, while D01, D03, D04, and EE01 armed earlier than the provisional safe
+windows. Full therefore provided no classification improvement over Lite;
+Heavy also provided none while costing more phone latency. This 3/7 is not a
+field-accuracy claim. Manual review found an earlier annotated run broadly
+reasonable, but the current full-frame rerun materially moved EE01 to 2.8
+seconds and still needs a fresh spot check. All three models make that same decision on a genuine
+address-like setup before a practice swing; the earlier ROI run hid those samples rather than
+producing different perception. The review must therefore select a safety-versus-thermal lifecycle
+policy and false-arm duty budget, not assume a Lite accuracy regression. The provisional safe
+windows and release rule also need reconciliation before any aggregate becomes a gate.
+
+There is consequently no evidence for changing the production Lite 640x360
+default. Before any model change, Lite and Full must run over a larger held-out,
+human-reviewed ATL and DTL set with reconciled safe-arm and hard-negative
+intervals. That corpus must include ordinary walking, empty scenes,
+aborted/no-swing address, practice swings, post-shot finish, clear-and-rearm,
+repeated setup, varied golfers/framing/lighting, and complete continuous
+lifecycles. The decision needs per-view missed-arm rate, false arms and
+unnecessary high-speed duty, lead before takeaway, and rearm stability,
+followed by simultaneous on-phone motion/thermal qualification. A model is not
+better merely because its short inference p95 is similar.
+
+The production-isolation control remains independently exercised by
+`artifacts/android_pcm_paired_s06_lan_preview_pass_20260822T200115/`: the
+ordinary paired APK ran both phones, its setup-preview JPEGs are 640x360, and
+both production pose pipelines transitioned to 720p240. The experiment matrix
+did not modify that configuration or its policy.
+
 ## Warm retained capture
 
 `android_pose_warm_retained_hil_test` enables debug preview evidence, waits for
@@ -148,7 +244,7 @@ videos; this standby target isolates the new low-power missed-impact recorder.
 ## Paired pose-arm production transition
 
 `//android/dual_hil:dual_phone_paired_pose_arm_hil_test` configures the Pixel 6
-down-the-line node as the leader and the Pixel 5a face-on node as its shadow.
+face-on/across-the-line node as the leader and the Pixel 5a down-the-line node as its shadow.
 Both phones run the real on-device 5 Hz standby inference and standby audio.
 The test invokes a launch-gated deterministic candidate endpoint on the leader;
 from that point it uses the production peer-arm client and warm Camera2
@@ -164,15 +260,20 @@ process-local permission. The leader reaches the shadow through a test-owned
 ADB reverse tunnel, while the actual bearer-authenticated peer protocol is
 unchanged. Before installation/configuration the target snapshots each phone's
 complete private `node_configuration` generation (including the write-only
-peer credential). Successful runs require byte-for-byte restoration after
-force-stop and record that result in the aggregate report. Failure cleanup also
-attempts restoration and emits an explicit warning if it cannot complete; that
-best-effort failure path is not yet represented as structured report evidence.
+peer credential). Successful runs require byte-for-byte restoration after force-stop and record
+that result in the aggregate report. Every dual-phone target initializes `cleanup.json` before its
+first mutation, records each cleanup obligation and attempt, and merges the finalized result into
+`report.json`. An unresolved cleanup failure turns a primary success into failure; if both stages
+fail, the original physical diagnostic and exit code remain authoritative while the independent
+cleanup object retains the unwind failure.
 
 ```bash
 bazel test //android/dual_hil:dual_phone_paired_pose_arm_hil_test \
-  --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=<pixel-6-adb-serial> \
-  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=<pixel-5a-adb-serial> \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=<pixel-5a-adb-serial> \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=<pixel-6-adb-serial> \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_MANIFEST="$PWD/android/dual_hil/field_pcm_replay_cases.json" \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_WAV="$PWD/artifacts/<field-session>/face_on_pixel6_audio.wav" \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_CASE=S06-representative \
   --test_output=streamed --nocache_test_results
 ```
 
@@ -185,6 +286,59 @@ It retained 588 Pixel 6 frames at 238.876 fps and 582 Pixel 5a frames at
 phones, and persisted a paired record with 10.890 ms maximum mapped trigger
 separation and 7.359 ms combined uncertainty. Configuration restoration was
 checked byte-for-byte and no credential was retained in the artifact tree.
+
+### Explicit long production-workload qualification
+
+The long paired gates are deliberately separate manual targets. Run the
+five-minute target only after an operator explicitly requests qualification,
+and the 30-minute target only after an operator explicitly requests the soak:
+
+```bash
+bazel test //android/dual_hil:dual_phone_paired_pose_qualification_5m_hil_test \
+  --test_output=streamed --nocache_test_results
+
+bazel test //android/dual_hil:dual_phone_paired_pose_soak_30m_hil_test \
+  --test_output=streamed --nocache_test_results
+```
+
+Both targets require the same two serials, LAN origins, station configuration,
+PCM manifest/WAV, and required-positive case environment as the short LAN
+target. Their durations are closed in code at exactly 300 and 1,800 seconds;
+there is no free-form duration override. Both displays are put to sleep and
+verified off after monitoring starts, then restored during structured cleanup.
+Once per minute the runner exercises the production leader-to-shadow arm,
+720p240 transition, Feather PCM/white-marker trigger, dual publication,
+coordination, and return to five-Hz monitoring. Each cycle retains both MP4s
+under its own cycle directory and independently requires ffprobe timeline
+validation, exact full-frame decode, the white-marker timing bound, persistent
+AprilTag detection in the pre/marker/post diagnostic frames, and all referenced
+artifacts. A valid final cycle can therefore no longer hide corrupt or missing
+media from an earlier cycle. Every 30 seconds it preserves
+per-phone thermal/battery state, process CPU-time delta and utilization,
+current CPU/GPU thermal-sensor maxima and cooling-device values, plus pose
+cadence, drop, latency, decision-age, audio-continuity, delegate, and screen
+state. Intervals containing a 240 fps
+cycle remain visible but are not used for the strict four-Hz standby gate.
+Decision-age samples must account for every successful inference in each
+metrics generation, and any rejected camera/decision timestamp domain makes
+the qualification report fail. The measured decision-age p95 and maximum stay
+in every periodic sample for later product-bound selection; this contract does
+not invent a bound before representative simultaneous-motion evidence exists.
+`qualification-progress.json` is rewritten after every sample and cycle so an
+interrupted or failed run retains useful evidence; the final `report.json`
+also requires complete duration coverage, at least five or thirty cycles,
+periodic telemetry, thermal status no worse than `MODERATE`, and finalized
+configuration/display/transport cleanup. Its independently derived
+`performance_summary` retains each role separately: inference and decision-age
+p95/max tails, drop totals and worst interval, process/processor thermal
+maxima, and p95/max arm-to-first-camera, first-usable-encoded-frame, and full
+pre-roll startup across the concurrent cycles. Startup remains
+`measurement_only`; this instrumentation does not choose a Pixel 5a bound or
+lower any Pixel 6 production setting. Because these gates collect only five or
+30 startup samples, nearest-rank p99 is necessarily the exact maximum. The
+report therefore exposes p95 plus maximum explicitly and treats maximum as the
+conservative observed startup tail; it does not mislabel a second statistic as
+an independently estimated p99.
 
 ## Phone-hosted root/static smoke
 
@@ -230,8 +384,8 @@ Optional inputs and defaults are:
 - `SWING_CAPTURE_ANDROID_ROLE=down_the_line` (`face_on` is also supported);
 - `SWING_CAPTURE_POSE_PROJECTION=dtl` (derived from the role when omitted);
 - `SWING_CAPTURE_POSE_HITTING_REGION=0.15,0.30,0.85,1.0`;
-- `SWING_CAPTURE_POSE_DELEGATE=gpu_preferred` (`cpu_only` and `gpu_required`
-  are also supported);
+- `SWING_CAPTURE_POSE_DELEGATE=gpu_preferred` (`cpu_only`, `gpu_required`,
+  `npu_preferred`, and `npu_required` are also supported);
 - `SWING_CAPTURE_POSE_EXPECTATION=observe_only` (`require_arm` or
   `require_no_arm` makes the Bazel result enforce that outcome); and
 - `SWING_CAPTURE_POSE_MAXIMUM_FRAMES=600`, bounded to 1–1,200 frames.

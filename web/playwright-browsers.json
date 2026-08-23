@@ -6,6 +6,12 @@
       "revision": "1169",
       "installByDefault": true,
       "browserVersion": "136.0.7103.25"
+    },
+    {
+      "name": "webkit",
+      "revision": "2158",
+      "installByDefault": false,
+      "browserVersion": "18.4"
     }
   ]
 }

@@ -82,6 +82,17 @@ class CorpusTest(unittest.TestCase):
             "sorted and nonoverlapping",
         )
 
+    def test_positive_clip_does_not_require_a_configured_roi(self) -> None:
+        """Keep corpus qualification aligned with the ROI-free controller."""
+        value = self._minimal_manifest()
+        clip = cast("list[dict[str, object]]", value["clips"])[0]
+        clip["hitting_region"] = None
+
+        parsed = corpus.parse_manifest(json.dumps(value))
+
+        self.assertIsNone(parsed.clips[0].hitting_region)
+        self.assertEqual("0,0,1,1", corpus.FULL_FRAME_HITTING_REGION.encoded())
+
     def test_private_media_is_root_bounded_and_hash_checked(self) -> None:
         """Verify detached media without making it a source dependency."""
         with tempfile.TemporaryDirectory() as temporary_directory:

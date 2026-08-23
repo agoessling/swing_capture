@@ -8,7 +8,7 @@ export function isAndroidReviewMode(parameters: URLSearchParams): boolean {
   );
 }
 
-/** Android nodes intentionally use polling because their embedded server has no event stream. */
+/** Android nodes use bounded authenticated status polling; the host retains its event stream. */
 export function reviewEventsSupported(parameters: URLSearchParams): boolean {
   return !isAndroidReviewMode(parameters);
 }

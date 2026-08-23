@@ -6,6 +6,8 @@ import {
   type ClipTrack,
   type DiagnosticArchive,
   type DiagnosticFeedback,
+  type DualFieldRecordingStatus,
+  type FieldRecordingList,
   PIPELINE_PROFILE_SCHEMA_VERSION,
   type PipelineProfile,
   type PeerArmState,
@@ -155,6 +157,16 @@ export class FakeReviewApi implements ReviewApi {
     armed: true,
     active_session_id: null,
     error: "",
+    operational_health: {
+      ready_for_capture: true,
+      thermal: { status: 1, headroom: 0.18, ready: true, power_save_mode: false },
+      storage: {
+        usable_bytes: 21_474_836_480,
+        minimum_free_bytes: 2_147_483_648,
+        ready: true,
+      },
+      issues: [],
+    },
     hil: {
       enabled: true,
       busy: false,
@@ -408,6 +420,69 @@ export class FakeReviewApi implements ReviewApi {
         : { pose: structuredClone(this.#captureStatus.pose) }),
     };
     this.#hilStageHold = this.#captureStatus.hil.busy ? 1 : 0;
+  }
+}
+
+export class FakeFieldRecordingReviewApi extends FakeReviewApi {
+  #recording = false;
+  #completed = false;
+  #startedAtMs = 0;
+
+  getFieldRecordingStatus(): Promise<DualFieldRecordingStatus> {
+    return Promise.resolve(this.#status());
+  }
+
+  startFieldRecording(): Promise<DualFieldRecordingStatus> {
+    this.#recording = true;
+    this.#startedAtMs = Date.now();
+    return Promise.resolve(this.#status());
+  }
+
+  stopFieldRecording(): Promise<DualFieldRecordingStatus> {
+    this.#recording = false;
+    this.#completed = true;
+    return Promise.resolve(this.#status("ready"));
+  }
+
+  getFieldRecordings(): Promise<FieldRecordingList> {
+    return Promise.resolve({
+      recordings: this.#completed
+        ? (["down_the_line", "face_on"] as const).map((role) => ({
+            recording_id: `field-fixture-${role}`,
+            shared_recording_id: "field-fixture-shared",
+            created_at_utc: "2026-08-22T18:00:00Z",
+            role,
+            origin: role === "down_the_line" ? "http://pixel-5a.test" : "http://pixel-6.test",
+            duration_us: "12000000",
+            video_bytes: "12400000",
+            audio_frames: "576000",
+            video_url: `http://field.test/${role}/video.mp4`,
+            audio_url: `http://field.test/${role}/audio.wav`,
+            manifest_url: `http://field.test/${role}/manifest`,
+          }))
+        : [],
+    });
+  }
+
+  #status(state: "idle" | "recording" | "ready" = this.#recording ? "recording" : "idle") {
+    const elapsedMs = this.#recording ? Date.now() - this.#startedAtMs : 0;
+    return {
+      nodes: (["down_the_line", "face_on"] as const).map((role) => ({
+        schema_version: 1 as const,
+        role,
+        origin: role === "down_the_line" ? "http://pixel-5a.test" : "http://pixel-6.test",
+        state,
+        active_recording_id: this.#recording ? `field-fixture-${role}` : null,
+        shared_recording_id: this.#recording ? "field-fixture-shared" : null,
+        started_at_utc: this.#recording ? new Date(this.#startedAtMs).toISOString() : null,
+        started_elapsed_realtime_ns: this.#recording ? "123456789" : null,
+        elapsed_ms: elapsedMs,
+        video_bytes: this.#recording ? String(1_000_000 + elapsedMs * 120) : "0",
+        audio_frames: this.#recording ? String(Math.floor((elapsedMs * 48_000) / 1_000)) : "0",
+        max_duration_seconds: 600,
+        error: "",
+      })),
+    };
   }
 }
 

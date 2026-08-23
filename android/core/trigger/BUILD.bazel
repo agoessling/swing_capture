@@ -1,0 +1,28 @@
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+
+package(default_visibility = ["//visibility:public"])
+
+java_library(
+    name = "combined_trigger_lifecycle",
+    srcs = [
+        "java/com/agoessling/swingcapture/trigger/CombinedTriggerFixture.java",
+        "java/com/agoessling/swingcapture/trigger/CombinedTriggerLifecycleSimulator.java",
+    ],
+    deps = ["//android/core/pose:pose_trigger_core"],
+)
+
+java_test(
+    name = "combined_trigger_lifecycle_test",
+    size = "small",
+    srcs = [
+        "java/com/agoessling/swingcapture/trigger/CombinedTriggerLifecycleSimulatorTest.java",
+    ],
+    data = glob(["testdata/*.events"]),
+    main_class = "com.agoessling.swingcapture.trigger.CombinedTriggerLifecycleSimulatorTest",
+    use_testrunner = False,
+    deps = [
+        ":combined_trigger_lifecycle",
+        "//android/core/pose:pose_trigger_core",
+    ],
+)

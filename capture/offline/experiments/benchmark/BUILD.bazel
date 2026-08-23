@@ -1,0 +1,15 @@
+load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "terminal_window_benchmark",
+    srcs = ["terminal_window_benchmark.cc"],
+    hdrs = ["terminal_window_benchmark.h"],
+    visibility = ["//capture/offline/experiments:__subpackages__"],
+)
+
+cc_test(
+    name = "terminal_window_benchmark_test",
+    size = "small",
+    srcs = ["terminal_window_benchmark_test.cc"],
+    deps = [":terminal_window_benchmark"],
+)

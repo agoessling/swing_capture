@@ -7,6 +7,7 @@ import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention.Failure;
 import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention.Limits;
 import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention.RetentionException;
 import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention.Snapshot;
+import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention.SnapshotMetadata;
 import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention.TriggerResult;
 import com.agoessling.swingcapture.retention.EncodedAccessUnitRetention.TriggerStatus;
 import java.nio.ByteBuffer;
@@ -25,6 +26,12 @@ public final class EncodedAccessUnitRetentionTest {
     delayedTriggerIncludesExistingBoundaryFrame();
     snapshotOwnershipSurvivesRingOverwrite();
     triggerAdmissionReportsMissingHistoryAndIdr();
+    startupTruncationRejectsMissingIdrAndTooLittleHistory();
+    startupTruncationRequiresUnbrokenContinuityEpoch();
+    startupTruncationDoesNotUseRolledWindow();
+    startupTruncationAcceptsExactThresholdAndReportsActualHistory();
+    startupOptInMatchesNormalPolicyOnceFullHistoryExists();
+    startupTruncationPreservesPostRollAndCooldown();
     continuityFailuresAreExplicitAndAbortCapture();
     sensorContinuityGateUsesSuppliedSensorTimestamps();
     heldSnapshotCanExhaustTheBytePool();
@@ -167,6 +174,139 @@ public final class EncodedAccessUnitRetentionTest {
     check(
         staleFrame.trigger(2_200 * MS).status() == TriggerStatus.NO_FRAME_AT_TRIGGER,
         "stale latest frame rejected explicitly");
+  }
+
+  private static void startupTruncationRejectsMissingIdrAndTooLittleHistory()
+      throws Exception {
+    EncodedAccessUnitRetention noIdr = productionLikeRetention(8_192, 64, 1);
+    for (int ordinal = 0; ordinal <= 6; ++ordinal) {
+      append(noIdr, ordinal, ordinal * 100 * MS, false, payload(ordinal, 8));
+    }
+    check(
+        noIdr.triggerAllowingStartupTruncatedPreRoll(600 * MS, 500 * MS).status()
+            == TriggerStatus.NO_PRECEDING_IDR,
+        "startup truncation remains IDR-backed");
+
+    EncodedAccessUnitRetention tooShort = productionLikeRetention(8_192, 64, 1);
+    appendRange(tooShort, 0, 4, 100 * MS, 5);
+    check(
+        tooShort.triggerAllowingStartupTruncatedPreRoll(400 * MS, 500 * MS).status()
+            == TriggerStatus.INSUFFICIENT_PRE_ROLL,
+        "startup truncation enforces caller minimum");
+    check(
+        tooShort.trigger(400 * MS).status() == TriggerStatus.INSUFFICIENT_PRE_ROLL,
+        "default trigger still requires configured pre-roll");
+  }
+
+  private static void startupTruncationRequiresUnbrokenContinuityEpoch() throws Exception {
+    EncodedAccessUnitRetention retention = productionLikeRetention(8_192, 64, 1);
+    appendRange(retention, 0, 6, 100 * MS, 5);
+    expectRetentionFailure(
+        () -> append(retention, 8, 700 * MS, false, payload(8, 8)), Failure.ORDINAL_GAP);
+    check(
+        retention.triggerAllowingStartupTruncatedPreRoll(600 * MS, 500 * MS).status()
+            == TriggerStatus.GAP_IN_RETAINED_WINDOW,
+        "unreset continuity failure disables startup admission");
+
+    retention.resetContinuity();
+    appendRange(retention, 8, 14, 100 * MS, 1);
+    check(
+        retention.triggerAllowingStartupTruncatedPreRoll(1_400 * MS, 500 * MS).accepted(),
+        "new continuity epoch can use startup admission");
+  }
+
+  private static void startupTruncationDoesNotUseRolledWindow() throws Exception {
+    EncodedAccessUnitRetention retention = productionLikeRetention(8_192, 8, 1);
+    appendRange(retention, 0, 8, 100 * MS, 5);
+    check(retention.oldestRetainedOrdinal() == 1, "test rolled past encoder startup");
+    check(
+        retention.triggerAllowingStartupTruncatedPreRoll(800 * MS, 200 * MS).status()
+            == TriggerStatus.INSUFFICIENT_PRE_ROLL,
+        "startup opt-in never becomes a shorter rolling-window policy");
+  }
+
+  private static void startupTruncationAcceptsExactThresholdAndReportsActualHistory()
+      throws Exception {
+    EncodedAccessUnitRetention retention = productionLikeRetention(8_192, 64, 1);
+    appendRange(retention, 0, 6, 100 * MS, 5);
+
+    TriggerResult accepted =
+        retention.triggerAllowingStartupTruncatedPreRoll(600 * MS, 600 * MS);
+    check(accepted.accepted(), "exact startup-history threshold accepted");
+    appendRange(retention, 7, 11, 100 * MS, 5);
+
+    Snapshot snapshot = requireSnapshot(retention);
+    SnapshotMetadata metadata = snapshot.snapshotMetadata();
+    check(metadata.triggerSensorTimestampNs() == 600 * MS, "metadata trigger timestamp");
+    check(
+        metadata.firstAccessUnitSensorTimestampNs() == 0,
+        "metadata identifies IDR-backed snapshot start");
+    check(
+        metadata.configuredPreRollNs() == EncodedAccessUnitRetention.SWING_PRE_ROLL_NS,
+        "metadata preserves configured normal pre-roll");
+    check(
+        metadata.minimumRequiredPreRollNs() == 600 * MS,
+        "metadata preserves startup admission threshold");
+    check(metadata.actualPreRollNs() == 600 * MS, "metadata exposes actual truncated pre-roll");
+    check(metadata.startupPreRollTruncated(), "metadata marks startup truncation");
+    check(snapshot.metadata(0).idr(), "truncated snapshot begins with IDR");
+    snapshot.close();
+  }
+
+  private static void startupOptInMatchesNormalPolicyOnceFullHistoryExists() throws Exception {
+    EncodedAccessUnitRetention normal = productionLikeRetention(16_384, 64, 1);
+    EncodedAccessUnitRetention optedIn = productionLikeRetention(16_384, 64, 1);
+    appendRange(normal, 0, 25, 100 * MS, 5);
+    appendRange(optedIn, 0, 25, 100 * MS, 5);
+
+    check(normal.trigger(2_000 * MS).accepted(), "normal full-history trigger accepted");
+    check(
+        optedIn.triggerAllowingStartupTruncatedPreRoll(2_000 * MS, 600 * MS).accepted(),
+        "opt-in full-history trigger accepted");
+
+    Snapshot normalSnapshot = requireSnapshot(normal);
+    Snapshot optedInSnapshot = requireSnapshot(optedIn);
+    check(
+        normalSnapshot.accessUnitCount() == optedInSnapshot.accessUnitCount(),
+        "full-history access-unit count equivalent");
+    for (int index = 0; index < normalSnapshot.accessUnitCount(); ++index) {
+      check(
+          normalSnapshot.metadata(index).equals(optedInSnapshot.metadata(index)),
+          "full-history access-unit selection equivalent");
+    }
+    SnapshotMetadata normalMetadata = normalSnapshot.snapshotMetadata();
+    SnapshotMetadata optedInMetadata = optedInSnapshot.snapshotMetadata();
+    check(normalMetadata.equals(optedInMetadata), "full-history snapshot metadata equivalent");
+    check(!optedInMetadata.startupPreRollTruncated(), "full history is never marked truncated");
+    check(
+        optedInMetadata.minimumRequiredPreRollNs()
+            == EncodedAccessUnitRetention.SWING_PRE_ROLL_NS,
+        "full-history admission preserves normal minimum");
+    normalSnapshot.close();
+    optedInSnapshot.close();
+  }
+
+  private static void startupTruncationPreservesPostRollAndCooldown() throws Exception {
+    EncodedAccessUnitRetention retention = productionLikeRetention(8_192, 64, 2);
+    appendRange(retention, 0, 6, 100 * MS, 5);
+    check(
+        retention.triggerAllowingStartupTruncatedPreRoll(600 * MS, 500 * MS).accepted(),
+        "startup post-roll trigger accepted");
+    check(retention.captureState() == CaptureState.CAPTURING, "startup capture enters post-roll");
+    check(
+        retention.trigger(700 * MS).status() == TriggerStatus.CAPTURE_ACTIVE,
+        "normal trigger cannot bypass startup capture");
+
+    appendRange(retention, 7, 11, 100 * MS, 5);
+    check(retention.captureState() == CaptureState.COOLDOWN, "startup capture enters cooldown");
+    Snapshot snapshot = requireSnapshot(retention);
+    AccessUnitMetadata last = snapshot.metadata(snapshot.accessUnitCount() - 1);
+    check(last.sensorTimestampNs() == 1_100 * MS, "startup capture retains full post-roll");
+    check(
+        retention.triggerAllowingStartupTruncatedPreRoll(1_200 * MS, 500 * MS).status()
+            == TriggerStatus.COOLDOWN,
+        "startup opt-in cannot bypass cooldown");
+    snapshot.close();
   }
 
   private static void continuityFailuresAreExplicitAndAbortCapture() throws Exception {

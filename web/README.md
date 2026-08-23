@@ -12,6 +12,17 @@ steps one source frame, and Home/End jumps to the clip bounds.
 The production bundle uses the versioned `/api/v1` station and capture
 contracts in `src/api.ts` and `src/review_api.ts`.
 
+Legacy-host setup preview exposes a **Preview timing** disclosure. It reports
+both roles' callback, capture-ring sink, sampler, renderer, HTTP, body, and
+decode evidence rather than hiding concurrent measurements behind the headline
+heuristic. A single credential-free record is retained in tab-scoped
+`sessionStorage`, scoped to the current service instance and two camera serials,
+capped at 8 KiB, and expired after six hours. Restarting the station service
+therefore clears retained evidence even when the same cameras remain attached.
+It is diagnostic stage evidence, not causal root-cause proof;
+cpp-httplib serialization and socket delivery occur after the server handler's
+observable timing boundary.
+
 Each arm accepts at most one trigger. After the trigger, post-roll, and encoding
 complete, capture is unarmed and the operator explicitly re-arms for the next
 swing. The displayed audio-trigger estimate frame is the retained camera frame
@@ -35,7 +46,8 @@ Build and test with Bazel:
 bazel build //web:static_app //web:fixture_demo
 bazel build //web:typescript
 bazel test //web:component_test //web:review_component_test \
-  //web:dual_node_review_api_test //web:memory_usage_parser_test //web:browser_test
+  //web:dual_node_review_api_test //web:live_status_test \
+  //web:memory_usage_parser_test //web:browser_test
 ```
 
 `bazel-bin/web/static_app/` contains the deployable production asset tree.
@@ -58,7 +70,7 @@ distinct camera roles and exactly one leader associated with the other phone,
 which must report shadow mode and retain no outbound peer of its own; two
 disabled, peer-free pose modes are also valid. Setup
 covers the camera role, the standard 720p/240 fps profile, address-trigger mode
-and inference delegate, normalized hitting region, debug evidence, and the
+and inference delegate, full-frame pose evaluation, debug evidence, and the
 leader-to-shadow association. Peer credentials are write-only: GET returns
 only whether and where a peer is configured, while PUT explicitly keeps,
 clears, or replaces the stored origin/token pair. Swing review reports the live
@@ -67,12 +79,30 @@ Pending coordination is shown as in progress, accepted and inbound requests
 are confirmed, and a rejected or failed peer arm remains a prominent alert
 even when the local clip itself reached `ready`.
 
+The setup card can deliberately rotate that phone's own control credential while capture is
+stopped. The action stays disabled until the operator enters the complete local node ID, uses the
+current Bearer credential and setup revision, shows the new token only in the explicit rotation
+result, and immediately updates the browser connection to use it. The old token is rejected.
+Remote leaders surface `Peer credential needs re-pairing` after an authentication rejection rather
+than continuing to label the stale binding verified; the operator must enter the rotated token and
+save the explicit re-pair.
+
 This authentication is deliberately minimal for the trusted local-network
-deployment. The phone-hosted URL and dual-node query parameters currently
-carry bearer tokens in cleartext HTTP/query strings, which can be exposed in
-browser history, process arguments, proxy logs, or to other users on the LAN.
-Use only an isolated/trusted hitting-area network and do not forward port 8088.
-TLS and a user-friendly pairing exchange remain production hardening work, not
+deployment. The first phone-hosted or dual-node navigation carries bootstrap
+credentials in cleartext HTTP query parameters. The app immediately consumes
+and removes every token from the address and current browser-history entry,
+retaining replacements only in tab-scoped `sessionStorage`; a same-tab reload
+therefore works without putting a rotated token back into the URL. This limits
+routine history, bookmark, and referrer leakage, but it cannot protect the
+initial HTTP request, process arguments, proxy logs, or traffic observed by other LAN users.
+Every identity and operational metadata read, including `/api/v1/node`, requires Bearer
+authorization; only the untrusted `/api/v1/clock` time hint remains public and contains no
+control-token material. New API reads fail closed. Native-video and audio URLs carry an HMAC-SHA256
+capability scoped to one immutable collection item; it cannot authorize another session and
+control-credential rotation invalidates it. Capability-bearing manifests and catalogs are private
+and non-cacheable. This prevents anonymous metadata and media reads but not cleartext observation
+and replay. Use only an isolated/trusted hitting-area network and do not forward port 8088.
+Protected transport and a user-friendly production pairing exchange remain hardening work, not
 requirements for the current field prototype.
 
 The application expects capture/session endpoints for arming, missed-shot
@@ -102,8 +132,13 @@ The legacy host production API also exposes `/api/v1/events` as a server-sent ev
 Session/capture changes trigger an immediate coalesced refresh; a slow
 15-second poll remains only as recovery if an event is missed. This removes
 the former one-second session-discovery delay without coupling the UI to camera
-objects. Android's embedded node server does not expose that event stream, so
-Android review uses bounded polling.
+objects. Android's embedded node server has four request workers and does not expose that event
+stream. Android review therefore uses independent, short authenticated status requests for each
+phone instead of occupying workers with persistent streams. The reconnect controller sends the
+current Bearer credential on every request, applies bounded exponential backoff after a failure,
+and checks the server stream ID, status revision, and monotonic generation time before accepting a
+response. Live capture controls are invalidated while either phone is disconnected or stale, but
+an already-loaded review remains available.
 
 The legacy host server writes atomically published session directories under
 `artifacts/sessions/` by default. Pass `--sessions-root <absolute-path>` to use
@@ -157,10 +192,140 @@ against a checksum-pinned Chromium headless shell downloaded by Bazel. It
 serves the fixture app with byte-range media support, verifies real VP8
 decoding, synchronized play/pause/speed/step behavior, navigation back to
 setup, timeline thumbnail and keyboard behavior, responsive two-phone setup,
-and fixed 1440×1000 and 390×844 screenshots. Its opt-in artifact path also loads
+and fixed 1440×1000 and 390×844 screenshots. It also keyboard-opens the legacy
+preview-timing disclosure at 1440×1000 and writes the expanded diagnostic as a
+test-output screenshot. Four checked-in Playwright goldens make those
+desktop and phone presentations a pixel-comparison gate for both the synchronized review player
+and the configured two-phone setup screen. The review golden preserves the browser-delivery panel
+but normalizes its five process-specific timing samples before comparison; media, labels, layout,
+and controls remain unmasked. Its opt-in artifact path also loads
 the exact hardware-produced VP9 manifest and WebMs from a completed application
 HIL run through the production bundle. Screenshots are published as Bazel undeclared test outputs
 when that output directory is available.
+
+Run just the visual comparisons while iterating with:
+
+```bash
+bazel test //web:browser_test --nocache_test_results \
+  --test_arg='--grep=golden image visual regression'
+```
+
+Treat baseline replacement as a reviewed UI change; do not use snapshot updates to accept an
+unexplained diff.
+
+The same hermetic target now also starts two production-shaped Android-node
+origins. It rejects missing and incorrect bearer credentials on every exposed
+mutation (including missed-shot/tag and feedback), verifies partial-arm
+rollback plus an immediate retry, distinguishes a peer still encoding from a
+peer whose clip is truly missing, rejects mismatched live shared-session IDs,
+and checks valid and unsatisfiable MP4 byte ranges. Before any irreversible two-phone arm, tag,
+manual-trigger, or feedback fan-out, the coordinator authenticates both credentials through the
+lightweight read-only pairing-identity route so one stale token cannot partially mutate the other
+phone or incur the full setup/peer-health path. The checked-in
+`fixtures/production_h264` production clips are real 90-frame AVC/H.264 MP4s with the Android
+one-second inter-frame GOP (IDR frames 0, 30, and 60); their metadata, retained all-intra
+comparison files, and reproduction commands are stored beside them.
+
+`//web:dual_node_review_api_test` additionally retains a deliberately stale
+browser-owned arm session while one phone reports disarmed. Saving a missed
+shot must revalidate both live phones and issue zero diagnostic mutations,
+rather than partially tagging the still-armed phone. It also proves one stale credential causes
+zero tag mutations and succeeds after the corrected credential is supplied.
+
+Current Android `GET /api/v1/sessions` entries include compact
+`android_capture` node, shared-session, role, and coordination-availability
+metadata. The dual-node catalog groups those summaries without downloading
+every historical manifest or immutable coordination record; opening one shot
+hydrates and validates only that pair. Legacy nodes without compact metadata
+retain the bounded two-request-per-origin manifest fallback. The deterministic
+catalog regression covers 35 complete pairs, an active one-sided publication,
+duplicate roles, missing coordination, exact selected-pair hydration, and a
+refresh with no additional historical fetches.
+
+The pinned Chromium remains the hermetic default but does not ship proprietary
+H.264 decoding. A local Bazel companion uses installed Google Chrome and makes
+H.264 support mandatory, then verifies both remote origins decode nonblack
+pixels, seek backward and forward across one-second GOP boundaries, play, and advance one exact
+frame. It also runs the fixed-viewport
+screenshot and axe accessibility assertions:
+
+```bash
+bazel test //web:system_h264_browser_test --test_output=errors
+```
+
+The Playwright configuration accepts `SWING_CAPTURE_BROWSER_NAME` (`chromium`,
+`firefox`, or `webkit`) and `SWING_CAPTURE_BROWSER_EXECUTABLE`. The repository
+pins Chromium and WebKit; stock Firefox is not compatible with Playwright's patched
+Firefox transport, so a separate local gate uses the installed geckodriver
+without downloading another browser:
+
+```bash
+bazel test //web:system_firefox_h264_browser_test \
+  --test_output=errors --nocache_test_results
+```
+
+That target is intentionally fail-closed. It requires Firefox to advertise and
+decode AVC, issue HTTP byte ranges for both one-second-GOP fixtures, produce
+nonblack pixels, report the exact requested media time through
+`requestVideoFrameCallback` after forward/backward GOP seeks, reproduce the
+reverse-stepped frame, visibly distinguish requested frames, and play. Firefox
+153.0.4 advances and paints a paused seek but does not enqueue a post-seek
+video-frame callback. The player therefore waits for the ordinary callback and,
+only on Firefox after a completed paused seek stalls, briefly plays from the
+preceding frame at 0.25x and pauses on the exact requested presentation. A
+one-second deadline prevents that recovery from running away. The gate proves
+that the original paused-seek pixel hash equals the callback-confirmed target,
+in addition to exact `mediaTime`, nonblack pixels, Range, GOP, repeatability,
+and playback assertions. Both fixtures and all ten requested presentations
+passed with Firefox 153.0.4/geckodriver 0.37.0 on 2026-08-23. Chrome retains its
+ordinary callback path and passes the same production H.264 player suite.
+Playwright 1.52's checksum-pinned WebKit 18.4 revision 2158 also passes the
+two-origin H.264 production test through checksum-pinned Ubuntu 24 compatibility
+libraries extracted into the Bazel test temporary directory:
+
+```bash
+bazel test //web:webkit_h264_browser_test \
+  --test_output=errors --nocache_test_results
+```
+
+The closure does not modify host packages or substitute host-soname symlinks.
+Run all three current candidates serially through one analysis-checked inventory with:
+
+```bash
+bazel test //web:browser_h264_candidate_matrix \
+  --test_output=errors --nocache_test_results
+```
+
+The aggregate is tagged `manual`/`local` and makes an omitted candidate an analysis error; it does
+not itself declare product support. The prototype supports desktop Google Chrome. Firefox and
+WebKit remain passing compatibility candidates but are not release blockers. Before a prototype
+release, run the Chrome codec gate together with the exact-APK, direct-LAN two-phone browser flow:
+
+```bash
+bazel test //web:prototype_browser_release_gate \
+  --test_output=streamed --nocache_test_results
+```
+
+This explicit manual target is the release-artifact boundary: the Chrome fixture half requires
+proprietary AVC decode, exact-frame seek/step, Range, playback, screenshot, and accessibility; the
+physical half requires one byte-identical APK on both phones and the complete hosted-UI
+start/stop/publication/media-range/cleanup flow. Installed Google Chrome must also decode the two
+MP4s newly published by that invocation directly from their phone origins, present a nonblack
+frame, and advance playback by at least 0.1 seconds. The retained evidence binds complementary
+roles, origins, and one shared recording identity and fails closed on missing or malformed decode
+fields. It does not run during the ordinary software wildcard. The prior combined artifact at
+`artifacts/android_field_recording_browser_hil_pass_20260823T132412Z` predates this
+`fresh_media_decode` contract. Two consecutive exact-APK Chrome passes at
+`artifacts/android_field_recording_browser_hil_relay_range_pass1_20260823T071927Z` and
+`artifacts/android_field_recording_browser_hil_relay_range_pass2_20260823T072013Z` exercise the
+final decode/cancellation schema and validate media-worker cleanup, but are explicitly
+non-qualifying because the Pixel 6 face-on origin used a temporary relay. The direct-LAN failure at
+`artifacts/android_browser_hil_direct_lan_preflight_failure_20260823T072340Z` records DTL ready in
+951 ms and five 500 ms Pixel 6 transport timeouts through 2.901 seconds; Playwright never launched,
+while exact-APK verification and both screen-sleep cleanup actions passed. Restore Pixel 6-to-host
+Wi-Fi reachability, then run and review the combined target for the current and every later proposed
+release revision. A later decision may promote Firefox or WebKit without weakening the current
+Chrome gate.
 
 The manual browser bridge can validate the exact output directory preserved by
 `//capture/hil:application_flow_hil_test` without touching hardware again. Pass

@@ -1,0 +1,33 @@
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
+
+cc_library(
+    name = "spectral_impact_experiment_lib",
+    srcs = ["spectral_impact_experiment.cc"],
+    hdrs = ["spectral_impact_experiment.h"],
+    deps = [
+        "//capture/audio:pcm_wav",
+        "//capture/offline/experiments/benchmark:terminal_window_benchmark",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "spectral_impact_experiment",
+    srcs = ["main.cc"],
+    deps = [
+        ":spectral_impact_experiment_lib",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "spectral_impact_experiment_test",
+    size = "small",
+    srcs = ["spectral_impact_experiment_test.cc"],
+    deps = [
+        ":spectral_impact_experiment_lib",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)

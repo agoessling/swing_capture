@@ -17,6 +17,7 @@ import com.agoessling.swingcapture.pose.PoseTriggerController;
 import com.agoessling.swingcapture.pose.inference.MediaPipePoseLandmarker;
 import com.agoessling.swingcapture.pose.inference.PoseInferenceDelegate;
 import com.agoessling.swingcapture.pose.inference.PoseInferenceDelegatePolicy;
+import com.agoessling.swingcapture.pose.inference.PoseModelVariant;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.Locale;
@@ -49,9 +50,10 @@ public final class PoseStandbyEngine implements AutoCloseable {
       PoseLandmarkObservationExtractor.Config featureConfig,
       PoseTriggerController.Config controllerConfig,
       boolean debugEvidenceEnabled,
-      int imageRotationDegrees,
       int jpegQuality,
-      long transferTimeoutMillis) {
+      long transferTimeoutMillis,
+      PoseModelVariant modelVariant,
+      Size experimentStandbySize) {
     public Config {
       Objects.requireNonNull(captureProfile, "captureProfile");
       Objects.requireNonNull(captureRole, "captureRole");
@@ -59,13 +61,8 @@ public final class PoseStandbyEngine implements AutoCloseable {
       Objects.requireNonNull(hittingRegion, "hittingRegion");
       Objects.requireNonNull(featureConfig, "featureConfig");
       Objects.requireNonNull(controllerConfig, "controllerConfig");
+      Objects.requireNonNull(modelVariant, "modelVariant");
       PoseStandbyPolicy.projectionForRole(captureRole);
-      if (imageRotationDegrees != 0
-          && imageRotationDegrees != 90
-          && imageRotationDegrees != 180
-          && imageRotationDegrees != 270) {
-        throw new IllegalArgumentException("imageRotationDegrees must be 0, 90, 180, or 270");
-      }
       if (jpegQuality < 1 || jpegQuality > 100) {
         throw new IllegalArgumentException("jpegQuality must be in [1, 100]");
       }
@@ -88,22 +85,43 @@ public final class PoseStandbyEngine implements AutoCloseable {
           PoseLandmarkObservationExtractor.Config.defaultsForFiveFramesPerSecond(),
           PoseTriggerController.Config.defaultsForFiveFramesPerSecond(),
           debugEvidenceEnabled,
-          0,
           DEFAULT_JPEG_QUALITY,
-          DEFAULT_TRANSFER_TIMEOUT_MILLIS);
+          DEFAULT_TRANSFER_TIMEOUT_MILLIS,
+          PoseModelVariant.productionDefault(),
+          null);
+    }
+
+    Config withExperiment(PoseExperimentConfiguration experiment) {
+      Objects.requireNonNull(experiment, "experiment");
+      return new Config(
+          captureProfile,
+          captureRole,
+          delegatePolicy,
+          hittingRegion,
+          featureConfig,
+          controllerConfig,
+          debugEvidenceEnabled,
+          jpegQuality,
+          transferTimeoutMillis,
+          experiment.modelVariant(),
+          new Size(experiment.standbyWidth(), experiment.standbyHeight()));
     }
   }
 
   public record ReadyStatus(
       String cameraId,
       int timestampSource,
+      int imageRotationDegrees,
       Size standbySize,
       PoseInferenceDelegate inferenceDelegate,
+      PoseModelVariant modelVariant,
       PoseProjection projection) {
     public ReadyStatus {
       Objects.requireNonNull(cameraId, "cameraId");
+      CameraImageRotation.fromSensorOrientation(imageRotationDegrees);
       Objects.requireNonNull(standbySize, "standbySize");
       Objects.requireNonNull(inferenceDelegate, "inferenceDelegate");
+      Objects.requireNonNull(modelVariant, "modelVariant");
       Objects.requireNonNull(projection, "projection");
     }
   }
@@ -111,6 +129,14 @@ public final class PoseStandbyEngine implements AutoCloseable {
   /** Callbacks are serialized on a dedicated event thread, never on the inference worker. */
   public interface Listener {
     default void onReady(ReadyStatus status) {}
+
+    /** Receives a detached, setup-only frame at most once per second. */
+    default void onSetupPreviewNv21(
+        long timestampBoottimeNanos,
+        int width,
+        int height,
+        int imageRotationDegrees,
+        byte[] nv21) {}
 
     default void onDecision(
         PoseLandmarkObservationExtractor.Evaluation evaluation,
@@ -153,7 +179,9 @@ public final class PoseStandbyEngine implements AutoCloseable {
       new DebugEvidenceCadence(DebugEvidenceCadence.DEFAULT_INTERVAL_NANOS);
   private Lifecycle lifecycle = Lifecycle.STARTING;
   private WarmCameraLease cameraLease;
+  private int imageRotationDegrees;
   private PoseLandmarkFrame previousLandmarkFrame;
+  private boolean warmupPending = true;
   private boolean landmarkerClosed;
 
   private PoseStandbyEngine(
@@ -209,26 +237,34 @@ public final class PoseStandbyEngine implements AutoCloseable {
     Objects.requireNonNull(controller, "controller");
     Objects.requireNonNull(listener, "listener");
     MediaPipePoseLandmarker landmarker =
-        MediaPipePoseLandmarker.open(context.getApplicationContext(), config.delegatePolicy());
+        MediaPipePoseLandmarker.open(
+            context.getApplicationContext(), config.delegatePolicy(), config.modelVariant());
     PoseStandbyEngine engine = new PoseStandbyEngine(config, listener, landmarker, controller);
     try {
-      WarmCameraLease opened =
-          WarmCameraLease.open(
-              context.getApplicationContext(),
-              config.captureProfile(),
-              new WarmCameraLease.StandbyImageListener() {
-                @Override
-                public void onImage(Image image) {
-                  engine.offerImage(image);
-                }
+      WarmCameraLease.StandbyImageListener imageListener =
+          new WarmCameraLease.StandbyImageListener() {
+            @Override
+            public void onImage(Image image) {
+              engine.offerImage(image);
+            }
 
-                @Override
-                public void onFailure(Throwable failure) {
-                  engine.reportFailure(failure);
-                }
-              });
+            @Override
+            public void onFailure(Throwable failure) {
+              engine.reportFailure(failure);
+            }
+          };
+      WarmCameraLease opened =
+          config.experimentStandbySize() == null
+              ? WarmCameraLease.open(
+                  context.getApplicationContext(), config.captureProfile(), imageListener)
+              : WarmCameraLease.openExperiment(
+                  context.getApplicationContext(),
+                  config.captureProfile(),
+                  config.experimentStandbySize(),
+                  imageListener);
       synchronized (engine.lifecycleLock) {
         engine.cameraLease = opened;
+        engine.imageRotationDegrees = opened.sensorOrientationDegrees();
         engine.lifecycle = Lifecycle.RUNNING;
       }
       engine.dispatch(
@@ -237,8 +273,10 @@ public final class PoseStandbyEngine implements AutoCloseable {
                   new ReadyStatus(
                       opened.cameraId(),
                       opened.timestampSource(),
+                      opened.sensorOrientationDegrees(),
                       opened.standbySize(),
                       landmarker.actualDelegate(),
+                      landmarker.modelVariant(),
                       engine.projection)));
       return engine;
     } catch (Throwable failure) {
@@ -428,6 +466,7 @@ public final class PoseStandbyEngine implements AutoCloseable {
 
   private void processImage(Image image) {
     long startedNs = SystemClock.elapsedRealtimeNanos();
+    boolean warmup = warmupPending;
     PoseLandmarkObservationExtractor.Evaluation evaluation;
     PoseTriggerController.Decision decision;
     long inferenceDurationNs;
@@ -436,6 +475,12 @@ public final class PoseStandbyEngine implements AutoCloseable {
       PoseLandmarkFrame landmarkFrame = inferYuvImage(image, imageTimestampNs);
       inferenceDurationNs =
           Math.max(0, SystemClock.elapsedRealtimeNanos() - startedNs);
+      if (warmup) {
+        warmupPending = false;
+        previousLandmarkFrame = landmarkFrame;
+        metrics.recordWarmup(inferenceDurationNs, true);
+        return;
+      }
       evaluation =
           PoseLandmarkObservationExtractor.evaluate(
               landmarkFrame,
@@ -446,23 +491,31 @@ public final class PoseStandbyEngine implements AutoCloseable {
       synchronized (controller) {
         decision = controller.observe(evaluation.toControllerObservation());
       }
+      metrics.recordDecision(evaluation.timestampNs(), SystemClock.elapsedRealtimeNanos());
       previousLandmarkFrame = landmarkFrame;
       metrics.recordInference(inferenceDurationNs, true);
     } catch (RuntimeException failure) {
       long durationNs = Math.max(0, SystemClock.elapsedRealtimeNanos() - startedNs);
-      metrics.recordInference(durationNs, false);
+      if (warmup) {
+        warmupPending = false;
+        metrics.recordWarmup(durationNs, false);
+      } else {
+        metrics.recordInference(durationNs, false);
+      }
       reportFailure(failure);
       return;
     }
 
+    boolean armDecision = decision.command() == PoseTriggerController.Command.START_HIGH_SPEED;
     if (config.debugEvidenceEnabled()) {
       appendObservationEvidence(inferenceDurationNs, evaluation, decision);
-      boolean armDecision = decision.command() == PoseTriggerController.Command.START_HIGH_SPEED;
       if (evidenceCadence.shouldSnapshot(
               evaluation.timestampNs(), armDecision)
           && (armDecision || armEvidenceFlush.permitsOrdinaryWork())) {
         offerDebugEvidence(image, evaluation, armDecision);
       }
+    } else if (!armDecision && evidenceCadence.shouldSnapshot(evaluation.timestampNs(), false)) {
+      offerSetupPreview(image, evaluation.timestampNs());
     }
     // Register the arm JPEG before exposing START_HIGH_SPEED to the service. Transfer can now
     // distinguish that priority work from ordinary best-effort 1 Hz evidence.
@@ -479,6 +532,7 @@ public final class PoseStandbyEngine implements AutoCloseable {
               evaluation.timestampNs(),
               new byte[0],
               modelAndDelegate(),
+              imageRotationDegrees,
               inferenceDurationNs,
               evaluation.personConfidence(),
               evaluation.addressConfidence(),
@@ -496,7 +550,7 @@ public final class PoseStandbyEngine implements AutoCloseable {
     if (image.getFormat() != ImageFormat.YUV_420_888 || image.getPlanes().length != 3) {
       throw new IllegalArgumentException("pose inference requires a three-plane YUV_420_888 Image");
     }
-    return landmarker.infer(image, imageTimestampNs, config.imageRotationDegrees());
+    return landmarker.infer(image, imageTimestampNs, imageRotationDegrees);
   }
 
   private void offerDebugEvidence(
@@ -539,6 +593,27 @@ public final class PoseStandbyEngine implements AutoCloseable {
       if (armFrame) {
         armEvidenceFlush.complete(evaluation.timestampNs(), false);
       }
+    }
+  }
+
+  private void offerSetupPreview(Image image, long timestampBoottimeNanos) {
+    try {
+      Image.Plane[] planes = image.getPlanes();
+      int width = image.getWidth();
+      int height = image.getHeight();
+      byte[] nv21 =
+          Yuv420PlanePacker.toNv21(
+              width,
+              height,
+              viewPlane(planes[0]),
+              viewPlane(planes[1]),
+              viewPlane(planes[2]));
+      dispatch(
+          () ->
+              listener.onSetupPreviewNv21(
+                  timestampBoottimeNanos, width, height, imageRotationDegrees, nv21));
+    } catch (RuntimeException ignored) {
+      // Setup imagery is best-effort and must never affect pose readiness or arming.
     }
   }
 
@@ -607,7 +682,7 @@ public final class PoseStandbyEngine implements AutoCloseable {
   }
 
   private String modelAndDelegate() {
-    return MediaPipePoseLandmarker.MODEL_ASSET_PATH
+    return landmarker.modelVariant().assetPath()
         + ":"
         + landmarker.actualDelegate().name().toLowerCase(Locale.ROOT);
   }

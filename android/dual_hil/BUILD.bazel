@@ -1,4 +1,95 @@
-load("//tools:strict_cc.bzl", "cc_library", "cc_test")
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
+
+cc_library(
+    name = "pcm_replay_case",
+    srcs = ["pcm_replay_case.cc"],
+    hdrs = ["pcm_replay_case.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "pcm_replay_case_test",
+    size = "small",
+    srcs = ["pcm_replay_case_test.cc"],
+    deps = [
+        ":pcm_replay_case",
+        "//capture/audio:pcm_wav",
+    ],
+)
+
+cc_library(
+    name = "timing_calibration_evidence",
+    srcs = ["timing_calibration_evidence.cc"],
+    hdrs = ["timing_calibration_evidence.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "timing_calibration_evidence_test",
+    size = "small",
+    srcs = ["timing_calibration_evidence_test.cc"],
+    deps = [
+        ":timing_calibration_evidence",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "timing_calibration_score",
+    srcs = ["timing_calibration_score.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":timing_calibration_evidence",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "paired_pose_qualification_policy",
+    srcs = ["paired_pose_qualification_policy.cc"],
+    hdrs = ["paired_pose_qualification_policy.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/pose_hil:pose_qualification_performance",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "paired_pose_qualification_policy_test",
+    size = "small",
+    srcs = ["paired_pose_qualification_policy_test.cc"],
+    deps = [
+        ":paired_pose_qualification_policy",
+        "//android/pose_hil:pose_qualification_performance",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "pcm_replay_extract",
+    srcs = ["pcm_replay_extract.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pcm_replay_case",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "pcm_replay_score",
+    srcs = ["pcm_replay_score.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pcm_replay_case",
+        "@nlohmann_json//:json",
+    ],
+)
 
 cc_library(
     name = "audio_evidence_validation",
@@ -31,6 +122,39 @@ cc_library(
     visibility = ["//visibility:private"],
     deps = [
         "//android/dual_coordination_hil:dual_coordination",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "autonomous_recovery_validation",
+    srcs = ["autonomous_recovery_validation.cc"],
+    hdrs = ["autonomous_recovery_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "autonomous_recovery_validation_test",
+    size = "small",
+    srcs = ["autonomous_recovery_validation_test.cc"],
+    deps = [":autonomous_recovery_validation"],
+)
+
+cc_library(
+    name = "os_reboot_ceremony_validation",
+    srcs = ["os_reboot_ceremony_validation.cc"],
+    hdrs = ["os_reboot_ceremony_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "os_reboot_ceremony_validation_test",
+    size = "small",
+    srcs = ["os_reboot_ceremony_validation_test.cc"],
+    deps = [
+        ":os_reboot_ceremony_validation",
         "@nlohmann_json//:json",
     ],
 )
@@ -78,16 +202,184 @@ cc_test(
     deps = [":rgb_swing_analysis"],
 )
 
+cc_library(
+    name = "hil_cleanup_evidence",
+    srcs = ["hil_cleanup_evidence.cc"],
+    hdrs = ["hil_cleanup_evidence.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "hil_cleanup_evidence_test",
+    size = "small",
+    srcs = ["hil_cleanup_evidence_test.cc"],
+    deps = [
+        ":hil_cleanup_evidence",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "hil_artifact_validation",
+    srcs = ["hil_artifact_validation.cc"],
+    hdrs = ["hil_artifact_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "hil_artifact_validation_test",
+    size = "small",
+    srcs = ["hil_artifact_validation_test.cc"],
+    deps = [
+        ":hil_artifact_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "hil_command",
+    srcs = ["hil_command.cc"],
+    hdrs = ["hil_command.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "hil_command_fixture",
+    srcs = ["hil_command_fixture.cc"],
+    visibility = ["//visibility:private"],
+)
+
+cc_test(
+    name = "hil_command_test",
+    size = "small",
+    srcs = ["hil_command_test.cc"],
+    args = ["$(rootpath :hil_command_fixture)"],
+    data = [":hil_command_fixture"],
+    deps = [":hil_command"],
+)
+
+cc_library(
+    name = "android_apk_install",
+    srcs = ["android_apk_install.cc"],
+    hdrs = ["android_apk_install.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":hil_command",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "android_apk_install_fixture",
+    srcs = ["android_apk_install_fixture.cc"],
+    visibility = ["//visibility:private"],
+)
+
+cc_test(
+    name = "android_apk_install_test",
+    size = "small",
+    srcs = ["android_apk_install_test.cc"],
+    args = ["$(rootpath :android_apk_install_fixture)"],
+    data = [":android_apk_install_fixture"],
+    deps = [":android_apk_install"],
+)
+
+cc_library(
+    name = "retained_media_analysis",
+    srcs = ["retained_media_analysis.cc"],
+    hdrs = ["retained_media_analysis.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":dual_session_validation",
+        ":hil_command",
+        ":rgb_swing_analysis",
+        "//capture/optical:april_tag",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "retained_media_analysis_test",
+    size = "small",
+    srcs = ["retained_media_analysis_test.cc"],
+    deps = [
+        ":retained_media_analysis",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "dual_android_hil_runner",
+    srcs = ["dual_android_hil_test.cc"],
+    hdrs = ["dual_android_hil_runner.h"],
+    # This host-only runner is I/O-bound. Avoid spending the inner loop optimizing thousands of
+    # lines of JSON/report orchestration; media analysis remains in its separately optimized lib.
+    copts = ["-O0"],
+    linkstatic = True,
+    # This orchestration source has no software-only consumer. Keep it out of
+    # the canonical wildcard and compile it through the explicit manual static
+    # check or a selected physical target.
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":android_apk_install",
+        ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
+        ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
+        ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":hil_command",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
+        ":retained_media_analysis",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_qualification_performance",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "configuration_recovery_journal",
+    srcs = ["configuration_recovery_journal.cc"],
+    hdrs = ["configuration_recovery_journal.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "configuration_recovery_journal_test",
+    size = "small",
+    srcs = ["configuration_recovery_journal_test.cc"],
+    deps = [
+        ":configuration_recovery_journal",
+        "@nlohmann_json//:json",
+    ],
+)
+
 cc_test(
     name = "dual_phone_sequential_hil_test",
     size = "medium",
-    srcs = ["dual_android_hil_test.cc"],
+    srcs = ["dual_android_hil_main.cc"],
     args = [
         "$(rootpath //tools/android:adb)",
         "$(rootpath //android/app:swing_capture.apk)",
+        "$(rootpath //tools:android_apk_installer)",
     ],
     data = [
         "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
         "//tools/android:adb",
     ],
     tags = [
@@ -101,11 +393,21 @@ cc_test(
     ],
     timeout = "short",
     deps = [
+        ":dual_android_hil_runner",
         ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
         ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
         ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
         ":rgb_swing_analysis",
         "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
         "//capture/hil:feather_hil_controller",
         "//capture/hil:feather_hil_serial",
         "//capture/optical:april_tag",
@@ -117,14 +419,16 @@ cc_test(
 cc_test(
     name = "dual_phone_concurrent_hil_test",
     size = "medium",
-    srcs = ["dual_android_hil_test.cc"],
+    srcs = ["dual_android_hil_main.cc"],
     args = [
         "$(rootpath //tools/android:adb)",
         "$(rootpath //android/app:swing_capture.apk)",
         "concurrent",
+        "$(rootpath //tools:android_apk_installer)",
     ],
     data = [
         "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
         "//tools/android:adb",
     ],
     tags = [
@@ -138,11 +442,21 @@ cc_test(
     ],
     timeout = "short",
     deps = [
+        ":dual_android_hil_runner",
         ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
         ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
         ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
         ":rgb_swing_analysis",
         "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
         "//capture/hil:feather_hil_controller",
         "//capture/hil:feather_hil_serial",
         "//capture/optical:april_tag",
@@ -154,14 +468,17 @@ cc_test(
 cc_test(
     name = "dual_phone_paired_pose_arm_hil_test",
     size = "medium",
-    srcs = ["dual_android_hil_test.cc"],
+    srcs = ["dual_android_hil_main.cc"],
     args = [
         "$(rootpath //tools/android:adb)",
         "$(rootpath //android/app:swing_capture.apk)",
         "paired-pose",
+        "$(rootpath //tools:android_apk_installer)",
     ],
     data = [
+        "field_pcm_replay_cases.json",
         "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
         "//tools/android:adb",
     ],
     tags = [
@@ -175,15 +492,581 @@ cc_test(
     ],
     timeout = "short",
     deps = [
+        ":dual_android_hil_runner",
         ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
         ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
         ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
         ":rgb_swing_analysis",
         "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
         "//capture/hil:feather_hil_controller",
         "//capture/hil:feather_hil_serial",
         "//capture/optical:april_tag",
         "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_paired_pose_arm_lan_hil_test",
+    size = "medium",
+    srcs = ["dual_android_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "paired-pose-lan",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "field_pcm_replay_cases.json",
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+        "requires-rp2040",
+    ],
+    timeout = "short",
+    deps = [
+        ":dual_android_hil_runner",
+        ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
+        ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
+        ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_paired_pose_qualification_5m_hil_test",
+    size = "enormous",
+    srcs = ["dual_android_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "paired-pose-qualify-5m",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "field_pcm_replay_cases.json",
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+        "requires-rp2040",
+    ],
+    timeout = "eternal",
+    deps = [
+        ":dual_android_hil_runner",
+        ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
+        ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
+        ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_paired_pose_soak_30m_hil_test",
+    size = "enormous",
+    srcs = ["dual_android_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "paired-pose-soak-30m",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "field_pcm_replay_cases.json",
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+        "requires-rp2040",
+    ],
+    timeout = "eternal",
+    deps = [
+        ":dual_android_hil_runner",
+        ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
+        ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
+        ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_discovery_pairing_hil_test",
+    size = "medium",
+    srcs = ["dual_android_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "discovery-pairing",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+    ],
+    timeout = "short",
+    deps = [
+        ":dual_android_hil_runner",
+        ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
+        ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
+        ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_autonomous_restart_recovery_hil_test",
+    size = "medium",
+    srcs = ["dual_android_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "autonomous-restart",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+    ],
+    timeout = "short",
+    deps = [
+        ":dual_android_hil_runner",
+        ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
+        ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
+        ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# Destructive only in the narrow sense that it intentionally reboots two explicitly selected
+# phones. It never installs an APK or mutates configuration, and requires a literal acknowledgement
+# plus a local operator for first unlock and foreground launch. See docs/android.md.
+cc_test(
+    name = "dual_phone_os_reboot_ceremony_hil_test",
+    size = "large",
+    srcs = ["os_reboot_ceremony_hil_test.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+        "requires-local-operator",
+        "requires-os-reboot",
+    ],
+    # The internal unlock/launch watchdogs are each 120 seconds and every automatic stage is 15
+    # seconds. Keep Bazel's outer watchdog above their composed worst case so cleanup can publish.
+    timeout = "long",
+    deps = [
+        ":android_apk_install",
+        ":hil_command",
+        ":hil_http_client",
+        ":os_reboot_ceremony_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_autonomous_disturbance_hil_test",
+    size = "medium",
+    srcs = ["dual_android_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "autonomous-disturbance",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+    ],
+    timeout = "short",
+    deps = [
+        ":dual_android_hil_runner",
+        ":audio_evidence_validation",
+        ":autonomous_recovery_validation",
+        ":concurrent_hil_validation",
+        ":configuration_recovery_journal",
+        ":dual_session_validation",
+        ":hil_artifact_validation",
+        ":hil_cleanup_evidence",
+        ":paired_pose_qualification_policy",
+        ":pcm_replay_case",
+        ":rgb_swing_analysis",
+        "//android/dual_coordination_hil:dual_coordination",
+        "//android/hil:android_probe_hil_support",
+        "//android/pose_hil:pose_standby_validation",
+        "//capture/audio:pcm_wav",
+        "//capture/hil:feather_hil_controller",
+        "//capture/hil:feather_hil_serial",
+        "//capture/optical:april_tag",
+        "//station:station_config",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "hil_http_client",
+    srcs = ["hil_http_client.cc"],
+    hdrs = ["hil_http_client.h"],
+    visibility = [
+        "//android/dual_hil:__pkg__",
+        "//web:__pkg__",
+    ],
+)
+
+cc_test(
+    name = "hil_http_client_test",
+    size = "small",
+    srcs = ["hil_http_client_test.cc"],
+    deps = [":hil_http_client"],
+)
+
+cc_library(
+    name = "field_recording_hil_transport",
+    srcs = ["field_recording_hil_transport.cc"],
+    hdrs = ["field_recording_hil_transport.h"],
+    visibility = ["//visibility:private"],
+)
+
+cc_test(
+    name = "field_recording_hil_transport_test",
+    size = "small",
+    srcs = ["field_recording_hil_transport_test.cc"],
+    deps = [":field_recording_hil_transport"],
+)
+
+cc_library(
+    name = "field_recording_partial_start_validation",
+    srcs = ["field_recording_partial_start_validation.cc"],
+    hdrs = ["field_recording_partial_start_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "field_recording_partial_start_validation_test",
+    size = "small",
+    srcs = ["field_recording_partial_start_validation_test.cc"],
+    deps = [
+        ":field_recording_partial_start_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "field_recording_async_start_failure_validation",
+    srcs = ["field_recording_async_start_failure_validation.cc"],
+    hdrs = ["field_recording_async_start_failure_validation.h"],
+    visibility = ["//visibility:private"],
+)
+
+cc_test(
+    name = "field_recording_async_start_failure_validation_test",
+    size = "small",
+    srcs = ["field_recording_async_start_failure_validation_test.cc"],
+    deps = [":field_recording_async_start_failure_validation"],
+)
+
+cc_library(
+    name = "field_recording_smoke_validation",
+    srcs = ["field_recording_smoke_validation.cc"],
+    hdrs = ["field_recording_smoke_validation.h"],
+    visibility = ["//visibility:private"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "field_recording_smoke_validation_test",
+    size = "small",
+    srcs = ["field_recording_smoke_validation_test.cc"],
+    deps = [
+        ":field_recording_smoke_validation",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_field_recording_smoke_hil_test",
+    size = "medium",
+    srcs = ["field_recording_smoke_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_apk_install",
+        ":field_recording_hil_transport",
+        ":field_recording_smoke_validation",
+        ":hil_command",
+        ":hil_http_client",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_field_recording_direct_lan_smoke_hil_test",
+    size = "medium",
+    srcs = ["field_recording_smoke_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "$(rootpath //tools:android_apk_installer)",
+        "direct-lan",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+        "requires-lan",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_apk_install",
+        ":field_recording_hil_transport",
+        ":field_recording_smoke_validation",
+        ":hil_command",
+        ":hil_http_client",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_field_recording_partial_start_hil_test",
+    size = "medium",
+    srcs = ["field_recording_partial_start_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "$(rootpath //tools:android_apk_installer)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_apk_install",
+        ":field_recording_async_start_failure_validation",
+        ":field_recording_partial_start_validation",
+        ":hil_command",
+        ":hil_http_client",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "dual_phone_field_recording_async_start_failure_hil_test",
+    size = "medium",
+    srcs = ["field_recording_partial_start_hil_main.cc"],
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //android/app:swing_capture.apk)",
+        "$(rootpath //tools:android_apk_installer)",
+        "async-start-failure",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools:android_apk_installer",
+        "//tools/android:adb",
+    ],
+    tags = [
+        "exclusive",
+        "hil",
+        "local",
+        "manual",
+        "no-sandbox",
+        "requires-android-phone",
+    ],
+    timeout = "short",
+    deps = [
+        ":android_apk_install",
+        ":field_recording_async_start_failure_validation",
+        ":field_recording_partial_start_validation",
+        ":hil_command",
+        ":hil_http_client",
         "@nlohmann_json//:json",
     ],
 )

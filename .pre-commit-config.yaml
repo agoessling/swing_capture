@@ -8,6 +8,7 @@ repos:
         entry: bazel
         args:
           - test
+          - --config=precommit
           - //...
           - --test_output=errors
         pass_filenames: false

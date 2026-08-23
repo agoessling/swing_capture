@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -39,7 +40,9 @@ using swing_capture::service::CameraRole;
 using swing_capture::service::CameraSettingsUpdate;
 using swing_capture::service::CameraStatus;
 using swing_capture::service::CameraWorker;
+using swing_capture::service::CapturedFrameSink;
 using swing_capture::service::PreviewCameraDevice;
+using swing_capture::service::PreviewSamplingHook;
 
 class FakeCamera final : public PreviewCameraDevice {
  public:
@@ -221,8 +224,102 @@ class CountingPreviewProcessor final : public PreviewFrameProcessor {
   std::atomic<std::uint64_t> render_count_ = 0;
 };
 
+class BlockingPreviewProcessor final : public PreviewFrameProcessor {
+ public:
+  RenderedPreviewImage Render(const swing_capture::preview::SampledPreviewFrame &frame,
+                              const PreviewRenderOptions &) override {
+    {
+      std::unique_lock lock(mutex_);
+      if (block_next_) {
+        block_next_ = false;
+        blocked_ = true;
+        condition_.notify_all();
+        condition_.wait(lock, [this] { return released_; });
+        blocked_ = false;
+      }
+    }
+    const auto now = std::chrono::steady_clock::now();
+    return {
+        .source_metadata = frame.metadata,
+        .preview_sequence = frame.preview_sequence,
+        .dimensions = {.width = frame.metadata.width, .height = frame.metadata.height},
+        .source_quality = {},
+        .media_type = "image/jpeg",
+        .encoded_bytes = "jpeg",
+        .timings = {},
+        .render_started_at = now,
+        .render_completed_at = now,
+    };
+  }
+
+  void BlockNextRender() {
+    const std::scoped_lock lock(mutex_);
+    block_next_ = true;
+    released_ = false;
+  }
+
+  void WaitUntilBlocked() {
+    std::unique_lock lock(mutex_);
+    assert(condition_.wait_for(lock, std::chrono::seconds(1), [this] { return blocked_; }));
+  }
+
+  void Release() {
+    const std::scoped_lock lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool block_next_ = false;
+  bool blocked_ = false;
+  bool released_ = false;
+};
+
+class BlockingStage final {
+ public:
+  void Run() {
+    std::unique_lock lock(mutex_);
+    if (!block_next_) {
+      return;
+    }
+    block_next_ = false;
+    blocked_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [this] { return released_; });
+    blocked_ = false;
+  }
+
+  void BlockNext() {
+    const std::scoped_lock lock(mutex_);
+    block_next_ = true;
+    released_ = false;
+  }
+
+  void WaitUntilBlocked() {
+    std::unique_lock lock(mutex_);
+    assert(condition_.wait_for(lock, std::chrono::seconds(1), [this] { return blocked_; }));
+  }
+
+  void Release() {
+    const std::scoped_lock lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool block_next_ = false;
+  bool blocked_ = false;
+  bool released_ = false;
+};
+
 CameraWorker MakeWorker(FakeCamera **fake_out, std::uint32_t width = 8, std::uint32_t height = 6,
-                        std::unique_ptr<PreviewFrameProcessor> frame_processor = nullptr) {
+                        std::unique_ptr<PreviewFrameProcessor> frame_processor = nullptr,
+                        CapturedFrameSink captured_frame_sink = {},
+                        PreviewSamplingHook preview_sampling_hook = {}) {
   auto fake = std::make_unique<FakeCamera>();
   *fake_out = fake.get();
   return CameraWorker(CameraRole::kDownTheLine, std::move(fake),
@@ -232,7 +329,8 @@ CameraWorker MakeWorker(FakeCamera **fake_out, std::uint32_t width = 8, std::uin
                        .exposure_microseconds = kDefaultExposureMicroseconds,
                        .gain_decibels = kDefaultGainDecibels,
                        .acquisition_buffer_count = 4},
-                      std::move(frame_processor));
+                      std::move(frame_processor), std::move(captured_frame_sink),
+                      std::move(preview_sampling_hook));
 }
 
 void WaitForPreview(CameraWorker &worker) {
@@ -275,6 +373,17 @@ void TestCapturePreviewAndSettingsLifecycle() {
   assert(initial.preview_performance.rendered_age_milliseconds >= 0.0);
   assert(initial.preview_performance.total_milliseconds >=
          initial.preview_performance.encode_milliseconds);
+  assert(initial.preview_performance.latest_capture_frame_id > 0);
+  assert(initial.preview_performance.latest_capture_age_milliseconds >= 0.0);
+  assert(initial.preview_performance.latest_capture_frame_id >=
+         initial.preview_performance.latest_sink_frame_id);
+  assert(initial.preview_performance.latest_sink_frame_id >=
+         initial.preview_performance.latest_sampler_frame_id);
+  assert(initial.preview_performance.sampled_sequence >= initial.preview_sequence);
+  assert(initial.preview_performance.sampled_age_milliseconds >= 0.0);
+  assert(initial.preview_performance.render_queue_milliseconds >= 0.0);
+  assert(initial.preview_performance.renderer_stage == "idle" ||
+         initial.preview_performance.renderer_stage == "routine");
   const auto sampled = worker.LatestSampledFrame();
   assert(sampled != nullptr);
   assert(sampled->metadata.width == 800);
@@ -467,6 +576,88 @@ void TestHighRateSamplingDoesNotIncreaseRoutineRenderCadence() {
   worker.Stop();
 }
 
+void TestStatusAttributesRendererBacklogWithoutCameraHardware() {
+  using namespace std::chrono_literals;
+  FakeCamera *fake = nullptr;
+  auto processor = std::make_unique<BlockingPreviewProcessor>();
+  BlockingPreviewProcessor *const processor_observer = processor.get();
+  CameraWorker worker = MakeWorker(&fake, 8, 6, std::move(processor));
+  worker.Start();
+  WaitForPreview(worker);
+
+  processor_observer->BlockNextRender();
+  processor_observer->WaitUntilBlocked();
+  CameraStatus blocked;
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  do {
+    std::this_thread::sleep_for(5ms);
+    blocked = worker.Status();
+  } while ((!blocked.preview_performance.render_pending ||
+            blocked.preview_performance.sampled_sequence <= blocked.preview_sequence) &&
+           std::chrono::steady_clock::now() < deadline);
+
+  assert(blocked.connected);
+  assert(blocked.preview_performance.renderer_stage == "routine");
+  assert(blocked.preview_performance.render_pending);
+  assert(blocked.preview_performance.latest_capture_frame_id > 0);
+  assert(blocked.preview_performance.latest_capture_age_milliseconds < 100.0);
+  assert(blocked.preview_performance.sampled_sequence > blocked.preview_sequence);
+  assert(blocked.preview_performance.source_age_milliseconds >
+         blocked.preview_performance.sampled_age_milliseconds);
+
+  processor_observer->Release();
+  const std::uint64_t blocked_sample = blocked.preview_performance.sampled_sequence;
+  do {
+    std::this_thread::sleep_for(5ms);
+    blocked = worker.Status();
+  } while ((blocked.preview_sequence < blocked_sample ||
+            blocked.preview_performance.renderer_stage != "idle") &&
+           std::chrono::steady_clock::now() < deadline + 1s);
+  assert(blocked.preview_sequence >= blocked_sample);
+  worker.Stop();
+}
+
+void TestStatusSeparatesBlockedCaptureSinkFromCameraReceipt() {
+  FakeCamera *fake = nullptr;
+  const auto stage = std::make_shared<BlockingStage>();
+  CameraWorker worker =
+      MakeWorker(&fake, 8, 6, nullptr, [stage](const FrameView &) { stage->Run(); });
+  worker.Start();
+  WaitForPreview(worker);
+
+  stage->BlockNext();
+  stage->WaitUntilBlocked();
+  const CameraStatus blocked = worker.Status();
+  assert(blocked.connected);
+  assert(blocked.preview_performance.latest_capture_frame_id >
+         blocked.preview_performance.latest_sink_frame_id);
+  assert(blocked.preview_performance.latest_sink_frame_id ==
+         blocked.preview_performance.latest_sampler_frame_id);
+
+  stage->Release();
+  worker.Stop();
+}
+
+void TestStatusSeparatesBlockedPreviewSamplerFromCaptureSink() {
+  FakeCamera *fake = nullptr;
+  const auto stage = std::make_shared<BlockingStage>();
+  CameraWorker worker = MakeWorker(&fake, 8, 6, nullptr, {}, [stage] { stage->Run(); });
+  worker.Start();
+  WaitForPreview(worker);
+
+  stage->BlockNext();
+  stage->WaitUntilBlocked();
+  const CameraStatus blocked = worker.Status();
+  assert(blocked.connected);
+  assert(blocked.preview_performance.latest_capture_frame_id ==
+         blocked.preview_performance.latest_sink_frame_id);
+  assert(blocked.preview_performance.latest_sink_frame_id >
+         blocked.preview_performance.latest_sampler_frame_id);
+
+  stage->Release();
+  worker.Stop();
+}
+
 }  // namespace
 
 int main() {
@@ -482,5 +673,8 @@ int main() {
   run("rejected setting", TestRejectedSettingDoesNotStopCamera);
   run("failed update rollback", TestFailedUpdateRestoresPreviousConfiguration);
   run("high-rate sample render throttle", TestHighRateSamplingDoesNotIncreaseRoutineRenderCadence);
+  run("renderer backlog attribution", TestStatusAttributesRendererBacklogWithoutCameraHardware);
+  run("capture sink attribution", TestStatusSeparatesBlockedCaptureSinkFromCameraReceipt);
+  run("preview sampler attribution", TestStatusSeparatesBlockedPreviewSamplerFromCaptureSink);
   return 0;
 }

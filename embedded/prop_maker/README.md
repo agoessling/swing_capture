@@ -18,6 +18,11 @@ accepted.
 SC-HIL/1 <id> QUERY
 SC-HIL/1 <id> LED <lead_us> <duration_us>
 SC-HIL/1 <id> TONE <lead_us> <duration_us> <frequency_hz> <level_permille>
+SC-HIL/1 <id> PCM_BEGIN <sample_count> <crc32_decimal>
+SC-HIL/1 <id> PCM_CHUNK <byte_offset> <pcm16le_hex_bytes>
+SC-HIL/1 <id> PCM_COMMIT
+SC-HIL/1 <id> PCM_ABORT
+SC-HIL/1 <id> PCM_PLAY <lead_us> <gain_permille> <brightness> <marker_sample>
 SC-HIL/1 <id> CALIBRATE
 SC-HIL/1 <id> SWING <brightness>
 ```
@@ -45,9 +50,9 @@ LED pulse or starving audio. Rejected input returns a framed `ERR` with a stable
 error code and device time. Lines longer than 160 bytes are discarded through
 the following newline, after which parsing resumes.
 
-The host must complete `QUERY` negotiation before using `CALIBRATE` or
-`SWING`. Firmware `prop-maker-hil-5` advertises the exact
-`query,led,tone,calibrate,swing` capability set and the fixed calibration
+The host must complete `QUERY` negotiation before using `CALIBRATE`, `SWING`,
+or recorded PCM replay. Firmware `prop-maker-hil-9` advertises the exact
+`query,led,tone,pcm,calibrate,swing` capability set and the fixed calibration
 brightness candidates `1,2,3,4,6,8,12,16`. These low levels replace the v3
 set after level 16 already produced unsafe saturation and bloom on the physical
 two-camera fixture. `SWING` rejects every
@@ -64,6 +69,41 @@ The parser enforces these limits before an output is enabled:
 - tone duration: 1,000 through 250,000 us;
 - tone frequency: 100 through 10,000 Hz;
 - tone level: 1 through 125 permille of signed 16-bit full scale.
+
+## Recorded PCM replay
+
+The `PCM_*` transaction uploads one bounded, byte-exact mono PCM16LE window from a
+48 kHz field recording. A clip contains 1 through 12,000 samples (at most
+250 ms). `PCM_BEGIN` invalidates any previous clip and declares its sample
+count and standard IEEE CRC32. The host sends contiguous chunks containing at
+most 48 bytes each; each `PCM_CHUNK` acknowledges its offset, byte count, and
+cumulative count. Duplicate, skipped, wrong-request, overflowing, or malformed
+chunks invalidate the partial upload. `PCM_COMMIT` succeeds only after every
+byte arrived and its device-computed CRC matches. `PCM_ABORT` explicitly clears
+partial or committed data. Parser errors also clear PCM state.
+
+`PCM_PLAY` starts audio at its scheduled device time. `marker_sample` must be
+inside the committed clip and identifies the labeled strike within a window
+that can retain pre-impact context. At that sample's 48 kHz time offset, the
+firmware commands the external NeoPixel white for a fixed nominal 20 ms. The
+gain is bounded to 1--1000 permille of the uploaded signed samples. Full scale
+is permitted only for the bounded recorded-PCM path with the fixture's confirmed
+4 ohm, 3 W speaker; the synthetic square-tone ceiling remains 125 permille.
+Playback can consume the
+powered state from an immediately preceding `CALIBRATE`, avoiding an
+impact-boundary amplifier transition, or prepare the rail itself for an
+audio-only test. The ACK identifies that preparation source.
+
+The typed host sequence is `QueryInfo()`, `UploadPcm16(samples)`, optionally
+`CalibrateSwingBrightness()`, then `PlayUploadedPcm(lead, gain, brightness,
+marker_sample)`. Upload receipts retain the byte-exact source and committed CRC.
+Playback receipts separately retain that source CRC and the CRC of the
+gain-scaled mono PCM16LE samples supplied to the stereo DMA buffer, plus sample
+rate/count, actual gain, scheduled and actual audio and marker command times,
+marker-relative command error, and final output state. This makes the digital
+source and scaled electrical stimulus traceable without resampling. It does not
+claim acoustic equivalence after the amplifier, speaker, room, and phone
+microphone transfer functions.
 
 ## Synthetic swing sequence
 
@@ -141,11 +181,13 @@ which differs from the common GRB convention and is advertised explicitly by
 GPIO13 LED and the unused onboard NeoPixel on GPIO4.
 
 The speaker terminal is driven by the onboard MAX98357 I2S amplifier. The
-firmware transmits identical left/right 16-bit square-wave samples at 32 kHz
-through GPIO16 data, GPIO17 BCLK, and GPIO18 LRCLK. A Pico PIO state machine
-generates I2S and a DMA channel supplies the bounded static sample buffer. Tone
-duration is therefore quantized upward to the next 31.25 us sample; the ACK and
-DONE records include the sample count and rate.
+firmware transmits identical left/right 16-bit samples through GPIO16 data,
+GPIO17 BCLK, and GPIO18 LRCLK. A Pico PIO state machine generates I2S and a DMA
+channel supplies the bounded static sample buffer. Synthetic tones and swings
+remain at 32 kHz, so tone duration is quantized upward to the next 31.25 us
+sample. Recorded PCM replay switches the PIO divider to 48 kHz so uploaded
+source bytes need no resampling. ACK and DONE records include the applicable
+sample count and rate.
 
 GPIO23 powers the amplifier and also the external NeoPixel and servo rails. It
 is initialized low. A standalone `TONE` retains its original bounded power

@@ -2,12 +2,12 @@
 
 ## Objective
 
-The pose trigger is a thermal optimization, not the impact clock. One phone
-observes a low-resolution standby stream at about 5 fps. When a golfer enters
-the configured hitting region and coherently approaches address, the controller
-requests that both phones start their existing 720p240 pipelines. The current
-local microphone detector still determines impact time and freezes the retained
-clip.
+The pose trigger is a thermal optimization, not the impact clock. Both phones
+observe low-resolution standby streams at about 5 fps. When the configured
+leader sees a coherent approach to address, it requests that both phones start
+their existing 720p240 pipelines. The leader microphone determines the terminal
+impact; the shadow retains its own local audio candidate for timing evidence but
+freezes only when the leader reports that impact.
 
 The first prototype is intentionally split at a narrow boundary:
 
@@ -44,8 +44,8 @@ timestamp_us,person_confidence,address_confidence,motion_magnitude,inside_hittin
   address. It is deliberately separate from generic person detection.
 - `motion_magnitude` is normalized landmark motion. Walking through the region
   should remain high; settling over the ball should decrease.
-- `inside_hitting_region` is based on the station's configured golfer/ball
-  region, not on detecting a golf ball that may be only a few pixels at 360p.
+- `inside_hitting_region` is retained as diagnostic/replay metadata for schema
+  compatibility. The production controller no longer gates on it.
 
 All confidence and motion values must be finite and in `[0, 1]`. Timestamps
 must increase strictly. The parser rejects malformed rows rather than silently
@@ -65,32 +65,38 @@ bazel run //tools/pose_inference:landmark_csv -- \
 bazel run //android/core/pose:pose_landmarks_to_observations -- \
   --landmarks=/absolute/path/landmarks.csv \
   --observations=/absolute/path/observations.csv \
-  --hitting-region=0.2,0.2,0.8,1.0 \
+  --hitting-region=0,0,1,1 \
   --projection=atl
 ```
 
-The explicit hitting region will come from station setup. The current seed
-replays use the full frame because every accepted clip contains one golfer and
-were chosen to validate pose/timing before station calibration.
+The host landmarker decodes in presentation order rather than seeking to each
+5 Hz deadline. It records both the ideal sampling deadline and the actual
+decoded presentation timestamp, and supplies the latter to MediaPipe's video
+tracker. This keeps variable-frame-rate source timing intact through landmark
+CSV and controller replay. Inputs whose OpenCV backend reports missing,
+non-increasing, or millisecond-ambiguous timestamps are rejected rather than
+being relabeled with a nominal frame rate.
 
-### Ball-relative gating
+The replay converter still accepts an explicit region so old evidence remains
+reproducible. Production and current field evaluation use the full frame. The
+batch corpus evaluator hard-wires `0,0,1,1`; legacy per-clip rectangles remain
+optional manifest provenance and cannot change evaluation or annotation results.
 
-The first on-device prototype should not run a golf-ball detector continuously.
-At a roughly 360p standby resolution a ball occupies very few pixels, may be
-occluded by the club, and is easily confused with tees, range balls, and bright
-background detail. That adds inference and thermal cost while making a missed
-ball capable of suppressing an otherwise valid arm.
+### ROI and ball policy
 
-Instead, station setup should provide a persistent normalized hitting/ball
-region, initially by a user tap or draggable preview overlay. Pose inference
-then remains cheap and asks whether the ankle or hip support point is in the
-station and whether the hands and body have address-like geometry near that
-region. The configured phone role selects ATL- or DTL-specific policy; the
-standby model does not need to infer the camera view. Actual ball detection is a
-later, evidence-driven option if corpus replay shows that this calibrated-region
-gate cannot control false arms. An off-ball practice swing should already fail
-region occupancy, while an on-ball practice swing would not be disambiguated by
-detecting the ball and instead needs temporal motion/rearm policy.
+The field recording showed no useful rejection supplied by the configured ROI,
+while one valid DTL setup fell outside it. A tripod move would also invalidate
+that calibration. The controller therefore uses full-frame person, address, and
+motion evidence and the setup UI no longer asks the user to draw a hitting-area
+box. This does not add inference work: the pose model already processes the same
+input image.
+
+The first on-device prototype also does not run a golf-ball detector
+continuously. At roughly 360p the ball occupies very few pixels, may be occluded
+by the club, and is easily confused with tees and background detail. The
+recorded practice swing occurred with the normal hitting setup present, so ball
+presence would not have disambiguated intent. Ball or club-head detection
+remains an evidence-driven later option, not an arm prerequisite.
 
 ## Controller behavior
 
@@ -107,7 +113,7 @@ detecting the ball and instead needs temporal motion/rearm policy.
 | Isolated dropout grace | 250 ms |
 | Active-evidence lease | 15 s |
 | Absolute thermal hard cap | 30 s |
-| Required clear interval | 1 s |
+| Active scene-clear stop interval | 1 s |
 | Rearm cooldown | 2 s |
 
 At a strict 5 fps cadence, 400 ms means three qualifying observations. The
@@ -116,10 +122,12 @@ It emits one `START_HIGH_SPEED` command. While pose observations continue, an
 engaged golfer extends a 15-second active-evidence lease, including motion that
 no longer looks like address. The lease cannot cross the absolute 30-second
 thermal hard cap. A capture completion, expired lease, hard cap, or continuously
-clear hitting region moves the controller to a waiting-for-clear state. Rearm
-then requires both a fresh continuous one-second clear interval and the
-two-second cooldown, so a finish pose or a golfer stepping back in during the
-cooldown cannot immediately arm another swing.
+missing-person evidence moves the active controller to a waiting-for-reset
+state. After capture, one observed non-address or moving pose records that the
+previous swing cycle ended. That fact survives while the two-second cooldown
+finishes; a golfer who has already begun the next address is not permanently
+latched out. A fresh three-observation qualification is still required before
+another arm.
 
 These are prototype thresholds, not product constants. The address and motion
 thresholds were first tuned against the reviewer-selected 7.0-second IN01 and
@@ -165,7 +173,10 @@ The primary acceptance condition is:
 arm request + measured p99 high-speed startup <= takeaway
 ```
 
-with no arm request before the safe window or inside a `must_not_arm` interval.
+with no arm request before the safe window or inside a `must_not_arm` interval. The closed
+five- and 30-cycle physical qualifications expose startup p95 and exact maximum; at those sample
+counts nearest-rank p99 is necessarily the maximum, so maximum is the conservative observed tail
+until a larger representative corpus can estimate p99 independently.
 
 ## Human-reviewed seed labels
 
@@ -222,42 +233,143 @@ the original provisional 800 ms cold Pixel 6 budget:
 | IN02 | 8.0–10.0 s | 8.609 s | 9.409 s | 16.200 s |
 
 The most recent seven-clip annotated run uses the configured ATL/DTL projection
-policy and an 800 ms provisional Pixel 6 startup budget. It is preserved at
+policy and a historical 800 ms provisional Pixel 6 startup budget. It is preserved at
 `artifacts/pose_trigger_corpus_evaluation_20260817T2308Z/report.json`. The arm
 times below are controller decisions; changing the startup budget changes only
-the estimated-ready time, not those decisions.
+the estimated-ready time, not those decisions. Current paired-pipeline evidence
+measures 1.279 s to the first usable encoded frame on Pixel 6, so the 800 ms
+estimated-ready values are not a current acceptance claim.
 
 | Clip | View | Provisional safe arm | Controller arm | Strict label result |
 | --- | --- | ---: | ---: | --- |
-| IN01 | ATL | 7.0 s | 7.400 s | pass |
+| IN01 | ATL | 7.0 s | 7.433 s | pass |
 | IN02 | ATL | 8.0 s | 8.609 s | pass |
-| C01 | DTL | 11.0 s | 11.000 s | pass |
+| C01 | DTL | 11.0 s | 11.400 s | pass |
 | D01 | DTL | 10.0 s | 8.000 s | early |
-| D03 | ATL | 19.0 s | 11.400 s | early |
+| D03 | ATL | 19.0 s | 11.417 s | early |
 | D04 | DTL | 13.0 s | 12.608 s | early |
-| EE01 (E_E) | ATL | 12.0 s | 9.200 s | early |
+| EE01 (E_E) | ATL | 12.0 s | 2.800 s | early |
 
 The DTL policy now tolerates far-side joint occlusion while ATL retains
 bilateral landmark requirements. That turns the former DTL no-arms into visible
-decisions. The strict replay score is 3/7 because the current label contract
+decisions. The 2026-08-22 Lite full-frame rerun under
+`artifacts/pose_model_corpus_compare_20260822/lite/` has a strict replay score
+of 3/7 because the current label contract
 treats any arm before `safe_arm_start_ms` as a failure, including D04's 392 ms
 offset. It should not be reported as model accuracy. After reviewing the
-annotated videos, the human reviewer judged all seven displayed arm points
-reasonable for starting high-speed capture. That visual acceptance also is not
-a 7/7 accuracy claim: these are selected positive instructional clips, the
-acceptable early boundary has not yet been relabeled, and the set does not
-measure false arms during ordinary field use.
+earlier annotated set, the human reviewer judged its displayed arm points
+reasonable for starting high-speed capture. That review predates the current
+full-frame rerun, which materially moved EE01 to 2.8 seconds, so the current
+annotated outputs require a fresh spot check. Neither result is a field-accuracy
+claim: these are selected positive instructional clips, the acceptable early
+boundary has not yet been reconciled, and the set does not measure false arms
+during ordinary field use.
+
+The retained EE01 trace explains the 2.8-second change without suggesting a Lite regression. At
+2.4/2.6/2.8 seconds Lite reports person confidence 0.986/0.987/0.986, address confidence
+0.566/0.681/0.653, and motion 0.232/0.247/0.366. All three samples satisfy the current thresholds,
+so the controller correctly completes its three-sample/400 ms dwell. Full and Heavy make the same
+2.8-second decision, and frame review shows a real address-like setup immediately before the golfer
+makes a complete practice swing. The observations are unchanged from the older ROI run; those
+samples were simply outside its rectangle. Even that older run armed at 9.2 seconds, still before
+the provisional 12-second safe label.
+
+This makes the strict EE01 result causally ambiguous as an address-perception score: pose at address
+cannot know whether the upcoming motion will contact the ball. It remains a valid lifecycle and
+thermal-efficiency challenge. Human review must decide whether the safety policy should arm on any
+valid address-like setup, or whether suppressing a practice-swing attempt is required; it must also
+set an acceptable high-speed-duty/false-attempt budget and the earliest acceptable final-shot arm.
+Those decisions, plus representative complete lifecycles, must precede any label, threshold, or
+model change.
 
 The retained strict boundaries remain useful as conservative regression
 challenges until they are reconciled in a separate labeling pass. In
 particular, they keep the narrow-stance, practice-swing, and early-setup periods
 visible instead of silently redefining them after seeing controller output.
-The current static pose, stillness, and region features still need field
-evidence for aborted address, no-swing timeout, clear-and-rearm behavior,
-walk-throughs, and repeated setup attempts. A temporal setup-phase feature or a
-small sequence model remains an evidence-driven option if those cases produce
-unacceptable false arms. A continuously running ball detector is still
-unlikely to solve the practice/setup cases because the ball is already present.
+Deterministic controller and complete-session replay tests now cover aborted
+address, no-swing timeout and restart, clear-and-rearm, practice swing, empty
+scene, walk-through, post-shot finish reset, and repeated setup. The remaining
+gap is representative perception evidence: whether MediaPipe emits the assumed
+person/address/motion values for those cases across views, golfers, framing,
+and lighting. A temporal setup-phase feature or a small sequence model remains
+an evidence-driven option if those cases produce unacceptable false arms. A
+continuously running ball detector is still unlikely to solve the
+practice/setup cases because the ball is already present.
+
+## First field-session evidence
+
+The first continuous field recording is 247 seconds long and contains 12
+reviewed ball impacts plus one practice swing before S01. Replaying the complete
+5 Hz observation sequence matters more than replaying 12 isolated clips: the
+controller is blind while Camera2 owns the camera at 240 fps, and a false arm
+can therefore affect the next real swing.
+
+With the full frame, production thresholds, 800 ms first-video-frame budget,
+2.45 s retained-history budget, one-second completion, and 800 ms restart, the
+direct per-view pose replay is:
+
+| Authority view | Real swings captured | Attempts | 240 fps time | Minimum video lead before takeaway | Minimum full-history lead before impact |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Pixel 6 ATL | 12/12 | 12 | 72.630 s | 1.394 s | 0.768 s |
+| Pixel 5a DTL | 11/12 | 13 | 135.426 s | — | — |
+
+The ATL result is a 29.4% high-speed duty cycle for this session. The DTL view
+mistakes some post-shot finishes for a new address, creates two no-impact
+attempts, and is still in an active/restart lifecycle at S03. This is evidence
+for making the Pixel 6 ATL view the initial leader, not for weakening Pixel 6
+behavior to accommodate the Pixel 5a. The roles remain configurable, and a
+future session must repeat the comparison before view selection becomes an
+automatic policy. Device, view, mounting location, distance, and room acoustics
+are confounded in this recording; it does not show that Pixel 6 hardware is
+intrinsically better at pose or audio. A phone-swap A/B recording is required
+to separate those effects.
+
+Recreating production audio behavior from each pose-arm time gives a second,
+independent result. Both continuous detectors have a candidate within 100 ms of
+all 12 impacts, but the first terminal candidate is the target on only 7/12
+Pixel 5a windows and 11/12 Pixel 6 windows. The Pixel 6 exception is the known
+practice swing. A single amplitude cutoff cannot safely reject it: its transient
+is stronger than several valid strikes.
+
+The paired implementation therefore makes the leader's detector authoritative.
+The shadow detector cannot terminate capture, but it retains a bounded ring of
+validated local candidates. A background 1 Hz, three-sample clock exchange maps
+the leader strike into the shadow's BOOTTIME domain on the leader. The leader
+composes clock-offset uncertainty with its audio timestamp uncertainty and
+sends the mapped target, bounds, age, RTTs, sample count, and target node ID in
+an authenticated schema-2 impact request. The shadow verifies its node ID, the
+current shared session ID, and the 10-second/15-millisecond policy before using
+the mapping. Status evidence is session-bound so a prior capture's accepted
+mapping cannot satisfy a later HIL run. After waiting at most
+75 ms for detector evidence, the shadow selects the closest candidate within
+80 ms plus bounded clock and audio uncertainty. With a valid mapping and no
+match it safely falls back to peer-arrival time, not an unrelated precursor.
+When clock evidence is missing or stale, the earlier newest-candidate-within-
+250-ms schema-1 rule remains a conservative fallback before arrival time. A
+schema-2 mapping outside policy uses that same explicit fallback; a mapping for
+another node is rejected.
+
+An exact event replay using the ATL pose lifecycle captures S01 through S12
+with one separate practice-swing attempt and 28.19% high-speed duty. The old
+shadow latest-candidate rule timestamps 11/12 clips within 100 ms; the bounded
+clock-mapped ring reaches 12/12, with 82.729 ms maximum absolute error in this
+recording. Hard consensus at 25 ms one-way network latency also captures 12/12
+with one false attempt, but adds up to 30.125 ms terminal latency and makes
+capture depend on both microphones. It is therefore rejected. These are
+development-set analysis results, not product-acceptance statistics.
+
+A small pose-threshold grid reduced ATL high-speed time by only 1.398 seconds
+while retaining 12/12 on this development session. That gain is too small to
+justify overfitting production thresholds. A conservative 120 Hz high-pass plus
+robust background envelope retains 12/12 candidates on both phones and scores
+11/12 first-terminal per view, but changes the complete ATL lifecycle from
+28.19% to 28.35% duty and reduces minimum pre-takeaway video lead from 995 ms to
+796 ms. A fitted temporal classifier reaches 23/24 first-terminal decisions but
+falls to 22/24 at either adjacent threshold; spectral templates reach only
+20/24 or 21/24. None replaces the current production detector. The
+higher-value next evidence is a phone/view swap and a negative-rich holdout
+containing quiet impacts, practice swings, mat strikes, speech, footsteps, club
+drops, and aborted addresses.
 
 ## Warm Camera2 transition evidence
 
@@ -294,18 +406,39 @@ encoder gap reset warm-up. Keeping CameraDevice open removes the cold-open cost;
 it does not remove the requirement that pose arm early enough to accumulate the
 desired pre-impact history.
 
+The current complete paired-LAN path now retains each startup milestone in the
+session manifest and rejects non-monotonic derivations or any startup continuity
+reset. The short S06 run preserved at
+`artifacts/android_pcm_paired_s06_startup_pass_20260823T043404Z` measured:
+
+| Device | Arm to engine start | Arm to first camera frame | Arm to first usable encoded frame | Encoded frame to full pre-roll | Arm to full pre-roll |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Pixel 6 | 531.876 ms | 1,066.450 ms | 1,213.343 ms | 2,464.215 ms | 3,677.558 ms |
+| Pixel 5a | 648.127 ms | 1,956.545 ms | 2,111.294 ms | 2,445.991 ms | 4,557.285 ms |
+
+Both startups were continuous and both captures passed decoded 720p240,
+AprilTag persistence, optical/audio correlation, direct-LAN coordination, and
+cleanup. This is one bounded sample, not the slower-node p99 or a contention
+qualification. It does prove that roughly 2.45 seconds of the reported delay is
+the deliberate full-history requirement. An opt-in retention prototype can
+accept an IDR-backed continuous startup window with explicitly reported actual
+pre-roll, but production admission remains on the full window until repeated
+startup evidence and reviewed address-to-takeaway timing establish a safe
+minimum. Truncation cannot recover a backswing that began before the first
+usable encoded frame, which is the material Pixel 5a risk.
+
 Run the short gate sequentially:
 
 ```bash
 bazel test //android/hil:android_warm_high_speed_transition_hil_test \
   --test_env=SWING_CAPTURE_ANDROID_SERIAL=22181FDF6005QH \
-  --test_env=SWING_CAPTURE_ANDROID_ROLE=down_the_line \
+  --test_env=SWING_CAPTURE_ANDROID_ROLE=face_on \
   --test_env=SWING_CAPTURE_ANDROID_PROFILE=720p240 \
   --test_output=streamed --nocache_test_results
 
 bazel test //android/hil:android_warm_high_speed_transition_hil_test \
   --test_env=SWING_CAPTURE_ANDROID_SERIAL=1A011JEG501717 \
-  --test_env=SWING_CAPTURE_ANDROID_ROLE=face_on \
+  --test_env=SWING_CAPTURE_ANDROID_ROLE=down_the_line \
   --test_env=SWING_CAPTURE_ANDROID_PROFILE=720p240 \
   --test_output=streamed --nocache_test_results
 ```
@@ -318,11 +451,37 @@ from the foreground service, consumes a bounded latest-frame Camera2 YUV stream
 at 5 Hz, runs the arm64 MediaPipe model with GPU-preferred/CPU-fallback delegate
 selection on both supported Pixels, retains optional low-rate debug evidence,
 and transfers its already-open camera into 720p240 capture. Setup selects the
-phone role, leader/shadow mode, delegate policy, hitting region, and debug
-evidence. A leader decision sends one authenticated pose-arm candidate to its
-configured peer without blocking local capture, and peer outcome is retained
-in status evidence. The controller implements an active-evidence lease,
-absolute thermal cap, no-swing stop, and clear-plus-cooldown rearm policy.
+phone role, leader/shadow mode, delegate policy, and debug evidence; pose
+decisions use the full frame. A leader decision sends one authenticated pose-arm
+candidate to its configured peer without blocking local capture, and peer
+outcome is retained in status evidence. The controller implements an
+active-evidence lease, absolute thermal cap, no-swing stop, and temporal
+reset-plus-cooldown rearm policy.
+
+The first delegate invocation is an explicit cold warm-up. Until it succeeds,
+status reports `pose.phase=warming_up`; its landmark frame seeds temporal motion
+state but cannot arm the controller. Its duration and success/failure counters
+are reported separately, so model/delegate initialization remains observable
+without polluting the steady-state latency distribution. `monitoring` therefore
+means one warm-up completed successfully and live frames are reaching the
+controller.
+
+The pose status exposes fixed-memory, one-millisecond-resolution p50, p90, p95,
+p99, and maximum measurements for inference duration and end-to-end age from
+the Camera2 frame timestamp through the controller decision. It also counts
+inferences over the nominal 200 ms frame period, outliers over 400 ms,
+timestamp-domain rejections, and scheduled/dropped frames. This makes a long
+tail visible even when the mean remains below the 5 Hz budget; histogram values
+are conservative inclusive bucket upper bounds.
+
+Short sequential GPU-required HIL after that split passed the hard steady-state
+gate on both devices at least once: Pixel 6 measured 175 ms p95 / 174.5 ms exact
+maximum after a 155 ms warm-up, and Pixel 5a measured 199 ms p95 / 198.3 ms
+exact maximum after a 708 ms warm-up. One immediately preceding Pixel 6 sample
+narrowly missed at 202 ms p95 / 201.3 ms exact maximum, with no inference above
+400 ms. The data supports GPU on both phones and proves that the old 714 ms
+Pixel 5a value was cold initialization in these short runs; it does not yet
+replace a motion-and-thermal qualification distribution.
 
 The paired low-rate-to-high-speed physical gate passed on 2026-08-22. Its
 complete evidence is preserved at
@@ -351,6 +510,16 @@ The current evidence-driven refinement plan is:
 4. introduce temporal features or a compact sequence classifier only if the
    collected off-nominal evidence shows the current geometry and controller
    hysteresis are insufficient.
+
+`//tools/field_evidence:field_evidence` now supplies the acquisition and review
+contract for steps 1--3. It creates a hash-pinned but explicitly unreviewed
+two-phone skeleton, keeps DTL and ATL times separate, and refuses to mark the
+pose gate ready until both timelines are fully reviewed, the complete lifecycle
+taxonomy is labeled with non-diagnostic expectations, a held-out phone/view
+swap is present, and at least two golfer, lighting, and framing strata have been
+reviewed. This closes the reproducibility gap in how the next corpus is recorded
+and labeled; the representative recordings and human review are still required
+evidence.
 
 MediaPipe Pose Landmarker documentation:
 https://developers.google.com/mediapipe/solutions/vision/pose_landmarker/

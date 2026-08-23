@@ -10,11 +10,17 @@ public final class PoseTriggerControllerTest {
     requiresThreeStableFiveFpsObservations();
     toleratesOneIsolatedDropout();
     rejectsMotionAndLowConfidence();
+    abortedAddressReturnsToWatchingAndLaterSetupArms();
+    emptySceneAndWalkThroughNeverQualify();
+    doesNotRequireAConfiguredHittingRegion();
     observationGapRestartsQualification();
     addressDwellSlidesPastFifteenSecondsUntilThermalCap();
     falseArmAndPracticeSwingRemainReadyForRealSetup();
     clearStepAwayStopsAndRequiresCooldownBeforeReentry();
-    completedCaptureRequiresCooldownAndContinuousClear();
+    completedCaptureRequiresCooldownAndResetEvidence();
+    postShotFinishCannotRearmWithoutResetEvidence();
+    completedResetCanPrecedeTheNextAddress();
+    completedCaptureRearmsAfterSwingWithoutLeavingFrame();
     externalCaptureTransitionsWatchingAndQualifying();
     externalCaptureRefreshesLocalShadowArm();
     externalCaptureCannotBypassClearLatch();
@@ -69,9 +75,73 @@ public final class PoseTriggerControllerTest {
     decision(controller, 0, 0.9, 0.9, 0.5, true);
     decision(controller, 200, 0.4, 0.9, 0.0, true);
     decision(controller, 400, 0.9, 0.4, 0.0, true);
-    decision(controller, 600, 0.9, 0.9, 0.0, false);
-
     check(controller.state() == PoseTriggerController.State.WATCHING, "rejection state");
+  }
+
+  private static void abortedAddressReturnsToWatchingAndLaterSetupArms() {
+    PoseTriggerController controller = controller();
+
+    decision(controller, 0, 0.95, 0.9, 0.1, false);
+    decision(controller, 200, 0.95, 0.9, 0.1, false);
+    PoseTriggerController.Decision tolerated =
+        decision(controller, 400, 0.95, 0.2, 0.9, false);
+    check(
+        tolerated.transitionReason()
+            == PoseTriggerController.TransitionReason.QUALIFICATION_DROPOUT_TOLERATED,
+        "brief aborted-address dropout is tolerated");
+    PoseTriggerController.Decision aborted =
+        decision(controller, 600, 0.95, 0.2, 0.9, false);
+    check(
+        aborted.transitionReason()
+            == PoseTriggerController.TransitionReason.QUALIFICATION_DROPPED,
+        "aborted address ends qualification");
+    check(controller.state() == PoseTriggerController.State.WATCHING, "aborted address watches");
+
+    decision(controller, 800, 0.95, 0.9, 0.1, false);
+    decision(controller, 1_000, 0.95, 0.9, 0.1, false);
+    check(
+        decision(controller, 1_200, 0.95, 0.9, 0.1, false).command()
+            == PoseTriggerController.Command.START_HIGH_SPEED,
+        "later complete setup arms normally");
+  }
+
+  private static void emptySceneAndWalkThroughNeverQualify() {
+    PoseTriggerController controller = controller();
+    int startCommands = 0;
+
+    for (long timestampMs = 0; timestampMs <= 1_000; timestampMs += 200) {
+      PoseTriggerController.Decision empty =
+          decision(controller, timestampMs, 0.0, 0.0, 0.0, false);
+      startCommands +=
+          empty.command() == PoseTriggerController.Command.START_HIGH_SPEED ? 1 : 0;
+      check(
+          empty.transitionReason() == PoseTriggerController.TransitionReason.WAITING_FOR_ADDRESS,
+          "empty scene waits at " + timestampMs);
+    }
+    for (long timestampMs = 1_200; timestampMs <= 3_000; timestampMs += 200) {
+      PoseTriggerController.Decision walkThrough =
+          decision(controller, timestampMs, 0.95, 0.2, 0.9, false);
+      startCommands +=
+          walkThrough.command() == PoseTriggerController.Command.START_HIGH_SPEED ? 1 : 0;
+      check(
+          walkThrough.transitionReason()
+              == PoseTriggerController.TransitionReason.WAITING_FOR_ADDRESS,
+          "walk-through waits at " + timestampMs);
+    }
+    check(startCommands == 0, "empty and walk-through sequence never arms");
+    check(controller.state() == PoseTriggerController.State.WATCHING, "non-address state");
+  }
+
+  private static void doesNotRequireAConfiguredHittingRegion() {
+    PoseTriggerController controller = controller();
+
+    decision(controller, 0, 0.9, 0.9, 0.0, false);
+    decision(controller, 200, 0.9, 0.9, 0.0, false);
+    PoseTriggerController.Decision armed = decision(controller, 400, 0.9, 0.9, 0.0, false);
+
+    check(
+        armed.command() == PoseTriggerController.Command.START_HIGH_SPEED,
+        "full-frame pose can arm outside a legacy ROI");
   }
 
   private static void observationGapRestartsQualification() {
@@ -150,8 +220,7 @@ public final class PoseTriggerControllerTest {
         controller.state() == PoseTriggerController.State.WAITING_FOR_CLEAR,
         "clear stop enters cooldown");
 
-    // Returning during cooldown must not start qualification. This is the off-nominal sequence
-    // where an early false arm times out just as the golfer steps back in for the real shot.
+    // Returning during cooldown must not start qualification.
     decision(controller, 1_800, 0.9, 0.9, 0.0, true);
     decision(controller, 2_000, 0.9, 0.9, 0.0, true);
     check(
@@ -159,7 +228,7 @@ public final class PoseTriggerControllerTest {
         "reentry during cooldown does not rearm");
     check(
         controller.state() == PoseTriggerController.State.WAITING_FOR_CLEAR,
-        "reentry remains latched until a fresh clear");
+        "reentry remains latched until cooldown elapses");
 
     for (long timestampMs = 2_400; timestampMs <= 3_600; timestampMs += 200) {
       decision(controller, timestampMs, 0.0, 0.0, 0.0, false);
@@ -173,7 +242,7 @@ public final class PoseTriggerControllerTest {
         "post-clear setup arms normally");
   }
 
-  private static void completedCaptureRequiresCooldownAndContinuousClear() {
+  private static void completedCaptureRequiresCooldownAndResetEvidence() {
     PoseTriggerController controller = armedController();
     PoseTriggerController.Decision ended = controller.captureEnded(500 * MS);
     check(
@@ -199,6 +268,85 @@ public final class PoseTriggerControllerTest {
         ready.transitionReason() == PoseTriggerController.TransitionReason.CLEAR_COMPLETE_REARMED,
         "completed capture cooldown reason");
     check(controller.state() == PoseTriggerController.State.WATCHING, "cooldown and clear done");
+  }
+
+  private static void postShotFinishCannotRearmWithoutResetEvidence() {
+    PoseTriggerController controller = armedController();
+    controller.captureEnded(500 * MS);
+
+    for (long timestampMs = 700; timestampMs <= 2_700; timestampMs += 200) {
+      PoseTriggerController.Decision finish =
+          decision(controller, timestampMs, 0.95, 0.9, 0.1, false);
+      check(finish.command() == none(), "finish pose cannot rearm at " + timestampMs);
+      check(
+          finish.transitionReason() == PoseTriggerController.TransitionReason.WAITING_FOR_CLEAR,
+          "finish pose remains latched at " + timestampMs);
+    }
+    check(
+        controller.state() == PoseTriggerController.State.WAITING_FOR_CLEAR,
+        "cooldown alone cannot clear an address-like finish");
+
+    PoseTriggerController.Decision reset =
+        decision(controller, 2_900, 0.95, 0.2, 0.9, false);
+    check(
+        reset.transitionReason() == PoseTriggerController.TransitionReason.CLEAR_COMPLETE_REARMED,
+        "post-shot motion releases the elapsed latch");
+    decision(controller, 3_100, 0.95, 0.9, 0.1, false);
+    decision(controller, 3_300, 0.95, 0.9, 0.1, false);
+    check(
+        decision(controller, 3_500, 0.95, 0.9, 0.1, false).command()
+            == PoseTriggerController.Command.START_HIGH_SPEED,
+        "repeated setup arms after explicit reset evidence");
+  }
+
+  private static void completedResetCanPrecedeTheNextAddress() {
+    PoseTriggerController controller = armedController();
+    controller.captureEnded(500 * MS);
+
+    decision(controller, 700, 0.95, 0.2, 0.9, true);
+    for (long timestampMs = 900; timestampMs < 2_500; timestampMs += 200) {
+      PoseTriggerController.Decision waiting =
+          decision(controller, timestampMs, 0.95, 0.9, 0.1, true);
+      check(waiting.command() == none(), "new address waits for cooldown");
+    }
+    check(controller.state() == PoseTriggerController.State.WAITING_FOR_CLEAR, "cooldown latch");
+
+    PoseTriggerController.Decision ready =
+        decision(controller, 2_500, 0.95, 0.9, 0.1, true);
+    check(
+        ready.transitionReason()
+            == PoseTriggerController.TransitionReason.CLEAR_COMPLETE_REARMED,
+        "remembered reset releases at cooldown");
+    decision(controller, 2_700, 0.95, 0.9, 0.1, true);
+    decision(controller, 2_900, 0.95, 0.9, 0.1, true);
+    check(
+        decision(controller, 3_100, 0.95, 0.9, 0.1, true).command()
+            == PoseTriggerController.Command.START_HIGH_SPEED,
+        "new address qualifies after cooldown");
+  }
+
+  private static void completedCaptureRearmsAfterSwingWithoutLeavingFrame() {
+    PoseTriggerController controller = armedController();
+    controller.captureEnded(700 * MS);
+
+    boolean resetObserved = false;
+    for (long timestampMs = 900; timestampMs <= 2_900; timestampMs += 200) {
+      PoseTriggerController.Decision decision =
+          decision(controller, timestampMs, 0.95, 0.2, 0.9, true);
+      resetObserved |=
+          decision.transitionReason()
+              == PoseTriggerController.TransitionReason.CLEAR_COMPLETE_REARMED;
+    }
+
+    check(resetObserved, "post-swing motion and non-address posture clear the latch");
+    check(controller.state() == PoseTriggerController.State.WATCHING, "post-swing ready state");
+
+    decision(controller, 3_100, 0.95, 0.9, 0.1, true);
+    decision(controller, 3_300, 0.95, 0.9, 0.1, true);
+    check(
+        decision(controller, 3_500, 0.95, 0.9, 0.1, true).command()
+            == PoseTriggerController.Command.START_HIGH_SPEED,
+        "fresh address rearms without walking out of frame");
   }
 
   private static void externalCaptureTransitionsWatchingAndQualifying() {

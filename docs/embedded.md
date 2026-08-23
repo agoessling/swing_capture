@@ -107,6 +107,18 @@ speaker amplifier, the external NeoPixel rail, and the servo rail together; it
 then drives a bounded I2S tone on GPIO16--18 before returning the shared power
 rail and I2S pins low.
 
+Firmware `prop-maker-hil-9` also accepts a CRC32-gated, chunked mono PCM16LE
+clip at its native 48 kHz field-recording rate. Clips are bounded to 12,000
+samples (250 ms), playback gain is capped at 1000 permille for the fixture's
+confirmed 4 ohm, 3 W speaker, and a selected `marker_sample` schedules a 20 ms
+white external-NeoPixel command on the same
+device timeline as that PCM sample.
+Playback can consume the prepared rail left by calibration or self-prepare for
+an audio-only test; its typed receipt reports the path, byte-exact source CRC,
+gain-scaled played-sample CRC, gain, and audio/marker command timestamps. These
+digital checks do not claim acoustic equivalence through the physical speaker,
+room, and phone microphones.
+
 Synthetic-swing calibration and playback instead drive the external
 screw-terminal NeoPixel data line on GPIO21. Calibration raises GPIO23, sweeps
 the negotiated white levels, latches the fixture pixel off, and holds the rail

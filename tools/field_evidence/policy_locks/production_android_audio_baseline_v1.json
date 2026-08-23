@@ -1,0 +1,54 @@
+{
+  "detector": {
+    "algorithm_id": "android-impact-detector-v1",
+    "config_by_device": {
+      "pixel5a": {
+        "cooldown_frames": 12000,
+        "initial_noise_floor": 0.005,
+        "manufacturer": "Google",
+        "minimum_peak_amplitude": 0.01,
+        "model": "Pixel 5a",
+        "noise_floor_time_constant_seconds": 0.5,
+        "noise_update_clip_multiplier": 4.0,
+        "peak_confirmation_frames": 72,
+        "threshold_multiplier": 8.0
+      },
+      "pixel6": {
+        "cooldown_frames": 12000,
+        "initial_noise_floor": 0.005,
+        "manufacturer": "Google",
+        "minimum_peak_amplitude": 0.015,
+        "model": "Pixel 6",
+        "noise_floor_time_constant_seconds": 0.5,
+        "noise_update_clip_multiplier": 4.0,
+        "peak_confirmation_frames": 72,
+        "threshold_multiplier": 8.0
+      }
+    },
+    "implementation_sha256": "b33174df372ce2102a523b2c9427e97730452266e00bd36137228878601f89a7",
+    "implementation_target": "//tools/field_evidence:production_audio_detector_replay"
+  },
+  "development_recording_ids": [
+    "field-95482d93-f024-400e-9532-5ba7082de05e"
+  ],
+  "evaluation": {
+    "audio_ready_delay_ms": 2450,
+    "leader_role": "face_on",
+    "maximum_armed_ms": 15000,
+    "maximum_false_terminal_attempts": 0,
+    "maximum_high_speed_duty_ppm": 300000,
+    "maximum_negative_continuous_candidates": 0,
+    "minimum_lifecycle_capture_ppm": 1000000,
+    "minimum_quiet_target_recall_ppm": 1000000,
+    "minimum_target_recall_ppm": 1000000,
+    "post_terminal_ms": 1000,
+    "rearm_delay_ms": 2000,
+    "retained_history_ms": 3000,
+    "target_tolerance_ms": 100,
+    "video_ready_delay_ms": 800
+  },
+  "frozen_at_utc": "2026-08-23T11:10:13Z",
+  "policy_id": "production-android-audio-baseline-v1",
+  "report_type": "audio_detector_policy_lock",
+  "schema_version": 1
+}

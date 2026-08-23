@@ -5,15 +5,39 @@ import java.util.Objects;
 
 /** Thread-safe measurements for the continuously running pose standby path. */
 public final class PoseStandbyMetrics {
+  private static final long LATENCY_BUCKET_WIDTH_NS = 1_000_000L;
+  private static final int LATENCY_REGULAR_BUCKET_COUNT = 10_000;
+  private static final int LATENCY_BUCKET_COUNT = LATENCY_REGULAR_BUCKET_COUNT + 1;
+  static final long INFERENCE_DEADLINE_NS = 200_000_000L;
+  static final long INFERENCE_OUTLIER_BOUND_NS = 400_000_000L;
+
   public record Snapshot(
       PoseInferenceDelegate delegate,
       long offeredImages,
       long scheduledImages,
       long droppedImages,
+      long successfulWarmupInferences,
+      long failedWarmupInferences,
+      long totalWarmupDurationNs,
+      long maximumWarmupDurationNs,
       long successfulInferences,
       long failedInferences,
       long totalInferenceDurationNs,
       long maximumInferenceDurationNs,
+      long inferenceDurationP50Ns,
+      long inferenceDurationP90Ns,
+      long inferenceDurationP95Ns,
+      long inferenceDurationP99Ns,
+      long inferenceDeadlineMisses,
+      long inferenceOutliers,
+      long decisionAgeSamples,
+      long rejectedDecisionTimestamps,
+      long totalDecisionAgeNs,
+      long maximumDecisionAgeNs,
+      long decisionAgeP50Ns,
+      long decisionAgeP90Ns,
+      long decisionAgeP95Ns,
+      long decisionAgeP99Ns,
       long retainedObservationRows,
       long failedObservationRows,
       long offeredEvidenceFrames,
@@ -31,10 +55,20 @@ public final class PoseStandbyMetrics {
       return successfulInferences + failedInferences;
     }
 
+    public long warmupInferenceCount() {
+      return successfulWarmupInferences + failedWarmupInferences;
+    }
+
     public double meanInferenceDurationMs() {
       return inferenceCount() == 0
           ? 0.0
           : totalInferenceDurationNs / 1_000_000.0 / inferenceCount();
+    }
+
+    public double meanDecisionAgeMs() {
+      return decisionAgeSamples == 0
+          ? 0.0
+          : totalDecisionAgeNs / 1_000_000.0 / decisionAgeSamples;
     }
   }
 
@@ -42,10 +76,22 @@ public final class PoseStandbyMetrics {
   private long offeredImages;
   private long scheduledImages;
   private long droppedImages;
+  private long successfulWarmupInferences;
+  private long failedWarmupInferences;
+  private long totalWarmupDurationNs;
+  private long maximumWarmupDurationNs;
   private long successfulInferences;
   private long failedInferences;
   private long totalInferenceDurationNs;
   private long maximumInferenceDurationNs;
+  private final LatencyHistogram inferenceDuration = new LatencyHistogram();
+  private long inferenceDeadlineMisses;
+  private long inferenceOutliers;
+  private long decisionAgeSamples;
+  private long rejectedDecisionTimestamps;
+  private long totalDecisionAgeNs;
+  private long maximumDecisionAgeNs;
+  private final LatencyHistogram decisionAge = new LatencyHistogram();
   private long encodedEvidenceFrames;
   private long failedEvidenceFrames;
   private long offeredEvidenceFrames;
@@ -72,6 +118,22 @@ public final class PoseStandbyMetrics {
     droppedImages++;
   }
 
+  synchronized void recordWarmup(long durationNs, boolean succeeded) {
+    if (durationNs < 0) {
+      throw new IllegalArgumentException("durationNs cannot be negative");
+    }
+    if (successfulWarmupInferences + failedWarmupInferences != 0) {
+      throw new IllegalStateException("pose warm-up may only be recorded once");
+    }
+    if (succeeded) {
+      successfulWarmupInferences++;
+    } else {
+      failedWarmupInferences++;
+    }
+    totalWarmupDurationNs = durationNs;
+    maximumWarmupDurationNs = durationNs;
+  }
+
   synchronized void recordInference(long durationNs, boolean succeeded) {
     if (durationNs < 0) {
       throw new IllegalArgumentException("durationNs cannot be negative");
@@ -83,6 +145,28 @@ public final class PoseStandbyMetrics {
     }
     totalInferenceDurationNs = Math.addExact(totalInferenceDurationNs, durationNs);
     maximumInferenceDurationNs = Math.max(maximumInferenceDurationNs, durationNs);
+    inferenceDuration.record(durationNs);
+    if (durationNs > INFERENCE_DEADLINE_NS) {
+      inferenceDeadlineMisses++;
+    }
+    if (durationNs > INFERENCE_OUTLIER_BOUND_NS) {
+      inferenceOutliers++;
+    }
+  }
+
+  synchronized void recordDecision(long frameTimestampNs, long decisionTimestampNs) {
+    if (frameTimestampNs < 0 || decisionTimestampNs < 0) {
+      throw new IllegalArgumentException("pose decision timestamps cannot be negative");
+    }
+    if (decisionTimestampNs < frameTimestampNs) {
+      rejectedDecisionTimestamps++;
+      return;
+    }
+    long ageNs = decisionTimestampNs - frameTimestampNs;
+    decisionAgeSamples++;
+    totalDecisionAgeNs = Math.addExact(totalDecisionAgeNs, ageNs);
+    maximumDecisionAgeNs = Math.max(maximumDecisionAgeNs, ageNs);
+    decisionAge.record(ageNs);
   }
 
   synchronized void recordEvidence(boolean succeeded) {
@@ -126,10 +210,28 @@ public final class PoseStandbyMetrics {
         offeredImages,
         scheduledImages,
         droppedImages,
+        successfulWarmupInferences,
+        failedWarmupInferences,
+        totalWarmupDurationNs,
+        maximumWarmupDurationNs,
         successfulInferences,
         failedInferences,
         totalInferenceDurationNs,
         maximumInferenceDurationNs,
+        inferenceDuration.percentileUpperBoundNs(50),
+        inferenceDuration.percentileUpperBoundNs(90),
+        inferenceDuration.percentileUpperBoundNs(95),
+        inferenceDuration.percentileUpperBoundNs(99),
+        inferenceDeadlineMisses,
+        inferenceOutliers,
+        decisionAgeSamples,
+        rejectedDecisionTimestamps,
+        totalDecisionAgeNs,
+        maximumDecisionAgeNs,
+        decisionAge.percentileUpperBoundNs(50),
+        decisionAge.percentileUpperBoundNs(90),
+        decisionAge.percentileUpperBoundNs(95),
+        decisionAge.percentileUpperBoundNs(99),
         retainedObservationRows,
         failedObservationRows,
         offeredEvidenceFrames,
@@ -139,5 +241,51 @@ public final class PoseStandbyMetrics {
         armEvidenceFlushPresent,
         armEvidenceFlushFailed,
         armEvidenceFlushTimedOut);
+  }
+
+  /** Fixed-memory, one-millisecond histogram; percentile values are inclusive upper bounds. */
+  private static final class LatencyHistogram {
+    private final long[] buckets = new long[LATENCY_BUCKET_COUNT];
+    private long samples;
+    private long overflowMaximumNs;
+
+    void record(long durationNs) {
+      int bucket =
+          durationNs == 0
+              ? 0
+              : (int)
+                  Math.min(
+                      (durationNs - 1) / LATENCY_BUCKET_WIDTH_NS,
+                      LATENCY_REGULAR_BUCKET_COUNT);
+      buckets[bucket]++;
+      samples++;
+      if (bucket == LATENCY_REGULAR_BUCKET_COUNT) {
+        overflowMaximumNs = Math.max(overflowMaximumNs, durationNs);
+      }
+    }
+
+    long percentileUpperBoundNs(int percentile) {
+      if (percentile < 1 || percentile > 100) {
+        throw new IllegalArgumentException("percentile must be between 1 and 100");
+      }
+      if (samples == 0) {
+        return 0;
+      }
+      long wholeHundreds = samples / 100;
+      long remainder = samples % 100;
+      long rank =
+          wholeHundreds * percentile + (remainder * percentile + 99) / 100;
+      long cumulative = 0;
+      for (int index = 0; index < buckets.length; ++index) {
+        cumulative += buckets[index];
+        if (cumulative >= rank) {
+          if (index == LATENCY_REGULAR_BUCKET_COUNT) {
+            return overflowMaximumNs;
+          }
+          return (index + 1L) * LATENCY_BUCKET_WIDTH_NS;
+        }
+      }
+      throw new IllegalStateException("latency histogram sample count is inconsistent");
+    }
   }
 }

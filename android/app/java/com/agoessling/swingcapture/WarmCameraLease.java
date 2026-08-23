@@ -58,7 +58,8 @@ public final class WarmCameraLease implements AutoCloseable {
     void onFailure(Throwable failure);
   }
 
-  private record Selection(String cameraId, int timestampSource, Size standbySize) {}
+  private record Selection(
+      String cameraId, int timestampSource, int sensorOrientationDegrees, Size standbySize) {}
 
   private final CameraManager manager;
   private final CaptureProfile profile;
@@ -92,12 +93,35 @@ public final class WarmCameraLease implements AutoCloseable {
   public static WarmCameraLease open(
       Context context, CaptureProfile profile, StandbyImageListener imageListener)
       throws Exception {
+    return open(context, profile, null, imageListener);
+  }
+
+  /** Opens an experiment-only exact YUV size without changing production size selection. */
+  public static WarmCameraLease openExperiment(
+      Context context,
+      CaptureProfile profile,
+      Size exactStandbySize,
+      StandbyImageListener imageListener)
+      throws Exception {
+    return open(
+        context,
+        profile,
+        Objects.requireNonNull(exactStandbySize, "exactStandbySize"),
+        imageListener);
+  }
+
+  private static WarmCameraLease open(
+      Context context,
+      CaptureProfile profile,
+      Size exactStandbySize,
+      StandbyImageListener imageListener)
+      throws Exception {
     Context application = context.getApplicationContext();
     if (application.checkSelfPermission(Manifest.permission.CAMERA)
         != PackageManager.PERMISSION_GRANTED) {
       throw new IllegalStateException("Camera permission is required for pose standby");
     }
-    Selection selection = selectCamera(application, profile);
+    Selection selection = selectCamera(application, profile, exactStandbySize);
     WarmCameraLease lease =
         new WarmCameraLease(application, profile, selection, imageListener);
     try {
@@ -122,6 +146,11 @@ public final class WarmCameraLease implements AutoCloseable {
 
   public int timestampSource() {
     return selection.timestampSource();
+  }
+
+  /** Clockwise rotation that makes this rear camera's sensor image upright in natural portrait. */
+  public int sensorOrientationDegrees() {
+    return selection.sensorOrientationDegrees();
   }
 
   public Size standbySize() {
@@ -465,20 +494,30 @@ public final class WarmCameraLease implements AutoCloseable {
     }
   }
 
-  private static Selection selectCamera(Context context, CaptureProfile profile) throws Exception {
+  private static Selection selectCamera(
+      Context context, CaptureProfile profile, Size exactStandbySize) throws Exception {
     CameraManager manager = context.getSystemService(CameraManager.class);
     for (String cameraId : manager.getCameraIdList()) {
       CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
       Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
       Integer timestampSource =
           characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE);
+      Integer sensorOrientation =
+          characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
       StreamConfigurationMap streams =
           characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
       if (facing == null
           || facing != CameraCharacteristics.LENS_FACING_BACK
           || timestampSource == null
           || timestampSource != CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+          || sensorOrientation == null
           || streams == null) {
+        continue;
+      }
+      int imageRotationDegrees;
+      try {
+        imageRotationDegrees = CameraImageRotation.fromSensorOrientation(sensorOrientation);
+      } catch (IllegalArgumentException unsupportedOrientation) {
         continue;
       }
       Size highSpeedSize = new Size(profile.width(), profile.height());
@@ -491,7 +530,10 @@ public final class WarmCameraLease implements AutoCloseable {
       return new Selection(
           cameraId,
           timestampSource,
-          chooseStandbySize(streams, profile.width() / (double) profile.height()));
+          imageRotationDegrees,
+          exactStandbySize == null
+              ? chooseStandbySize(streams, profile.width() / (double) profile.height())
+              : requireExactStandbySize(streams, exactStandbySize));
     }
     throw new IllegalStateException(
         "No realtime rear camera supports the selected 240 fps profile and YUV standby");
@@ -515,5 +557,18 @@ public final class WarmCameraLease implements AutoCloseable {
         .min(byDistance)
         .orElseThrow(
             () -> new IllegalStateException("Camera has no 16:9 YUV standby size at least 640x360"));
+  }
+
+  private static Size requireExactStandbySize(
+      StreamConfigurationMap streams, Size exactStandbySize) {
+    Size[] sizes = streams.getOutputSizes(ImageFormat.YUV_420_888);
+    if (sizes == null || !Arrays.asList(sizes).contains(exactStandbySize)) {
+      throw new IllegalStateException(
+          "Camera does not expose experiment YUV standby size "
+              + exactStandbySize.getWidth()
+              + "x"
+              + exactStandbySize.getHeight());
+    }
+    return exactStandbySize;
   }
 }

@@ -1,0 +1,73 @@
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
+
+filegroup(
+    name = "streaming_envelope_replay_sources",
+    srcs = [
+        "envelope_experiment.h",
+        "streaming_envelope_detector.cc",
+        "streaming_envelope_detector.h",
+        "streaming_envelope_replay_main.cc",
+    ],
+    visibility = ["//tools/field_evidence:__pkg__"],
+)
+
+cc_library(
+    name = "envelope_experiment_lib",
+    srcs = ["envelope_experiment.cc"],
+    hdrs = ["envelope_experiment.h"],
+    deps = [
+        "//capture/audio:pcm_wav",
+        "//capture/offline/experiments/benchmark:terminal_window_benchmark",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "envelope_experiment",
+    srcs = ["main.cc"],
+    deps = [
+        ":envelope_experiment_lib",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "streaming_envelope_detector",
+    srcs = ["streaming_envelope_detector.cc"],
+    hdrs = ["streaming_envelope_detector.h"],
+    deps = [":envelope_experiment_lib"],
+)
+
+cc_binary(
+    name = "streaming_envelope_replay",
+    srcs = ["streaming_envelope_replay_main.cc"],
+    deps = [
+        ":envelope_experiment_lib",
+        ":streaming_envelope_detector",
+        "@nlohmann_json//:json",
+    ],
+    visibility = ["//tools/field_evidence:__pkg__"],
+)
+
+cc_test(
+    name = "envelope_experiment_test",
+    size = "small",
+    srcs = ["envelope_experiment_test.cc"],
+    deps = [
+        ":envelope_experiment_lib",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "streaming_envelope_detector_test",
+    size = "small",
+    srcs = ["streaming_envelope_detector_test.cc"],
+    deps = [
+        ":envelope_experiment_lib",
+        ":streaming_envelope_detector",
+        "//capture/audio:pcm_wav",
+    ],
+)

@@ -56,6 +56,19 @@ class AnnotateEvidenceTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 annotate.parse_hitting_region(invalid)
 
+    def test_address_annotation_does_not_gate_on_legacy_roi(self) -> None:
+        """Keep pre-arm review overlays consistent with the production controller."""
+        evidence = annotate.Evidence(
+            timestamp_ms=0,
+            landmarks=(),
+            person_confidence=0.9,
+            address_confidence=0.9,
+            motion_magnitude=0.1,
+            inside_hitting_region=False,
+        )
+
+        self.assertTrue(annotate.is_address_qualifying(evidence))
+
 
 if __name__ == "__main__":
     unittest.main()

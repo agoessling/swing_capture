@@ -20,9 +20,28 @@ struct PoseStatusSample {
   std::uint64_t offered_images = 0;
   std::uint64_t scheduled_images = 0;
   std::uint64_t dropped_images = 0;
+  std::uint64_t successful_warmup_inferences = 0;
+  std::uint64_t failed_warmup_inferences = 0;
+  std::uint64_t total_warmup_duration_ns = 0;
+  std::uint64_t maximum_warmup_duration_ns = 0;
   std::uint64_t successful_inferences = 0;
   std::uint64_t failed_inferences = 0;
+  std::uint64_t maximum_inference_duration_ns = 0;
+  std::uint64_t inference_duration_p50_ns = 0;
+  std::uint64_t inference_duration_p90_ns = 0;
+  std::uint64_t inference_duration_p95_ns = 0;
+  std::uint64_t inference_duration_p99_ns = 0;
+  std::uint64_t inference_deadline_misses = 0;
+  std::uint64_t inference_outliers = 0;
+  std::uint64_t decision_age_samples = 0;
+  std::uint64_t rejected_decision_timestamps = 0;
+  std::uint64_t maximum_decision_age_ns = 0;
+  std::uint64_t decision_age_p50_ns = 0;
+  std::uint64_t decision_age_p90_ns = 0;
+  std::uint64_t decision_age_p95_ns = 0;
+  std::uint64_t decision_age_p99_ns = 0;
   std::uint64_t encoded_evidence_frames = 0;
+  std::uint64_t process_cpu_time_ms = 0;
   bool standby_audio_ready = false;
   int standby_audio_source = -1;
   std::uint64_t standby_audio_end_frame_position = 0;
@@ -57,6 +76,14 @@ struct PoseCadenceAcceptance {
 [[nodiscard]] PoseCadenceAcceptance EvaluatePoseCadence(const PoseStatusSample &first,
                                                         const PoseStatusSample &last) noexcept;
 
+struct PoseLatencyAcceptance {
+  bool passed = false;
+  std::string diagnostic;
+};
+
+// Applies the initial field-readiness tail bound to one cumulative phone status sample.
+[[nodiscard]] PoseLatencyAcceptance EvaluatePoseLatency(const PoseStatusSample &sample) noexcept;
+
 struct DeviceTelemetry {
   bool valid = false;
   std::string diagnostic;
@@ -64,6 +91,11 @@ struct DeviceTelemetry {
   int battery_level_percent = -1;
   double battery_temperature_celsius = -1.0;
   int battery_voltage_millivolts = -1;
+  bool processor_thermal_complete = false;
+  double maximum_cpu_temperature_celsius = -1.0;
+  double maximum_gpu_temperature_celsius = -1.0;
+  std::uint64_t maximum_cpu_cooling_device_value = 0;
+  std::uint64_t maximum_gpu_cooling_device_value = 0;
 };
 
 // Parses stable fields from Pixel dumpsys battery and thermalservice output.

@@ -19,6 +19,20 @@ genrule(
     cmd = "cp $(location @pose_landmarker_lite_task//file) $@",
 )
 
+genrule(
+    name = "pose_landmarker_full_asset",
+    srcs = ["@pose_landmarker_full_task//file"],
+    outs = ["assets/pose_landmarker_full.task"],
+    cmd = "cp $(location @pose_landmarker_full_task//file) $@",
+)
+
+genrule(
+    name = "pose_landmarker_heavy_asset",
+    srcs = ["@pose_landmarker_heavy_task//file"],
+    outs = ["assets/pose_landmarker_heavy.task"],
+    cmd = "cp $(location @pose_landmarker_heavy_task//file) $@",
+)
+
 java_library(
     name = "pose_inference_core",
     srcs = [
@@ -32,6 +46,7 @@ java_library(
         "java/com/agoessling/swingcapture/pose/inference/PoseInferenceMetrics.java",
         "java/com/agoessling/swingcapture/pose/inference/PoseInferencePipeline.java",
         "java/com/agoessling/swingcapture/pose/inference/PoseInferenceTrace.java",
+        "java/com/agoessling/swingcapture/pose/inference/PoseModelVariant.java",
         "java/com/agoessling/swingcapture/pose/inference/PoseReplayConfiguration.java",
         "java/com/agoessling/swingcapture/pose/inference/PoseReplayEvaluation.java",
         "java/com/agoessling/swingcapture/pose/inference/PoseReplayReport.java",
@@ -104,9 +119,23 @@ android_library(
     ],
 )
 
+android_library(
+    name = "pose_inference_experiment_assets",
+    assets = [
+        ":pose_landmarker_full_asset",
+        ":pose_landmarker_heavy_asset",
+    ],
+    assets_dir = "assets",
+    manifest = "AndroidManifest.xml",
+    visibility = ["//android/app:__pkg__"],
+)
+
 android_binary(
     name = "pose_inference_packaging_fixture",
     manifest = "fixture/AndroidManifest.xml",
     tags = ["manual"],
-    deps = [":pose_inference_android"],
+    deps = [
+        ":pose_inference_android",
+        ":pose_inference_experiment_assets",
+    ],
 )

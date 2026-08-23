@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "source_id": "field-recording-95482d93-f024-400e-9532-5ba7082de05e/pixel6-face_on/audio.wav",
+  "source_sample_rate_hz": 48000,
+  "window": {
+    "pre_marker_frames": 480,
+    "post_marker_frames": 1440
+  },
+  "cases": [
+    {
+      "name": "S11-quiet",
+      "expectation": "required_positive",
+      "start_frame": 11033280,
+      "sample_count": 1920,
+      "marker_frame": 480,
+      "gain_permille": 1000,
+      "expected_crc32": 3049750257
+    },
+    {
+      "name": "S06-representative",
+      "expectation": "required_positive",
+      "start_frame": 6648000,
+      "sample_count": 1920,
+      "marker_frame": 480,
+      "gain_permille": 1000,
+      "expected_crc32": 3314867122
+    },
+    {
+      "name": "S03-loud",
+      "expectation": "required_positive",
+      "start_frame": 3240000,
+      "sample_count": 1920,
+      "marker_frame": 480,
+      "gain_permille": 1000,
+      "expected_crc32": 3331922874
+    },
+    {
+      "name": "practice-hard-negative",
+      "expectation": "diagnostic_negative",
+      "start_frame": 606922,
+      "sample_count": 1920,
+      "marker_frame": 480,
+      "gain_permille": 1000,
+      "expected_crc32": 2736380307
+    },
+    {
+      "name": "low-transient-negative",
+      "expectation": "diagnostic_negative",
+      "start_frame": 872763,
+      "sample_count": 1920,
+      "marker_frame": 480,
+      "gain_permille": 1000,
+      "expected_crc32": 2199172128
+    }
+  ]
+}

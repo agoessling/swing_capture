@@ -30,11 +30,13 @@ using swing_capture::hil::FeatherHilTransactionStage;
 using swing_capture::hil::FeatherResponseKind;
 
 constexpr std::string_view kQueryFields =
-    "firmware=prop-maker-hil-5 protocol=1 capabilities=query,led,tone,calibrate,swing "
+    "firmware=prop-maker-hil-9 protocol=1 capabilities=query,led,tone,pcm,calibrate,swing "
     "lead_max_us=2000000 led_duration_min_us=100 led_duration_max_us=1000000 "
     "tone_lead_min_us=20000 tone_duration_min_us=1000 tone_duration_max_us=250000 "
     "tone_frequency_min_hz=100 tone_frequency_max_hz=10000 tone_level_min_permille=1 "
-    "tone_level_max_permille=125 swing_start_lead_us=20000 swing_step_us=20000 "
+    "tone_level_max_permille=125 pcm_sample_rate_hz=48000 pcm_max_samples=12000 "
+    "pcm_max_chunk_bytes=48 pcm_lead_min_us=20000 pcm_gain_min_permille=1 "
+    "pcm_gain_max_permille=1000 pcm_white_us=20000 swing_start_lead_us=20000 swing_step_us=20000 "
     "swing_pre_steps=60 swing_white_us=20000 swing_post_steps=25 "
     "swing_tone_duration_us=10000 swing_tone_frequency_hz=2000 "
     "swing_tone_level_permille=125 swing_lateness_max_us=2000 "
@@ -169,7 +171,7 @@ void TestExactFirmwareInfoLedAndToneReceipts() {
   FeatherHilSerial serial(terminal.slave_path());
   std::jthread device([&terminal] {
     assert(ReadLine(terminal.master()) == "SC-HIL/1 101 QUERY\n");
-    WriteLine(terminal.master(), "SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-5 device_us=10\n");
+    WriteLine(terminal.master(), "SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-9 device_us=10\n");
     WriteLine(terminal.master(), QueryResponse(101));
 
     assert(ReadLine(terminal.master()) == "SC-HIL/1 102 LED 100000 44053\n");
@@ -248,7 +250,7 @@ void TestExactFirmwareInfoLedAndToneReceipts() {
 
   FeatherHilController controller(serial, 101);
   const auto info = controller.QueryInfo();
-  assert(info.firmware == "prop-maker-hil-5");
+  assert(info.firmware == "prop-maker-hil-9");
   assert(info.protocol_version == 1);
   assert(info.capabilities.contains("led"));
   assert(info.maximum_lead_microseconds == 2'000'000);
@@ -349,7 +351,7 @@ void ExpectQueryRejected(std::string_view fields) {
 }
 
 void TestRejectsIncompatibleNegotiation() {
-  ExpectQueryRejected(ReplacedQueryField("prop-maker-hil-5", "prop-maker-hil-4"));
+  ExpectQueryRejected(ReplacedQueryField("prop-maker-hil-9", "prop-maker-hil-8"));
   ExpectQueryRejected(
       ReplacedQueryField("swing_tone_level_permille=125", "swing_tone_level_permille=10"));
   ExpectQueryRejected(ReplacedQueryField("calibration_candidates=1,2,3,4,6,8,12,16",
@@ -368,9 +370,9 @@ void TestPreservesStructuredQueryFailure() {
   PseudoTerminal terminal;
   FeatherHilSerial serial(terminal.slave_path());
   std::string wrong_fields(kQueryFields);
-  const std::size_t firmware = wrong_fields.find("prop-maker-hil-5");
+  const std::size_t firmware = wrong_fields.find("prop-maker-hil-9");
   assert(firmware != std::string::npos);
-  wrong_fields.replace(firmware, std::string_view("prop-maker-hil-5").size(), "wrong");
+  wrong_fields.replace(firmware, std::string_view("prop-maker-hil-9").size(), "wrong");
   const std::string response = QueryResponse(251, wrong_fields);
   std::jthread device([&terminal, &response] {
     assert(ReadLine(terminal.master()) == "SC-HIL/1 251 QUERY\n");
@@ -441,7 +443,7 @@ void TestRejectsInconsistentTimingAndReset() {
   assert(RunRejectedLedTranscript({
       "SC-HIL/1 302 ACK LED accepted_us=1000000 scheduled_us=1100000 lead_us=100000 "
       "duration_us=44053\n",
-      "SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-5 device_us=1000010\n",
+      "SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-9 device_us=1000010\n",
   }));
   assert(RunRejectedToneTranscript({
       "SC-HIL/1 502 ACK TONE accepted_us=2000000 scheduled_us=2100000 lead_us=100000 "
@@ -691,7 +693,7 @@ void TestPreservesResetAndErrorEvidence() {
     PseudoTerminal terminal;
     FeatherHilSerial serial(terminal.slave_path());
     constexpr std::string_view kBoot =
-        "SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-5 device_us=1000010\n";
+        "SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-9 device_us=1000010\n";
     std::jthread device([&terminal, kBoot] {
       assert(ReadLine(terminal.master()) == "SC-HIL/1 701 QUERY\n");
       WriteLine(terminal.master(), QueryResponse(701));
@@ -757,6 +759,92 @@ void TestRejectsParametersBeforeWritingStimulus() {
   assert(Throws([&controller] { static_cast<void>(controller.RunSyntheticSwing(127U)); }));
 }
 
+void TestUploadsChecksumsAndPlaysMarkedPcmAfterCalibration() {
+  PseudoTerminal terminal;
+  FeatherHilSerial serial(terminal.slave_path());
+  std::jthread device([&terminal] {
+    assert(ReadLine(terminal.master()) == "SC-HIL/1 901 QUERY\n");
+    WriteLine(terminal.master(), QueryResponse(901));
+
+    assert(ReadLine(terminal.master()) == "SC-HIL/1 902 PCM_BEGIN 4 1405262468\n");
+    WriteLine(terminal.master(),
+              "SC-HIL/1 902 ACK PCM_BEGIN sample_rate_hz=48000 sample_count=4 byte_count=8 "
+              "crc32=1405262468 max_chunk_bytes=48\n");
+    assert(ReadLine(terminal.master()) == "SC-HIL/1 902 PCM_CHUNK 0 0000ff7f00803412\n");
+    WriteLine(terminal.master(),
+              "SC-HIL/1 902 ACK PCM_CHUNK byte_offset=0 byte_count=8 received_bytes=8 "
+              "total_bytes=8\n");
+    assert(ReadLine(terminal.master()) == "SC-HIL/1 902 PCM_COMMIT\n");
+    WriteLine(terminal.master(),
+              "SC-HIL/1 902 ACK PCM_COMMIT sample_rate_hz=48000 sample_count=4 byte_count=8 "
+              "crc32=1405262468\n");
+
+    assert(ReadLine(terminal.master()) == "SC-HIL/1 903 CALIBRATE\n");
+    WriteLine(terminal.master(), CalibrationAcknowledgement(903));
+    WriteCalibrationSteps(terminal.master(), 903);
+    WriteLine(terminal.master(),
+              "SC-HIL/1 903 EVENT CALIBRATE DONE start_us=3020002 end_us=3580082 "
+              "elapsed_us=560080 requested_us=560000 max_step_lateness_us=2 "
+              "power_on_us=3000100 prepared_until_us=13000100 pixel_off=1 i2s_inactive=1 "
+              "rail_powered=1 prepared=1 fixture_neopixel_gpio=21 shared_power_gpio=23\n");
+
+    assert(ReadLine(terminal.master()) == "SC-HIL/1 904 PCM_PLAY 100000 125 12 2\n");
+    WriteLine(terminal.master(),
+              "SC-HIL/1 904 ACK PCM_PLAY accepted_us=5000000 scheduled_audio_us=5100000 "
+              "scheduled_marker_us=5100042 lead_us=100000 marker_sample=2 marker_offset_us=42 "
+              "gain_permille=125 brightness=12 sample_rate_hz=48000 sample_count=4 "
+              "source_crc32=1405262468 white_us=20000 rail_powered=1 prepared=1 "
+              "prepare_source=calibration\n");
+    WriteLine(terminal.master(),
+              "SC-HIL/1 904 EVENT PCM_PLAY START scheduled_audio_us=5100000 "
+              "audio_command_us=5100003 audio_lateness_us=3 scheduled_marker_us=5100042 "
+              "marker_us=5100044 marker_lateness_us=2 marker_sample=2 marker_offset_us=42 "
+              "command_delta_us=41 command_delta_error_us=1\n");
+    WriteLine(terminal.master(),
+              "SC-HIL/1 904 EVENT PCM_PLAY DONE audio_command_us=5100003 marker_us=5100044 "
+              "white_end_us=5120044 audio_done_observed_us=5120144 end_us=5120224 "
+              "elapsed_us=20221 sample_rate_hz=48000 sample_count=4 marker_sample=2 "
+              "gain_permille=125 brightness=12 played_crc32=4267645195 white_us=20000 "
+              "outputs_inactive=1 pixel_off=1 i2s_inactive=1 rail_powered=0 prepared=0\n");
+  });
+
+  FeatherHilController controller(serial, 901);
+  const auto info = controller.QueryInfo();
+  assert(info.pcm_sample_rate_hz == 48'000U);
+  assert(info.pcm_maximum_samples == 12'000U);
+  assert(info.pcm_maximum_chunk_bytes == 48U);
+  const std::vector<std::int16_t> samples = {0, 32767, -32768, 0x1234};
+  const auto upload = controller.UploadPcm16(samples);
+  assert(upload.request_id == 902U);
+  assert(upload.source_crc32 == 0x53c29a84U);
+  assert(upload.committed_crc32 == upload.source_crc32);
+  assert(upload.sample_rate_hz == 48'000U);
+  assert(upload.sample_count == 4U);
+  assert(upload.byte_count == 8U);
+  assert(upload.acknowledgements.size() == 3U);
+  assert(Throws([&controller] {
+    static_cast<void>(
+        controller.PlayUploadedPcm(std::chrono::microseconds(100'000), 125U, 12U, 4U));
+  }));
+
+  static_cast<void>(controller.CalibrateSwingBrightness());
+  const auto playback =
+      controller.PlayUploadedPcm(std::chrono::microseconds(100'000), 125U, 12U, 2U);
+  assert(playback.request_id == 904U);
+  assert(playback.source_crc32 == upload.source_crc32);
+  assert(playback.expected_played_crc32 == 0xfe5f190bU);
+  assert(playback.played_crc32 == playback.expected_played_crc32);
+  assert(playback.prepare_source == "calibration");
+  assert(playback.marker_sample == 2U);
+  assert(playback.marker_offset_microseconds == 42U);
+  assert(playback.command_delta_error_microseconds == 1U);
+  assert(playback.gain_permille == 125U);
+  assert(playback.rail_powered_at_acknowledgement && playback.prepared_at_acknowledgement);
+  assert(playback.outputs_inactive_at_completion && playback.pixel_off_at_completion &&
+         playback.i2s_inactive_at_completion && !playback.rail_powered_at_completion &&
+         !playback.prepared_at_completion);
+}
+
 void TestRejectsInvalidRequestSeed() {
   PseudoTerminal terminal;
   FeatherHilSerial serial(terminal.slave_path());
@@ -780,6 +868,7 @@ int main() {
   TestRejectsFixtureStateContradictions();
   TestPreservesResetAndErrorEvidence();
   TestRejectsParametersBeforeWritingStimulus();
+  TestUploadsChecksumsAndPlaysMarkedPcmAfterCalibration();
   TestRejectsInvalidRequestSeed();
   return 0;
 }

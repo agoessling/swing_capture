@@ -14,6 +14,8 @@ public final class NodeCoreTest {
     coordinationStatePreservesSharedSessionIdentity();
     retentionKeepsNewestWithinBothLimits();
     retentionPrioritizesSwingCapturesOverDiagnostics();
+    retentionKeepsNewOperatorTagAlongsideFullPrimarySet();
+    retentionTreatsAutomaticImpactDiagnosticsAsLowPriority();
     retentionNeverDeletesProtectedSession();
   }
 
@@ -123,6 +125,45 @@ public final class NodeCoreTest {
             100,
             Set.of());
     assert removed.equals(List.of("new-diagnostic")) : removed;
+  }
+
+  private static void retentionKeepsNewOperatorTagAlongsideFullPrimarySet() {
+    java.util.ArrayList<SessionRetentionPlanner.Entry> entries = new java.util.ArrayList<>();
+    for (int index = 0; index < 40; ++index) {
+      entries.add(entry("capture-" + index, index + 1L, 10));
+    }
+    entries.add(
+        new SessionRetentionPlanner.Entry(
+            "operator-tag",
+            100,
+            10,
+            SessionRetentionPlanner.retentionClassForManifest(
+                "standby_diagnostic", "operator_tag")));
+
+    List<String> removed =
+        SessionRetentionPlanner.deletions(entries, 40, 1_000, Set.of());
+    assert removed.equals(List.of("capture-0")) : removed;
+  }
+
+  private static void retentionTreatsAutomaticImpactDiagnosticsAsLowPriority() {
+    java.util.ArrayList<SessionRetentionPlanner.Entry> entries = new java.util.ArrayList<>();
+    for (int index = 0; index < 40; ++index) {
+      entries.add(entry("capture-" + index, index + 1L, 10));
+    }
+    entries.add(
+        new SessionRetentionPlanner.Entry(
+            "automatic-impact",
+            100,
+            10,
+            SessionRetentionPlanner.retentionClassForManifest(
+                "standby_diagnostic", "detected_impact")));
+
+    List<String> removed =
+        SessionRetentionPlanner.deletions(entries, 40, 1_000, Set.of());
+    assert removed.equals(List.of("automatic-impact")) : removed;
+    assert SessionRetentionPlanner.retentionClassForManifest(
+            "standby_diagnostic", "unknown")
+        == SessionRetentionPlanner.RetentionClass.PRIMARY_CAPTURE;
   }
 
   private static SessionRetentionPlanner.Entry entry(String id, long created, long bytes) {

@@ -1,0 +1,53 @@
+# One compact timeline covering timeout/recovery, a false leader terminal,
+# staying in frame between shots, rapid rearm, and a never-ready attempt.
+name,off_nominal_combined_trigger_lifecycles
+
+# Attempt 0 arms but receives no audio and reaches the no-impact deadline.
+pose,0,800,200,0.95,0.10,0.90
+pose,1000,4000,200,0.95,0.90,0.10
+pose,4800,6800,200,0.95,0.10,0.90
+
+# Attempt 1 proves recovery from the no-impact attempt.
+pose,7000,9000,200,0.95,0.90,0.10
+target,T01,8500,9000
+audio,9000,T01
+pose,9400,11400,200,0.95,0.10,0.90
+
+# Attempt 2 terminates on a false event before T02; T02 is not silently credited.
+pose,12000,14000,200,0.95,0.90,0.10
+audio,14000,FALSE_BEFORE_T02
+target,T02,14300,14500
+audio,14500,T02
+pose,14400,16400,200,0.95,0.10,0.90
+
+# Attempt 3 proves rearm following the false terminal.
+pose,17000,19000,200,0.95,0.90,0.10
+target,T03,18500,19000
+audio,19000,T03
+
+# The golfer never leaves frame. One motion observation supplies reset evidence;
+# address-like observations then persist through cooldown and attempts 4 and 5.
+pose,19400,19400,200,0.95,0.90,0.90
+pose,19600,23000,200,0.95,0.90,0.10
+target,T04,22500,23000
+audio,23000,T04
+pose,23400,23400,200,0.95,0.90,0.90
+pose,23600,27000,200,0.95,0.90,0.10
+target,T05,26500,27000
+audio,27000,T05
+
+# Attempt 6 is locally ready, but the peer's terminal FAILED resolution arrives only after T06.
+# T06 is therefore ignored and the already-expired active lease terminates immediately at 32800.
+startup,6,200,600,5000,failed
+pose,27400,29400,200,0.95,0.10,0.90
+pose,30000,36000,200,0.95,0.90,0.10
+target,T06,31500,32000
+audio,32000,T06
+
+# No-impact completion, restart, cooldown, and reset permit attempt 7.
+pose,36800,38800,200,0.95,0.10,0.90
+pose,39000,41000,200,0.95,0.90,0.10
+target,T07,40500,41000
+audio,41000,T07
+pose,41400,42000,200,0.95,0.10,0.90
+end,42000

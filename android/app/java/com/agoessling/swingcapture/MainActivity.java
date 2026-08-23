@@ -44,7 +44,6 @@ public final class MainActivity extends Activity {
   private Spinner profileSpinner;
   private Spinner poseModeSpinner;
   private Spinner poseDelegateSpinner;
-  private EditText hittingRegionEdit;
   private EditText peerOriginEdit;
   private EditText peerTokenEdit;
   private CheckBox debugEvidenceCheckBox;
@@ -70,6 +69,11 @@ public final class MainActivity extends Activity {
   private boolean initialPoseStandbyHilRequested;
   private boolean initialPoseReplayHilRequested;
   private boolean initialPoseArmHilEnabled;
+  private boolean initialAutonomousRecoveryHilRequested;
+  private boolean initialFieldRecordingStartRejectionHilRequested;
+  private boolean initialAcceptedFieldRecordingStartFailureHilRequested;
+  private boolean initialAcceptedFieldRecordingStartFailureHilReleaseRequested;
+  private boolean initialFieldRecordingStartRejectionHilClearRequested;
 
   @Override
   protected void onCreate(Bundle savedInstanceState) {
@@ -88,6 +92,16 @@ public final class MainActivity extends Activity {
         getIntent().getBooleanExtra("run_pose_standby_hil", false);
     initialPoseReplayHilRequested = getIntent().getBooleanExtra("run_pose_replay_hil", false);
     initialPoseArmHilEnabled = getIntent().getBooleanExtra("enable_pose_arm_hil", false);
+    initialAutonomousRecoveryHilRequested =
+        getIntent().getBooleanExtra("prepare_autonomous_recovery_hil", false);
+    initialFieldRecordingStartRejectionHilRequested =
+        getIntent().getBooleanExtra("reject_next_field_recording_start_hil", false);
+    initialAcceptedFieldRecordingStartFailureHilRequested =
+        getIntent().getBooleanExtra("fail_next_accepted_field_recording_start_hil", false);
+    initialAcceptedFieldRecordingStartFailureHilReleaseRequested =
+        getIntent().getBooleanExtra("release_accepted_field_recording_start_failure_hil", false);
+    initialFieldRecordingStartRejectionHilClearRequested =
+        getIntent().getBooleanExtra("clear_field_recording_start_hil", false);
     setContentView(createContentView());
     if (initialPoseReplayHilRequested || !requestRuntimePermissions()) {
       runInitialAction();
@@ -109,6 +123,16 @@ public final class MainActivity extends Activity {
     initialPoseStandbyHilRequested = intent.getBooleanExtra("run_pose_standby_hil", false);
     initialPoseReplayHilRequested = intent.getBooleanExtra("run_pose_replay_hil", false);
     initialPoseArmHilEnabled = intent.getBooleanExtra("enable_pose_arm_hil", false);
+    initialAutonomousRecoveryHilRequested =
+        intent.getBooleanExtra("prepare_autonomous_recovery_hil", false);
+    initialFieldRecordingStartRejectionHilRequested =
+        intent.getBooleanExtra("reject_next_field_recording_start_hil", false);
+    initialAcceptedFieldRecordingStartFailureHilRequested =
+        intent.getBooleanExtra("fail_next_accepted_field_recording_start_hil", false);
+    initialAcceptedFieldRecordingStartFailureHilReleaseRequested =
+        intent.getBooleanExtra("release_accepted_field_recording_start_failure_hil", false);
+    initialFieldRecordingStartRejectionHilClearRequested =
+        intent.getBooleanExtra("clear_field_recording_start_hil", false);
     selectConfiguredRole();
     selectConfiguredProfile();
     if (initialPoseReplayHilRequested || !requestRuntimePermissions()) {
@@ -186,10 +210,23 @@ public final class MainActivity extends Activity {
               Double.parseDouble(fields[2]),
               Double.parseDouble(fields[3]));
     }
+    boolean modeExplicit = intent.hasExtra("pose_mode");
+    PoseNodeMode requestedMode =
+        modeExplicit ? PoseNodeMode.parse(intent.getStringExtra("pose_mode")) : current.mode();
+    boolean originExplicit = intent.hasExtra("pose_peer_origin");
+    boolean controlTokenExplicit = intent.hasExtra("pose_peer_control_token");
+    PoseIntentPeerPolicy.Peer peer =
+        PoseIntentPeerPolicy.resolve(
+            requestedMode,
+            modeExplicit,
+            current.peerOrigin(),
+            current.peerControlToken(),
+            originExplicit,
+            originExplicit ? intent.getStringExtra("pose_peer_origin") : "",
+            controlTokenExplicit,
+            controlTokenExplicit ? intent.getStringExtra("pose_peer_control_token") : "");
     return new PoseStationConfigurationSnapshot(
-            intent.hasExtra("pose_mode")
-                ? PoseNodeMode.parse(intent.getStringExtra("pose_mode"))
-                : current.mode(),
+            requestedMode,
             intent.hasExtra("pose_delegate")
                 ? PoseStationConfigurationSnapshot.parseDelegatePolicy(
                     intent.getStringExtra("pose_delegate"))
@@ -198,12 +235,8 @@ public final class MainActivity extends Activity {
             intent.hasExtra("pose_debug_evidence")
                 ? intent.getBooleanExtra("pose_debug_evidence", true)
                 : current.debugEvidenceEnabled(),
-            intent.hasExtra("pose_peer_origin")
-                ? intent.getStringExtra("pose_peer_origin")
-                : current.peerOrigin(),
-            intent.hasExtra("pose_peer_control_token")
-                ? intent.getStringExtra("pose_peer_control_token")
-                : current.peerControlToken());
+            peer.origin(),
+            peer.controlToken());
   }
 
   private LinearLayout createContentView() {
@@ -282,13 +315,6 @@ public final class MainActivity extends Activity {
         new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, delegates));
     poseDelegateSpinner.setSelection(poseConfiguration.delegatePolicy().ordinal());
     root.addView(poseDelegateSpinner);
-
-    hittingRegionEdit = new EditText(this);
-    hittingRegionEdit.setHint("Hitting region: left,top,right,bottom");
-    NormalizedHittingRegion region = poseConfiguration.hittingRegion();
-    hittingRegionEdit.setText(
-        region.left() + "," + region.top() + "," + region.right() + "," + region.bottom());
-    root.addView(hittingRegionEdit);
 
     peerOriginEdit = new EditText(this);
     peerOriginEdit.setHint("Optional peer origin, e.g. http://192.168.1.20:8088");
@@ -388,21 +414,11 @@ public final class MainActivity extends Activity {
       return;
     }
     try {
-      String[] coordinates = hittingRegionEdit.getText().toString().trim().split(",", -1);
-      if (coordinates.length != 4) {
-        throw new IllegalArgumentException("hitting region requires four comma-separated values");
-      }
-      NormalizedHittingRegion region =
-          new NormalizedHittingRegion(
-              Double.parseDouble(coordinates[0].trim()),
-              Double.parseDouble(coordinates[1].trim()),
-              Double.parseDouble(coordinates[2].trim()),
-              Double.parseDouble(coordinates[3].trim()));
       PoseStationConfigurationSnapshot snapshot =
           new PoseStationConfigurationSnapshot(
               PoseNodeMode.values()[poseModeSpinner.getSelectedItemPosition()],
               PoseInferenceDelegatePolicy.values()[poseDelegateSpinner.getSelectedItemPosition()],
-              region,
+              PoseStationConfigurationSnapshot.DEFAULT_HITTING_REGION,
               debugEvidenceCheckBox.isChecked(),
               peerOriginEdit.getText().toString(),
               peerTokenEdit.getText().toString());
@@ -453,7 +469,6 @@ public final class MainActivity extends Activity {
     if (poseModeSpinner != null) {
       poseModeSpinner.setEnabled(enabled);
       poseDelegateSpinner.setEnabled(enabled);
-      hittingRegionEdit.setEnabled(enabled);
       peerOriginEdit.setEnabled(enabled);
       peerTokenEdit.setEnabled(enabled);
       debugEvidenceCheckBox.setEnabled(enabled);
@@ -488,6 +503,44 @@ public final class MainActivity extends Activity {
     if (capturePermissionsGranted()) {
       ensureNodeService();
     }
+    if (initialFieldRecordingStartRejectionHilRequested && capturePermissionsGranted()) {
+      initialFieldRecordingStartRejectionHilRequested = false;
+      sendServiceAction(
+          CaptureForegroundService.ACTION_REJECT_NEXT_FIELD_RECORDING_START_HIL);
+      return;
+    }
+    if (initialAcceptedFieldRecordingStartFailureHilRequested && capturePermissionsGranted()) {
+      initialAcceptedFieldRecordingStartFailureHilRequested = false;
+      sendServiceAction(
+          CaptureForegroundService.ACTION_FAIL_NEXT_ACCEPTED_FIELD_RECORDING_START_HIL);
+      return;
+    }
+    if (initialAcceptedFieldRecordingStartFailureHilReleaseRequested
+        && capturePermissionsGranted()) {
+      initialAcceptedFieldRecordingStartFailureHilReleaseRequested = false;
+      sendServiceAction(
+          CaptureForegroundService.ACTION_RELEASE_ACCEPTED_FIELD_RECORDING_START_FAILURE_HIL);
+      return;
+    }
+    if (initialFieldRecordingStartRejectionHilClearRequested && capturePermissionsGranted()) {
+      initialFieldRecordingStartRejectionHilClearRequested = false;
+      sendServiceAction(
+          CaptureForegroundService.ACTION_CLEAR_FIELD_RECORDING_START_HIL);
+      return;
+    }
+    if (initialAutonomousRecoveryHilRequested && capturePermissionsGranted()) {
+      initialAutonomousRecoveryHilRequested = false;
+      Intent service = new Intent(this, CaptureForegroundService.class);
+      service.setAction(CaptureForegroundService.ACTION_PREPARE_AUTONOMOUS_RECOVERY_HIL);
+      service.putExtra(
+          CaptureForegroundService.EXTRA_SHARED_SESSION_ID,
+          getIntent().getStringExtra("shared_session_id"));
+      service.putExtra(
+          CaptureForegroundService.EXTRA_PEER_NODE_ID,
+          getIntent().getStringExtra("peer_node_id"));
+      startForegroundService(service);
+      return;
+    }
     if (initialSoakFinishRequested && capturePermissionsGranted()) {
       initialSoakFinishRequested = false;
       sendServiceAction(CaptureForegroundService.ACTION_FINISH_SOAK_HIL);
@@ -495,7 +548,7 @@ public final class MainActivity extends Activity {
     }
     if (initialPoseStandbyHilRequested && capturePermissionsGranted()) {
       initialPoseStandbyHilRequested = false;
-      sendServiceAction(CaptureForegroundService.ACTION_ARM);
+      sendPoseExperimentHilAction(getIntent());
       return;
     }
     if ((initialContinuousHilRequested || initialAudioHilRequested || initialSoakHilRequested)
@@ -627,7 +680,7 @@ public final class MainActivity extends Activity {
   }
 
   private static NormalizedHittingRegion parsePoseReplayHittingRegion(String value) {
-    String text = value == null ? "0.15,0.30,0.85,1.0" : value;
+    String text = value == null ? "0.0,0.0,1.0,1.0" : value;
     String[] fields = text.trim().split(",", -1);
     if (fields.length != 4) {
       throw new IllegalArgumentException("pose replay hitting region requires four coordinates");
@@ -875,6 +928,29 @@ public final class MainActivity extends Activity {
     if (sharedSessionId != null) {
       service.putExtra(CaptureForegroundService.EXTRA_SHARED_SESSION_ID, sharedSessionId);
     }
+    startForegroundService(service);
+    scheduleServiceDisplayRefresh(250);
+  }
+
+  private void sendPoseExperimentHilAction(Intent source) {
+    PoseExperimentConfiguration experiment =
+        PoseExperimentConfiguration.parse(
+            source.getStringExtra(CaptureForegroundService.EXTRA_POSE_EXPERIMENT_MODEL),
+            source.getIntExtra(
+                CaptureForegroundService.EXTRA_POSE_EXPERIMENT_STANDBY_WIDTH, -1),
+            source.getIntExtra(
+                CaptureForegroundService.EXTRA_POSE_EXPERIMENT_STANDBY_HEIGHT, -1));
+    Intent service = new Intent(this, CaptureForegroundService.class);
+    service.setAction(CaptureForegroundService.ACTION_ARM_POSE_EXPERIMENT_HIL);
+    service.putExtra(
+        CaptureForegroundService.EXTRA_POSE_EXPERIMENT_MODEL,
+        experiment.modelVariant().wireName());
+    service.putExtra(
+        CaptureForegroundService.EXTRA_POSE_EXPERIMENT_STANDBY_WIDTH,
+        experiment.standbyWidth());
+    service.putExtra(
+        CaptureForegroundService.EXTRA_POSE_EXPERIMENT_STANDBY_HEIGHT,
+        experiment.standbyHeight());
     startForegroundService(service);
     scheduleServiceDisplayRefresh(250);
   }

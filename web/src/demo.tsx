@@ -1,9 +1,9 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Application, viewFromHash } from "./application.js";
-import { FakeStationApi } from "./fake_api.js";
+import { FakeStationApi, FIXTURE_STATUS } from "./fake_api.js";
 import { FakeNodeSetupApi } from "./fake_node_setup_api.js";
-import { FakeReviewApi } from "./fake_review_api.js";
+import { FakeFieldRecordingReviewApi, FakeReviewApi } from "./fake_review_api.js";
 import {
   PEER_ARM_STATES,
   type PeerArmState,
@@ -21,6 +21,17 @@ if (root === null) {
 
 const parameters = new URLSearchParams(window.location.search);
 const phoneSetupMode = parameters.get("phone_setup");
+const fieldRecordingMode = parameters.get("field_recording") === "1";
+const stationStatus = structuredClone(FIXTURE_STATUS);
+if (parameters.get("preview_stall") === "capture_sink") {
+  const camera = stationStatus.cameras.find((candidate) => candidate.role === "down_the_line");
+  if (camera !== undefined) {
+    camera.preview_performance.latest_capture_frame_id = "801";
+    camera.preview_performance.latest_sink_frame_id = "800";
+    camera.preview_performance.latest_capture_age_ms = 3_200;
+    camera.preview_performance.source_age_ms = 3_300;
+  }
+}
 const requestedPeerArmState = parameters.get("peer_arm");
 const peerArmState =
   requestedPeerArmState !== null &&
@@ -65,13 +76,13 @@ createRoot(root).render(
       {...(nodeSetupApis === undefined ? {} : { nodeSetupApis })}
       pollIntervalMs={100}
       reviewApi={
-        new FakeReviewApi({
+        new (fieldRecordingMode ? FakeFieldRecordingReviewApi : FakeReviewApi)({
           ...(peerArmState === undefined ? {} : { peerArmState }),
           ...(poseMode === undefined ? {} : { poseMode }),
           ...(posePhase === undefined ? {} : { posePhase }),
         })
       }
-      stationApi={new FakeStationApi()}
+      stationApi={new FakeStationApi(stationStatus)}
     />
   </StrictMode>,
 );

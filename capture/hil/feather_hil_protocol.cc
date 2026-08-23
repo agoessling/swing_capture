@@ -3,6 +3,8 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -15,7 +17,9 @@
 namespace swing_capture::hil {
 namespace {
 
-constexpr std::size_t kMaximumLineBytes = 1024;
+// QUERY advertises the complete typed fixture contract and is larger than a
+// command line. The serial transport independently caps buffered input at 4 KiB.
+constexpr std::size_t kMaximumLineBytes = 2048;
 
 std::vector<std::string_view> Tokens(std::string_view line) {
   if (!line.empty() && line.back() == '\n') {
@@ -187,6 +191,103 @@ std::string BuildFeatherToneCommand(std::uint32_t request_id, std::uint64_t lead
   return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " TONE " +
          std::to_string(lead_microseconds) + " " + std::to_string(duration_microseconds) + " " +
          std::to_string(frequency_hz) + " " + std::to_string(level_permille) + "\n";
+}
+
+std::uint32_t FeatherPcmCrc32(std::span<const std::uint8_t> bytes) {
+  std::uint32_t checksum = std::numeric_limits<std::uint32_t>::max();
+  for (const std::uint8_t byte : bytes) {
+    checksum ^= byte;
+    for (std::uint32_t bit = 0; bit < 8; ++bit) {
+      const std::uint32_t mask = 0U - (checksum & 1U);
+      checksum = (checksum >> 1U) ^ (0xedb88320U & mask);
+    }
+  }
+  return checksum ^ std::numeric_limits<std::uint32_t>::max();
+}
+
+std::vector<std::uint8_t> FeatherPcm16LeBytes(std::span<const std::int16_t> samples) {
+  if (samples.empty() || samples.size() > kFeatherHilPcmMaximumSamples) {
+    throw std::invalid_argument("PCM sample count is outside the SC-HIL/1 range");
+  }
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(samples.size() * 2U);
+  for (const std::int16_t sample : samples) {
+    const auto bits = static_cast<std::uint16_t>(sample);
+    bytes.push_back(static_cast<std::uint8_t>(bits & 0xffU));
+    bytes.push_back(static_cast<std::uint8_t>(bits >> 8U));
+  }
+  return bytes;
+}
+
+std::uint32_t FeatherScaledPcmCrc32(std::span<const std::int16_t> samples,
+                                    std::uint32_t gain_permille) {
+  if (gain_permille < kFeatherHilPcmMinimumGainPermille ||
+      gain_permille > kFeatherHilPcmMaximumGainPermille) {
+    throw std::invalid_argument("PCM gain is outside the SC-HIL/1 range");
+  }
+  std::vector<std::int16_t> scaled;
+  scaled.reserve(samples.size());
+  for (const std::int16_t sample : samples) {
+    scaled.push_back(static_cast<std::int16_t>(
+        (static_cast<std::int32_t>(sample) * static_cast<std::int32_t>(gain_permille)) / 1000));
+  }
+  return FeatherPcmCrc32(FeatherPcm16LeBytes(scaled));
+}
+
+std::string BuildFeatherPcmBeginCommand(std::uint32_t request_id, std::uint32_t sample_count,
+                                        std::uint32_t crc32) {
+  ValidateRequestId(request_id);
+  if (sample_count == 0 || sample_count > kFeatherHilPcmMaximumSamples) {
+    throw std::invalid_argument("PCM sample count is outside the SC-HIL/1 range");
+  }
+  return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " PCM_BEGIN " +
+         std::to_string(sample_count) + " " + std::to_string(crc32) + "\n";
+}
+
+std::string BuildFeatherPcmChunkCommand(std::uint32_t request_id, std::uint32_t byte_offset,
+                                        std::span<const std::uint8_t> bytes) {
+  ValidateRequestId(request_id);
+  constexpr std::string_view kHex = "0123456789abcdef";
+  constexpr std::uint32_t kMaximumBytes = kFeatherHilPcmMaximumSamples * 2U;
+  if (bytes.empty() || bytes.size() > kFeatherHilPcmMaximumChunkBytes ||
+      byte_offset > kMaximumBytes || bytes.size() > kMaximumBytes - byte_offset) {
+    throw std::invalid_argument("PCM chunk is outside the SC-HIL/1 range");
+  }
+  std::string hexadecimal;
+  hexadecimal.reserve(bytes.size() * 2U);
+  for (const std::uint8_t byte : bytes) {
+    hexadecimal.push_back(kHex[byte >> 4U]);
+    hexadecimal.push_back(kHex[byte & 0x0fU]);
+  }
+  return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " PCM_CHUNK " +
+         std::to_string(byte_offset) + " " + hexadecimal + "\n";
+}
+
+std::string BuildFeatherPcmCommitCommand(std::uint32_t request_id) {
+  ValidateRequestId(request_id);
+  return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " PCM_COMMIT\n";
+}
+
+std::string BuildFeatherPcmAbortCommand(std::uint32_t request_id) {
+  ValidateRequestId(request_id);
+  return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " PCM_ABORT\n";
+}
+
+std::string BuildFeatherPcmPlayCommand(std::uint32_t request_id, std::uint64_t lead_microseconds,
+                                       std::uint32_t gain_permille, std::uint32_t brightness,
+                                       std::uint32_t marker_sample) {
+  ValidateRequestId(request_id);
+  if (lead_microseconds < kFeatherHilPcmMinimumLeadMicroseconds ||
+      lead_microseconds > kFeatherHilMaximumLeadMicroseconds ||
+      gain_permille < kFeatherHilPcmMinimumGainPermille ||
+      gain_permille > kFeatherHilPcmMaximumGainPermille ||
+      !swing_hil_swing_brightness_is_candidate(brightness) ||
+      marker_sample >= kFeatherHilPcmMaximumSamples) {
+    throw std::invalid_argument("PCM play parameters are outside the SC-HIL/1 range");
+  }
+  return std::string(kFeatherHilProtocol) + " " + std::to_string(request_id) + " PCM_PLAY " +
+         std::to_string(lead_microseconds) + " " + std::to_string(gain_permille) + " " +
+         std::to_string(brightness) + " " + std::to_string(marker_sample) + "\n";
 }
 
 std::string BuildFeatherCalibrationCommand(std::uint32_t request_id) {

@@ -1,3 +1,10 @@
+import { type ControlCredential, controlCredentialValue } from "./control_credential.js";
+import {
+  LiveStatusCursor,
+  parseLiveStatusVersion,
+  type StatusSubscriptionOptions,
+  subscribeToReconnectableStatus,
+} from "./live_status.js";
 import {
   CAPTURE_SCHEMA_VERSION,
   type CaptureState,
@@ -7,10 +14,16 @@ import {
   type DiagnosticArchive,
   type DiagnosticFeedback,
   type DiagnosticTimingMarks,
+  type DualFieldRecordingStatus,
+  FIELD_RECORDING_STATES,
+  type FieldRecording,
+  type FieldRecordingList,
+  type FieldRecordingNodeStatus,
   HttpReviewApi,
   type PeerArmStatus,
   type PoseCaptureStatus,
   parseCaptureStatus,
+  parseSessionSummary,
   REVIEW_SCHEMA_VERSION,
   type ReviewApi,
   type ReviewRole,
@@ -24,10 +37,20 @@ const PAIRING_TOLERANCE_NS = 50_000_000n;
 const MAXIMUM_REPORT_UNCERTAINTY_NS = 10_000_000n;
 const MAXIMUM_PAIR_UNCERTAINTY_NS = 20_000_000n;
 const ALIGNMENT_STORAGE_PREFIX = "swing-capture.dual-alignment.";
+const FIELD_RECORDING_DISARM_TIMEOUT_MS = 5_000;
+const FIELD_RECORDING_DISARM_POLL_MS = 100;
+const FIELD_RECORDING_TRANSITION_TIMEOUT_MS = 10_000;
+const FIELD_RECORDING_TRANSITION_POLL_MS = 100;
+// A phone serves the historical review catalog and live control API from the same small HTTP
+// executor. Hydrating every retained manifest at once can occupy every browser connection and
+// server worker, preventing an operator's authenticated start/stop request from reaching the
+// phone. Keep background catalog work below that shared transport's capacity; control requests do
+// not use this gate and therefore retain a path to each node.
+const MAXIMUM_CONCURRENT_MANIFEST_REQUESTS_PER_NODE = 2;
 
 export interface DualNodeEndpoint {
   baseUrl: string;
-  controlToken: string;
+  controlToken: ControlCredential;
   role: ReviewRole;
 }
 
@@ -113,6 +136,19 @@ export interface SessionPair {
   error?: string;
 }
 
+interface LocalSessionReference {
+  node: AndroidNodeClient;
+  summary: SessionSummary;
+  manifest?: ClipManifest;
+}
+
+interface SessionReferencePair {
+  sharedSessionId: string;
+  downTheLine?: LocalSessionReference;
+  faceOn?: LocalSessionReference;
+  error?: string;
+}
+
 type Fetcher = typeof fetch;
 type MonotonicNow = () => bigint;
 type SessionIdFactory = () => string;
@@ -131,6 +167,8 @@ export class DualNodeReviewApi implements ReviewApi {
   readonly #manifestCache = new Map<string, Promise<ClipManifest>>();
   readonly #alignmentCache = new Map<string, DualNodeAlignment>();
   readonly #durablyReplicated = new Set<string>();
+  readonly #statusSubscriptionOptions: StatusSubscriptionOptions;
+  #descriptorRequest: Promise<readonly [NodeDescriptor, NodeDescriptor]> | null = null;
   #activeSharedSessionId: string | null = null;
   #coordinationError: string | null = null;
   #coordinationAttempt: Promise<void> | null = null;
@@ -141,6 +179,7 @@ export class DualNodeReviewApi implements ReviewApi {
     now: MonotonicNow = browserMonotonicNow,
     sessionIdFactory: SessionIdFactory = newSharedSessionId,
     storage: AlignmentStorage | null = browserStorage(),
+    statusSubscriptionOptions: StatusSubscriptionOptions = {},
   ) {
     const ordered = [...endpoints].sort(
       (left, right) => roleOrder(left.role) - roleOrder(right.role),
@@ -154,20 +193,27 @@ export class DualNodeReviewApi implements ReviewApi {
     ];
     this.#sessionIdFactory = sessionIdFactory;
     this.#storage = storage;
+    this.#statusSubscriptionOptions = statusSubscriptionOptions;
+  }
+
+  subscribeToChanges(onChange: () => void): () => void {
+    const unsubscribers = this.#nodes.map((node) =>
+      node.subscribeToStatus(onChange, this.#statusSubscriptionOptions),
+    );
+    return () => {
+      for (const unsubscribe of unsubscribers) {
+        unsubscribe();
+      }
+    };
   }
 
   async getCaptureStatus(): Promise<CaptureStatus> {
     await this.#ensureDescriptors();
     const details = await Promise.all(this.#nodes.map((node) => node.captureStatus()));
-    const sharedIds = new Set(
-      details
-        .map((detail) => detail.sharedSessionId)
-        .filter((value): value is string => value !== null),
+    const reportedSharedId = consistentSharedSessionId(
+      details,
+      !details.every((detail) => detail.status.armed),
     );
-    if (sharedIds.size > 1) {
-      throw new Error("Android nodes report different active shared session IDs");
-    }
-    const reportedSharedId = [...sharedIds][0] ?? null;
     if (reportedSharedId !== null) {
       this.#activeSharedSessionId = reportedSharedId;
     }
@@ -193,7 +239,7 @@ export class DualNodeReviewApi implements ReviewApi {
   }
 
   async setArmed(armed: boolean): Promise<CaptureStatus> {
-    await this.#ensureDescriptors();
+    await this.#verifyControlCredentials();
     if (!armed) {
       const results = await Promise.allSettled(
         this.#nodes.map((node) => node.setArmed(false, null)),
@@ -209,6 +255,11 @@ export class DualNodeReviewApi implements ReviewApi {
 
     await Promise.all(this.#nodes.map((node) => node.clockEstimate(CLOCK_SAMPLE_COUNT)));
     const sharedSessionId = this.#sessionIdFactory();
+    // A failed two-node arm must not leave browser-local ownership behind. The successful node is
+    // rolled back below, and clearing this state before sending either request also makes an
+    // immediate operator retry allocate a fresh, internally consistent arm transaction.
+    this.#activeSharedSessionId = null;
+    this.#coordinationError = null;
     const results = await Promise.allSettled(
       this.#nodes.map((node) => node.setArmed(true, sharedSessionId)),
     );
@@ -234,6 +285,18 @@ export class DualNodeReviewApi implements ReviewApi {
     if (this.#activeSharedSessionId === null) {
       throw new Error("Both Android nodes must be armed before a dual manual capture");
     }
+    await this.#verifyControlCredentials();
+    const details = await Promise.all(this.#nodes.map((node) => node.captureStatus()));
+    if (!details.every((detail) => detail.status.armed)) {
+      throw new Error("Both Android nodes must be armed before a dual manual capture");
+    }
+    const reportedSharedSessionId = consistentSharedSessionId(details);
+    if (reportedSharedSessionId === null) {
+      throw new Error("Android nodes no longer report the browser's active shared session");
+    }
+    if (this.#activeSharedSessionId !== reportedSharedSessionId) {
+      throw new Error("Android nodes report a different active shared session than the browser");
+    }
     const results = await Promise.allSettled(this.#nodes.map((node) => node.triggerManual()));
     throwRejectedNodeOperation(results, "manual trigger");
     return {
@@ -245,24 +308,241 @@ export class DualNodeReviewApi implements ReviewApi {
   }
 
   async saveMissedShot(): Promise<SessionSummary> {
-    if (this.#activeSharedSessionId === null) {
+    await this.#verifyControlCredentials();
+    // Always revalidate both live nodes immediately before either diagnostic mutation. Browser
+    // ownership can be stale after a local capture error, process restart, or peer transition even
+    // when this coordinator originally armed the pair and still retains its shared session ID.
+    const details = await Promise.all(this.#nodes.map((node) => node.captureStatus()));
+    if (!details.every((detail) => detail.status.armed)) {
       throw new Error("Both Android nodes must be armed before saving a missed shot");
     }
+    const reportedSharedSessionId = consistentSharedSessionId(details);
+    if (this.#activeSharedSessionId !== null && reportedSharedSessionId === null) {
+      throw new Error("Android nodes no longer report the browser's active shared session");
+    }
+    if (
+      this.#activeSharedSessionId !== null &&
+      reportedSharedSessionId !== null &&
+      this.#activeSharedSessionId !== reportedSharedSessionId
+    ) {
+      throw new Error("Android nodes report a different active shared session than the browser");
+    }
+    if (reportedSharedSessionId !== null) {
+      this.#activeSharedSessionId = reportedSharedSessionId;
+    }
     const results = await Promise.allSettled(this.#nodes.map((node) => node.saveMissedShot()));
-    throwRejectedNodeOperation(results, "save missed shot");
+    if (results.some((result) => result.status === "rejected")) {
+      // A credential can rotate or a phone can leave capture between the read-only preflight and
+      // the two concurrent diagnostic mutations. The accepted node has already consumed its ring
+      // and disarmed, so the operation cannot be rolled back. Converge both phones to the safe
+      // stopped state instead of leaving one armed under stale browser ownership.
+      const primaryFailure = rejectedNodeOperation(results, "save missed shot");
+      const disarmResults = await Promise.allSettled(
+        this.#nodes.map((node) => node.setArmed(false, null)),
+      );
+      this.#activeSharedSessionId = null;
+      this.#coordinationError = null;
+      const disarmFailure = rejectedNodeOperation(
+        disarmResults,
+        "disarm after partial missed shot on",
+      );
+      throw combinedOperationFailure(primaryFailure, disarmFailure, null);
+    }
     const summaries = results.map((result) => fulfilled(result));
+    const firstSummary = summaries[0];
+    if (firstSummary === undefined) {
+      throw new Error("No Android node returned a missed-shot session");
+    }
     const sessionKinds = new Set(summaries.map((summary) => summary.session_kind ?? "capture"));
     if (sessionKinds.size !== 1) {
       throw new Error("Android nodes disagreed on the missed-shot session kind");
     }
-    const sessionKind = summaries[0]?.session_kind;
+    const sessionKind = firstSummary.session_kind;
     return {
-      session_id: this.#activeSharedSessionId,
+      session_id: this.#activeSharedSessionId ?? firstSummary.session_id,
       state: "waiting_post_roll",
       created_at_utc: new Date().toISOString(),
       error: "",
       ...(sessionKind === undefined ? {} : { session_kind: sessionKind }),
     };
+  }
+
+  async getFieldRecordingStatus(): Promise<DualFieldRecordingStatus> {
+    await this.#ensureDescriptors();
+    return {
+      nodes: await Promise.all(this.#nodes.map((node) => node.fieldRecordingStatus())),
+    };
+  }
+
+  async startFieldRecording(): Promise<DualFieldRecordingStatus> {
+    await this.#verifyControlCredentials();
+    const disarmResults = await Promise.allSettled(
+      this.#nodes.map((node) => node.setArmed(false, null)),
+    );
+    throwRejectedNodeOperation(disarmResults, "disarm before field recording");
+    this.#activeSharedSessionId = null;
+    this.#coordinationError = null;
+    await this.#waitUntilCaptureDisarmed();
+
+    const sharedRecordingId = newFieldRecordingId();
+    const results = await Promise.allSettled(
+      this.#nodes.map((node) => node.startFieldRecording(sharedRecordingId)),
+    );
+    if (results.some((result) => result.status === "rejected")) {
+      const primaryFailure = rejectedNodeOperation(results, "start field recording on");
+      const rollbackResults = await Promise.allSettled(
+        this.#nodes.map((node, index) =>
+          results[index]?.status === "fulfilled"
+            ? node.stopFieldRecording()
+            : Promise.resolve(null),
+        ),
+      );
+      const rollbackFailure = rejectedNodeOperation(
+        rollbackResults,
+        "roll back field recording on",
+      );
+      let convergenceFailure: unknown = null;
+      try {
+        await this.#waitForFieldRecordingStop(sharedRecordingId);
+      } catch (caught) {
+        convergenceFailure = caught;
+      }
+      throw combinedOperationFailure(primaryFailure, rollbackFailure, convergenceFailure);
+    }
+    try {
+      const nodes = await this.#waitForFieldRecordingStart(sharedRecordingId);
+      return { nodes };
+    } catch (startupFailure) {
+      const rollbackResults = await Promise.allSettled(
+        this.#nodes.map((node) => node.stopFieldRecording()),
+      );
+      const rollbackFailure = rejectedNodeOperation(
+        rollbackResults,
+        "roll back field recording on",
+      );
+      let convergenceFailure: unknown = null;
+      try {
+        await this.#waitForFieldRecordingStop(sharedRecordingId);
+      } catch (caught) {
+        convergenceFailure = caught;
+      }
+      throw combinedOperationFailure(startupFailure, rollbackFailure, convergenceFailure);
+    }
+  }
+
+  async stopFieldRecording(): Promise<DualFieldRecordingStatus> {
+    await this.#verifyControlCredentials();
+    const results = await Promise.allSettled(this.#nodes.map((node) => node.stopFieldRecording()));
+    throwRejectedNodeOperation(results, "stop field recording on");
+    const accepted = results.map((result) => fulfilled(result));
+    const sharedRecordingId = consistentFieldRecordingId(accepted);
+    return { nodes: await this.#waitForFieldRecordingStop(sharedRecordingId) };
+  }
+
+  async getFieldRecordings(): Promise<FieldRecordingList> {
+    await this.#ensureDescriptors();
+    const recordings = (
+      await Promise.all(this.#nodes.map((node) => node.fieldRecordings()))
+    ).flat();
+    return {
+      recordings: recordings.sort((left, right) =>
+        right.created_at_utc.localeCompare(left.created_at_utc),
+      ),
+    };
+  }
+
+  async #waitUntilCaptureDisarmed(): Promise<void> {
+    const deadline = Date.now() + FIELD_RECORDING_DISARM_TIMEOUT_MS;
+    for (;;) {
+      const details = await Promise.all(this.#nodes.map((node) => node.captureStatus()));
+      if (details.every((detail) => !detail.status.armed)) {
+        return;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("Both Android nodes did not disarm before field recording");
+      }
+      await delay(FIELD_RECORDING_DISARM_POLL_MS);
+    }
+  }
+
+  async #waitForFieldRecordingStart(
+    sharedRecordingId: string,
+  ): Promise<[FieldRecordingNodeStatus, FieldRecordingNodeStatus]> {
+    const deadline = Date.now() + FIELD_RECORDING_TRANSITION_TIMEOUT_MS;
+    for (;;) {
+      const statuses = await Promise.all(this.#nodes.map((node) => node.fieldRecordingStatus()));
+      for (const status of statuses) {
+        if (status.state === "error") {
+          throw new Error(
+            `${nodeRoleLabel(status.role)} field recorder failed after accepting start${
+              status.error.length === 0 ? "" : `: ${status.error}`
+            }`,
+          );
+        }
+        if (status.state !== "starting" && status.state !== "recording") {
+          throw new Error(
+            `${nodeRoleLabel(status.role)} field recorder left startup in state ${status.state}`,
+          );
+        }
+        if (status.shared_recording_id !== sharedRecordingId) {
+          throw new Error(
+            `${nodeRoleLabel(status.role)} field recorder reported a different shared recording ID`,
+          );
+        }
+      }
+      if (statuses.every((status) => status.state === "recording")) {
+        return fieldRecordingStatusPair(statuses);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("Both Android field recorders did not become ready within 10 seconds");
+      }
+      await delay(FIELD_RECORDING_TRANSITION_POLL_MS);
+    }
+  }
+
+  async #waitForFieldRecordingStop(
+    sharedRecordingId: string | null,
+  ): Promise<[FieldRecordingNodeStatus, FieldRecordingNodeStatus]> {
+    const deadline = Date.now() + FIELD_RECORDING_TRANSITION_TIMEOUT_MS;
+    for (;;) {
+      const statuses = await Promise.all(this.#nodes.map((node) => node.fieldRecordingStatus()));
+      for (const status of statuses) {
+        if (status.state === "error") {
+          throw new Error(
+            `${nodeRoleLabel(status.role)} field recorder failed while stopping or publishing${
+              status.error.length === 0 ? "" : `: ${status.error}`
+            }`,
+          );
+        }
+        if (
+          status.state !== "starting" &&
+          status.state !== "recording" &&
+          status.state !== "stopping" &&
+          status.state !== "ready" &&
+          status.state !== "idle"
+        ) {
+          throw new Error(
+            `${nodeRoleLabel(status.role)} field recorder left shutdown in state ${status.state}`,
+          );
+        }
+        if (
+          sharedRecordingId !== null &&
+          status.state !== "idle" &&
+          status.shared_recording_id !== sharedRecordingId
+        ) {
+          throw new Error(
+            `${nodeRoleLabel(status.role)} field recorder published a different shared recording ID`,
+          );
+        }
+      }
+      if (statuses.every((status) => status.state === "ready" || status.state === "idle")) {
+        return fieldRecordingStatusPair(statuses);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("Both Android field recorders did not finish publishing within 10 seconds");
+      }
+      await delay(FIELD_RECORDING_TRANSITION_POLL_MS);
+    }
   }
 
   startSyntheticSwing(): Promise<CaptureStatus> {
@@ -273,29 +553,61 @@ export class DualNodeReviewApi implements ReviewApi {
 
   async getSessions(): Promise<SessionList> {
     await this.#ensureDescriptors();
-    const pairs = await this.#sessionPairs();
+    const [pairs, captureDetails] = await Promise.all([
+      this.#sessionPairs(),
+      Promise.all(this.#nodes.map((node) => node.captureStatus())),
+    ]);
+    const publishingStates = new Map<string, CaptureState>();
+    for (const detail of captureDetails) {
+      if (
+        detail.sharedSessionId !== null &&
+        (detail.status.state === "waiting_post_roll" || detail.status.state === "encoding")
+      ) {
+        const previous = publishingStates.get(detail.sharedSessionId);
+        publishingStates.set(
+          detail.sharedSessionId,
+          previous === "encoding" || detail.status.state === "encoding"
+            ? "encoding"
+            : "waiting_post_roll",
+        );
+      }
+    }
+    // Current phones advertise whether their immutable coordination record exists alongside each
+    // compact clip summary. Only legacy nodes need eager record reads to preserve their older
+    // catalog semantics; current catalogs defer full record validation until a shot is opened.
     await Promise.all(
       [...pairs.values()]
-        .filter((pair) => pair.error === undefined)
+        .filter(
+          (pair) =>
+            pair.error === undefined &&
+            pair.downTheLine !== undefined &&
+            pair.faceOn !== undefined &&
+            (pair.downTheLine.summary.android_capture?.coordination_available === undefined ||
+              pair.faceOn.summary.android_capture?.coordination_available === undefined),
+        )
         .map((pair) => this.#ensureAlignment(pair.sharedSessionId)),
     );
-    const sessions = [...pairs.values()].map((pair) => this.#sessionSummary(pair));
-    sessions.sort((left, right) => right.created_at_utc.localeCompare(left.created_at_utc));
+    const sessions = [...pairs.values()].map((pair) =>
+      this.#sessionSummary(pair, publishingStates.get(pair.sharedSessionId)),
+    );
+    // An actively publishing session is the operator's current shot even when only the second
+    // configured role has published a manifest. Prefer it over an older ready session whose
+    // timestamp happens to compare equal; otherwise DTL-encoding and face-on-encoding select
+    // different default rows solely because node manifests are flattened in role order.
+    sessions.sort((left, right) => {
+      const preferred = (session: SessionSummary) =>
+        publishingStates.has(session.session_id) ||
+        session.session_id === this.#activeSharedSessionId;
+      const activePrecedence = Number(preferred(right)) - Number(preferred(left));
+      return activePrecedence !== 0
+        ? activePrecedence
+        : right.created_at_utc.localeCompare(left.created_at_utc);
+    });
     return { schema_version: REVIEW_SCHEMA_VERSION, sessions };
   }
 
   async getManifest(sessionId: string): Promise<ClipManifest> {
-    const pairs = await this.#sessionPairs();
-    const pair = pairs.get(sessionId);
-    if (pair === undefined) {
-      throw new Error(`Coordinated Android session ${sessionId} was not found`);
-    }
-    if (pair.error !== undefined) {
-      throw new Error(pair.error);
-    }
-    if (pair.downTheLine === undefined || pair.faceOn === undefined) {
-      throw new Error(missingRoleDiagnostic(pair));
-    }
+    const pair = await this.#completeSessionPair(sessionId);
     const alignment = await this.#ensureAlignment(sessionId);
     if (alignment === null) {
       throw new Error(
@@ -322,6 +634,12 @@ export class DualNodeReviewApi implements ReviewApi {
     }
     const shifts = triggerShiftsFromCommon(alignment);
     const nodes = await this.#nodesForPair(pair);
+    await Promise.all([
+      nodes.downTheLine.verifyControlCredential(
+        requiredAndroidNodeId(pair.downTheLine, "down-the-line"),
+      ),
+      nodes.faceOn.verifyControlCredential(requiredAndroidNodeId(pair.faceOn, "face-on")),
+    ]);
     await Promise.all([
       nodes.downTheLine.submitDiagnosticFeedback(
         pair.downTheLine.session_id,
@@ -353,9 +671,24 @@ export class DualNodeReviewApi implements ReviewApi {
   async #completeSessionPair(
     sessionId: string,
   ): Promise<SessionPair & { downTheLine: ClipManifest; faceOn: ClipManifest }> {
-    const pair = (await this.#sessionPairs()).get(sessionId);
-    if (pair === undefined) {
+    const referencePair = (await this.#sessionPairs()).get(sessionId);
+    if (referencePair === undefined) {
       throw new Error(`Coordinated Android session ${sessionId} was not found`);
+    }
+    if (referencePair.error !== undefined) {
+      throw new Error(referencePair.error);
+    }
+    if (referencePair.downTheLine === undefined || referencePair.faceOn === undefined) {
+      throw new Error(missingRoleDiagnostic(referencePair));
+    }
+    const manifests = await Promise.all([
+      this.#referenceManifest(referencePair.downTheLine),
+      this.#referenceManifest(referencePair.faceOn),
+    ]);
+    const verified = groupAndroidSessionManifests(manifests);
+    const pair = verified.get(sessionId);
+    if (verified.size !== 1 || pair === undefined) {
+      throw new Error(`Coordinated session ${sessionId} summary disagrees with its clip manifests`);
     }
     if (pair.error !== undefined) {
       throw new Error(pair.error);
@@ -391,6 +724,21 @@ export class DualNodeReviewApi implements ReviewApi {
   }
 
   async #ensureDescriptors(): Promise<readonly [NodeDescriptor, NodeDescriptor]> {
+    if (this.#descriptorRequest !== null) {
+      return this.#descriptorRequest;
+    }
+    const request = this.#loadDescriptors();
+    this.#descriptorRequest = request;
+    try {
+      return await request;
+    } finally {
+      if (this.#descriptorRequest === request) {
+        this.#descriptorRequest = null;
+      }
+    }
+  }
+
+  async #loadDescriptors(): Promise<readonly [NodeDescriptor, NodeDescriptor]> {
     const described = await Promise.all(
       this.#nodes.map(async (node) => ({ node, descriptor: await node.descriptor() })),
     );
@@ -409,6 +757,15 @@ export class DualNodeReviewApi implements ReviewApi {
     faceOn.node.setCanonicalRole("face_on");
     this.#nodes = [downTheLine.node, faceOn.node];
     return [downTheLine.descriptor, faceOn.descriptor];
+  }
+
+  async #verifyControlCredentials(): Promise<readonly [NodeDescriptor, NodeDescriptor]> {
+    const descriptors = await this.#ensureDescriptors();
+    await Promise.all([
+      this.#nodes[0].verifyControlCredential(descriptors[0].nodeId),
+      this.#nodes[1].verifyControlCredential(descriptors[1].nodeId),
+    ]);
+    return descriptors;
   }
 
   async #coordinateTriggers(sessionId: string): Promise<void> {
@@ -437,9 +794,9 @@ export class DualNodeReviewApi implements ReviewApi {
     }
   }
 
-  async #sessionPairs(): Promise<Map<string, SessionPair>> {
+  async #sessionPairs(): Promise<Map<string, SessionReferencePair>> {
     const lists = await Promise.all(this.#nodes.map((node) => node.sessions()));
-    const manifests = await Promise.all(
+    const references = await Promise.all(
       lists.flatMap((list, nodeIndex) => {
         const node = this.#nodes[nodeIndex];
         if (node === undefined) {
@@ -449,10 +806,46 @@ export class DualNodeReviewApi implements ReviewApi {
           .filter(
             (session) => session.state === "ready" && session.session_kind !== "standby_diagnostic",
           )
-          .map((session) => this.#manifest(node, session.session_id));
+          .map(async (summary): Promise<LocalSessionReference | null> => {
+            if (summary.android_capture !== undefined) {
+              return summary.android_capture.shared_session_id === null ? null : { node, summary };
+            }
+            // Backward compatibility for nodes that predate compact Android pairing summaries.
+            const manifest = await this.#manifest(node, summary.session_id);
+            const androidCapture = manifest.android_capture;
+            const track = manifest.views[0];
+            if (
+              androidCapture?.shared_session_id === null ||
+              androidCapture?.shared_session_id === undefined ||
+              manifest.views.length !== 1 ||
+              track === undefined
+            ) {
+              return null;
+            }
+            return {
+              node,
+              summary: {
+                ...summary,
+                android_capture: {
+                  node_id: androidCapture.node_id,
+                  shared_session_id: androidCapture.shared_session_id,
+                  role: track.role,
+                },
+              },
+              manifest,
+            };
+          });
       }),
     );
-    return groupAndroidSessionManifests(manifests);
+    return groupAndroidSessionReferences(
+      references.filter((reference): reference is LocalSessionReference => reference !== null),
+    );
+  }
+
+  #referenceManifest(reference: LocalSessionReference): Promise<ClipManifest> {
+    return reference.manifest === undefined
+      ? this.#manifest(reference.node, reference.summary.session_id)
+      : Promise.resolve(reference.manifest);
   }
 
   #manifest(node: AndroidNodeClient, sessionId: string): Promise<ClipManifest> {
@@ -465,13 +858,13 @@ export class DualNodeReviewApi implements ReviewApi {
     return manifest;
   }
 
-  #sessionSummary(pair: SessionPair): SessionSummary {
-    const manifests = [pair.downTheLine, pair.faceOn].filter(
-      (manifest): manifest is ClipManifest => manifest !== undefined,
+  #sessionSummary(pair: SessionReferencePair, publishingState?: CaptureState): SessionSummary {
+    const summaries = [pair.downTheLine, pair.faceOn].filter(
+      (reference): reference is LocalSessionReference => reference !== undefined,
     );
     const createdAt =
-      manifests
-        .map((manifest) => manifest.created_at_utc)
+      summaries
+        .map((reference) => reference.summary.created_at_utc)
         .sort()
         .at(-1) ?? new Date(0).toISOString();
     if (pair.error !== undefined) {
@@ -483,6 +876,14 @@ export class DualNodeReviewApi implements ReviewApi {
       };
     }
     if (pair.downTheLine === undefined || pair.faceOn === undefined) {
+      if (publishingState === "waiting_post_roll" || publishingState === "encoding") {
+        return {
+          session_id: pair.sharedSessionId,
+          state: publishingState,
+          created_at_utc: createdAt,
+          error: "",
+        };
+      }
       return {
         session_id: pair.sharedSessionId,
         state: "error",
@@ -490,7 +891,14 @@ export class DualNodeReviewApi implements ReviewApi {
         error: missingRoleDiagnostic(pair),
       };
     }
-    if (this.#alignment(pair.sharedSessionId) === null) {
+    const summarizedCoordination = [
+      pair.downTheLine.summary.android_capture?.coordination_available,
+      pair.faceOn.summary.android_capture?.coordination_available,
+    ];
+    if (
+      summarizedCoordination.includes(false) ||
+      (summarizedCoordination.includes(undefined) && this.#alignment(pair.sharedSessionId) === null)
+    ) {
       return {
         session_id: pair.sharedSessionId,
         state: "error",
@@ -592,18 +1000,52 @@ export function groupAndroidSessionManifests(
   return pairs;
 }
 
+function groupAndroidSessionReferences(
+  references: readonly LocalSessionReference[],
+): Map<string, SessionReferencePair> {
+  const pairs = new Map<string, SessionReferencePair>();
+  for (const reference of references) {
+    const android = reference.summary.android_capture;
+    if (android?.shared_session_id === null || android?.shared_session_id === undefined) {
+      continue;
+    }
+    const pair = pairs.get(android.shared_session_id) ?? {
+      sharedSessionId: android.shared_session_id,
+    };
+    if (android.role === "down_the_line") {
+      if (pair.downTheLine === undefined) {
+        pair.downTheLine = reference;
+      } else {
+        pair.error = `Coordinated session ${pair.sharedSessionId} has duplicate DTL clips`;
+      }
+    } else if (pair.faceOn === undefined) {
+      pair.faceOn = reference;
+    } else {
+      pair.error = `Coordinated session ${pair.sharedSessionId} has duplicate face-on clips`;
+    }
+    pairs.set(pair.sharedSessionId, pair);
+  }
+  return pairs;
+}
+
 class AndroidNodeClient {
   readonly baseUrl: string;
   #canonicalRole: ReviewRole;
-  readonly #controlToken: string;
+  readonly #controlCredential: ControlCredential;
   readonly #fetcher: Fetcher;
   readonly #now: MonotonicNow;
   readonly #reviewApi: HttpReviewApi;
+  readonly #manifestRequests = new BoundedRequestGate(
+    MAXIMUM_CONCURRENT_MANIFEST_REQUESTS_PER_NODE,
+  );
+  readonly #liveStatusCursor = new LiveStatusCursor();
+  #liveStatusAvailable = true;
+  #captureStatusRequest: Promise<DetailedCaptureStatus> | null = null;
 
   constructor(endpoint: DualNodeEndpoint, fetcher: Fetcher, now: MonotonicNow) {
     this.baseUrl = endpoint.baseUrl.replace(/\/$/, "");
     this.#canonicalRole = endpoint.role;
-    this.#controlToken = endpoint.controlToken;
+    this.#controlCredential = endpoint.controlToken;
     this.#fetcher = fetcher;
     this.#now = now;
     this.#reviewApi = new HttpReviewApi(this.baseUrl, fetcher, undefined, endpoint.controlToken);
@@ -626,12 +1068,71 @@ class AndroidNodeClient {
   }
 
   async captureStatus(): Promise<DetailedCaptureStatus> {
+    if (this.#captureStatusRequest !== null) {
+      return this.#captureStatusRequest;
+    }
+    const request = this.#loadCaptureStatus();
+    this.#captureStatusRequest = request;
+    try {
+      return await request;
+    } finally {
+      if (this.#captureStatusRequest === request) {
+        this.#captureStatusRequest = null;
+      }
+    }
+  }
+
+  async #loadCaptureStatus(): Promise<DetailedCaptureStatus> {
     const value = await this.#request("/api/v1/capture/status");
     const object = asObject(value, "Android capture status");
+    if (!this.#liveStatusAvailable) {
+      throw new Error(
+        `${nodeRoleLabel(this.#canonicalRole)} Android live status is disconnected or stale`,
+      );
+    }
     return {
       status: parseCaptureStatus(value),
       sharedSessionId: asNullableString(object.shared_session_id, "shared_session_id"),
     };
+  }
+
+  async verifyControlCredential(expectedNodeId: string): Promise<void> {
+    const identity = asObject(
+      await this.#request("/api/v1/pairing/identity", { headers: this.#controlHeaders(false) }),
+      "Android authenticated identity",
+    );
+    if (identity.schema_version !== 1) {
+      throw new Error(`Unsupported Android identity schema: ${String(identity.schema_version)}`);
+    }
+    if (asNonemptyString(identity.node_id, "identity node_id") !== expectedNodeId) {
+      throw new Error("Authenticated Android identity belongs to another node");
+    }
+  }
+
+  subscribeToStatus(onChange: () => void, options: StatusSubscriptionOptions): () => void {
+    return subscribeToReconnectableStatus(
+      async () => {
+        try {
+          const object = asObject(
+            await this.#request("/api/v1/capture/status", {
+              headers: this.#controlHeaders(false),
+            }),
+            "Android capture status",
+          );
+          const version = parseLiveStatusVersion(object.live_status);
+          if (!this.#liveStatusCursor.accept(version)) {
+            throw new Error("Android node returned stale live status data");
+          }
+          this.#liveStatusAvailable = true;
+          return version;
+        } catch (caught) {
+          this.#liveStatusAvailable = false;
+          throw caught;
+        }
+      },
+      onChange,
+      options,
+    );
   }
 
   async setArmed(armed: boolean, sharedSessionId: string | null): Promise<CaptureStatus> {
@@ -664,24 +1165,71 @@ class AndroidNodeClient {
     };
   }
 
-  saveMissedShot(): Promise<SessionSummary> {
-    return this.#reviewApi.saveMissedShot();
+  async saveMissedShot(): Promise<SessionSummary> {
+    return parseSessionSummary(
+      await this.#request("/api/v1/capture/missed-shot", {
+        method: "POST",
+        headers: this.#controlHeaders(),
+        body: "{}",
+      }),
+    );
   }
 
-  submitDiagnosticFeedback(sessionId: string, feedback: DiagnosticFeedback): Promise<void> {
-    return this.#reviewApi.submitDiagnosticFeedback(sessionId, feedback);
+  async submitDiagnosticFeedback(sessionId: string, feedback: DiagnosticFeedback): Promise<void> {
+    await this.#reviewOperation(() =>
+      this.#reviewApi.submitDiagnosticFeedback(sessionId, feedback),
+    );
   }
 
   getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]> {
-    return this.#reviewApi.getDiagnosticArchives(sessionId);
+    return this.#reviewOperation(() => this.#reviewApi.getDiagnosticArchives(sessionId));
   }
 
   sessions(): Promise<SessionList> {
-    return this.#reviewApi.getSessions();
+    return this.#reviewOperation(() => this.#reviewApi.getSessions());
   }
 
   manifest(sessionId: string): Promise<ClipManifest> {
-    return this.#reviewApi.getManifest(sessionId);
+    return this.#manifestRequests.run(() =>
+      this.#reviewOperation(() => this.#reviewApi.getManifest(sessionId)),
+    );
+  }
+
+  async fieldRecordingStatus(): Promise<FieldRecordingNodeStatus> {
+    return this.#parseFieldRecordingStatus(await this.#request("/api/v1/field-recording/status"));
+  }
+
+  async startFieldRecording(sharedRecordingId: string): Promise<FieldRecordingNodeStatus> {
+    return this.#parseFieldRecordingStatus(
+      await this.#request("/api/v1/field-recording/start", {
+        method: "POST",
+        headers: this.#controlHeaders(),
+        body: JSON.stringify({ schema_version: 1, shared_recording_id: sharedRecordingId }),
+      }),
+    );
+  }
+
+  async stopFieldRecording(): Promise<FieldRecordingNodeStatus> {
+    return this.#parseFieldRecordingStatus(
+      await this.#request("/api/v1/field-recording/stop", {
+        method: "POST",
+        headers: this.#controlHeaders(),
+        body: "{}",
+      }),
+    );
+  }
+
+  async fieldRecordings(): Promise<FieldRecording[]> {
+    const object = asObject(
+      await this.#request("/api/v1/field-recordings", {
+        headers: this.#controlHeaders(false),
+      }),
+      "field recordings",
+    );
+    if (object.schema_version !== 1 || !Array.isArray(object.recordings)) {
+      throw new Error("Unsupported field recordings response");
+    }
+    return object.recordings.map((recording) => this.#parseFieldRecording(recording));
   }
 
   async triggerReport(): Promise<NodeTriggerReport | null> {
@@ -783,17 +1331,113 @@ class AndroidNodeClient {
   }
 
   async #request(path: string, init: RequestInit = {}): Promise<unknown> {
-    const response = await this.#fetcher(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: new Headers(init.headers ?? { Accept: "application/json" }),
-    });
+    let response: Response;
+    try {
+      const headers = new Headers(init.headers ?? { Accept: "application/json" });
+      // Every request stays on the endpoint's already-validated origin. Attach the existing
+      // per-node credential by default so newly added read routes cannot accidentally depend on
+      // anonymous metadata access. Explicit callers may add content headers, but cannot replace
+      // this destination-bound authorization value.
+      headers.set("Authorization", `Bearer ${controlCredentialValue(this.#controlCredential)}`);
+      response = await this.#fetcher(`${this.baseUrl}${path}`, {
+        ...init,
+        headers,
+      });
+    } catch (caught) {
+      throw new NodeRequestError(
+        0,
+        `${nodeRoleLabel(this.#canonicalRole)} Android node is unreachable: ${errorMessage(caught)}`,
+      );
+    }
     if (!response.ok) {
+      const detail = await nodeErrorDetail(response);
       throw new NodeRequestError(
         response.status,
-        `${this.#canonicalRole} node request failed: ${response.status}`,
+        `${nodeRoleLabel(this.#canonicalRole)} Android node request failed (HTTP ${response.status})${detail === null ? "" : `: ${detail}`}${this.#credentialCorrection(response.status)}`,
       );
     }
     return response.json();
+  }
+
+  async #reviewOperation<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (caught) {
+      const message = errorMessage(caught);
+      const detail = message.startsWith("Review request failed")
+        ? message
+            .slice("Review ".length)
+            .replace(/^request failed \(([0-9]+)\)/, "request failed (HTTP $1)")
+        : `review request failed: ${message}`;
+      throw new Error(
+        `${nodeRoleLabel(this.#canonicalRole)} Android node ${detail}${this.#credentialCorrection(message.includes("(401) ") || message.includes("(401):") ? 401 : 0)}`,
+      );
+    }
+  }
+
+  #credentialCorrection(status: number): string {
+    return status === 401
+      ? ` Re-enter the ${nodeRoleLabel(this.#canonicalRole).toLowerCase()} control credential for this station.`
+      : "";
+  }
+
+  #parseFieldRecordingStatus(value: unknown): FieldRecordingNodeStatus {
+    const object = asObject(value, "field recording status");
+    if (object.schema_version !== 1) {
+      throw new Error(`Unsupported field recording schema: ${String(object.schema_version)}`);
+    }
+    const state = asString(object.state, "field recording state");
+    if (!(FIELD_RECORDING_STATES as readonly string[]).includes(state)) {
+      throw new Error(`Unsupported field recording state: ${state}`);
+    }
+    return {
+      schema_version: 1,
+      role: this.#canonicalRole,
+      origin: this.baseUrl,
+      state: state as FieldRecordingNodeStatus["state"],
+      active_recording_id: asNullableString(object.active_recording_id, "active_recording_id"),
+      shared_recording_id: asNullableString(object.shared_recording_id, "shared_recording_id"),
+      started_at_utc: asNullableTimestamp(object.started_at_utc, "started_at_utc"),
+      started_elapsed_realtime_ns: asNullableDecimalString(
+        object.started_elapsed_realtime_ns,
+        "started_elapsed_realtime_ns",
+      ),
+      elapsed_ms: asNonnegativeNumber(object.elapsed_ms, "elapsed_ms"),
+      video_bytes: asDecimalString(object.video_bytes, "video_bytes"),
+      audio_frames: asDecimalString(object.audio_frames, "audio_frames"),
+      max_duration_seconds: asPositiveInteger(object.max_duration_seconds, "max_duration_seconds"),
+      error: asString(object.error, "field recording error"),
+    };
+  }
+
+  #parseFieldRecording(value: unknown): FieldRecording {
+    const object = asObject(value, "field recording");
+    const role = asRole(object.role, "field recording role");
+    if (role !== this.#canonicalRole) {
+      throw new Error(`Configured ${this.#canonicalRole} node returned a ${role} field recording`);
+    }
+    return {
+      recording_id: asNonemptyString(object.recording_id, "recording_id"),
+      shared_recording_id: asNonemptyString(object.shared_recording_id, "shared_recording_id"),
+      created_at_utc: asTimestamp(object.created_at_utc, "created_at_utc"),
+      role,
+      origin: this.baseUrl,
+      duration_us: asDecimalString(object.duration_us, "duration_us"),
+      video_bytes: asDecimalString(object.video_bytes, "video_bytes"),
+      audio_frames: asDecimalString(object.audio_frames, "audio_frames"),
+      video_url: this.#absoluteUrl(object.video_url, "video_url"),
+      audio_url: this.#absoluteUrl(object.audio_url, "audio_url"),
+      manifest_url: this.#absoluteUrl(object.manifest_url, "manifest_url"),
+    };
+  }
+
+  #absoluteUrl(value: unknown, label: string): string {
+    const path = asNonemptyString(value, label);
+    const url = new URL(path, `${this.baseUrl}/`);
+    if (url.origin !== new URL(this.baseUrl).origin) {
+      throw new Error(`${label} must remain on its Android node origin`);
+    }
+    return url.toString();
   }
 
   #controlHeaders(withJsonBody = true): Headers {
@@ -801,8 +1445,45 @@ class AndroidNodeClient {
     if (withJsonBody) {
       headers.set("Content-Type", "application/json");
     }
-    headers.set("Authorization", `Bearer ${this.#controlToken}`);
+    headers.set("Authorization", `Bearer ${controlCredentialValue(this.#controlCredential)}`);
     return headers;
+  }
+}
+
+class BoundedRequestGate {
+  #active = 0;
+  readonly #waiting: Array<() => void> = [];
+
+  constructor(readonly maximumActive: number) {
+    if (!Number.isSafeInteger(maximumActive) || maximumActive <= 0) {
+      throw new Error("A request gate requires a positive safe-integer capacity");
+    }
+  }
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    await this.#acquire();
+    try {
+      return await operation();
+    } finally {
+      this.#release();
+    }
+  }
+
+  #acquire(): Promise<void> {
+    if (this.#active < this.maximumActive) {
+      ++this.#active;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => this.#waiting.push(resolve));
+  }
+
+  #release(): void {
+    const next = this.#waiting.shift();
+    if (next !== undefined) {
+      next();
+      return;
+    }
+    --this.#active;
   }
 }
 
@@ -813,6 +1494,23 @@ class NodeRequestError extends Error {
   ) {
     super(message);
   }
+}
+
+async function nodeErrorDetail(response: Response): Promise<string | null> {
+  try {
+    const value: unknown = await response.clone().json();
+    if (typeof value !== "object" || value === null || !("error" in value)) {
+      return null;
+    }
+    const error = value.error;
+    return typeof error === "string" && error.length > 0 ? error : null;
+  } catch {
+    return null;
+  }
+}
+
+function nodeRoleLabel(role: ReviewRole): string {
+  return role === "down_the_line" ? "Down-the-line" : "Face-on";
 }
 
 export function estimateClockOffset(
@@ -956,15 +1654,16 @@ export function composeDualManifest(
   ) {
     throw new Error("Dual manifest local session IDs disagree with the trigger association");
   }
-  if (downTheLine.trigger.source !== faceOn.trigger.source) {
-    throw new Error("Dual manifest trigger sources disagree");
-  }
   if (
     downTheLine.trigger.source !== alignment.down_the_line.source ||
     faceOn.trigger.source !== alignment.face_on.source
   ) {
     throw new Error("Dual manifest trigger sources disagree with the trigger association");
   }
+  const coordinatedSource = coordinatedTriggerSource(
+    downTheLine.trigger.source,
+    faceOn.trigger.source,
+  );
   const shifts = triggerShiftsFromCommon(alignment);
   const shiftedDown = shiftTrack(downTrack, shifts.downTheLine);
   const shiftedFace = shiftTrack(faceTrack, shifts.faceOn);
@@ -981,7 +1680,7 @@ export function composeDualManifest(
         ? downTheLine.created_at_utc
         : faceOn.created_at_utc,
     trigger: {
-      source: downTheLine.trigger.source === "missed_shot" ? "missed_shot" : "dual_local_audio",
+      source: coordinatedSource,
       host_monotonic_time_ns: shifts.commonTrigger.toString(),
       confirmation_host_monotonic_time_ns: null,
       sample_rate_hz: 48_000,
@@ -995,6 +1694,22 @@ export function composeDualManifest(
     views: [shiftedDown, shiftedFace],
     dual_node_alignment: alignment,
   };
+}
+
+function coordinatedTriggerSource(downTheLine: string, faceOn: string): string {
+  const audioSources = new Set([
+    "local_audio",
+    "peer_audio_arrival",
+    "peer_audio_local_candidate",
+    "peer_audio_clock_candidate",
+  ]);
+  if (audioSources.has(downTheLine) && audioSources.has(faceOn)) {
+    return "dual_local_audio";
+  }
+  if (downTheLine === faceOn) {
+    return downTheLine;
+  }
+  throw new Error("Dual manifest trigger sources disagree");
 }
 
 export function localizeDiagnosticFeedback(
@@ -1127,6 +1842,27 @@ function combineCaptureStatuses(
   };
 }
 
+function consistentSharedSessionId(
+  details: readonly DetailedCaptureStatus[],
+  allowOneMissingDuringPublication = false,
+): string | null {
+  if (details.length !== 2) {
+    throw new Error("Dual-node capture requires exactly two status responses");
+  }
+  const first = details[0]?.sharedSessionId;
+  const second = details[1]?.sharedSessionId;
+  if (first === undefined || second === undefined) {
+    throw new Error("Dual-node capture status is incomplete");
+  }
+  if (
+    first !== second &&
+    (!allowOneMissingDuringPublication || (first !== null && second !== null))
+  ) {
+    throw new Error("Android nodes report different active shared session IDs");
+  }
+  return first ?? second;
+}
+
 function combinedPoseCaptureStatus(
   statuses: readonly PoseCaptureStatus[],
 ): PoseCaptureStatus | undefined {
@@ -1182,7 +1918,11 @@ function combinedState(states: readonly CaptureState[]): CaptureState {
   return precedence.find((candidate) => states.includes(candidate)) ?? "error";
 }
 
-function missingRoleDiagnostic(pair: SessionPair): string {
+function missingRoleDiagnostic(pair: {
+  sharedSessionId: string;
+  downTheLine?: unknown;
+  faceOn?: unknown;
+}): string {
   if (pair.downTheLine === undefined && pair.faceOn === undefined) {
     return `Coordinated session ${pair.sharedSessionId} has no published clips`;
   }
@@ -1191,18 +1931,74 @@ function missingRoleDiagnostic(pair: SessionPair): string {
     : `Coordinated session ${pair.sharedSessionId} is missing the face-on clip`;
 }
 
+function requiredAndroidNodeId(manifest: ClipManifest, roleLabel: string): string {
+  const nodeId = manifest.android_capture?.node_id;
+  if (nodeId === undefined) {
+    throw new Error(`Dual Android ${roleLabel} diagnostics require a retained node ID`);
+  }
+  return nodeId;
+}
+
 function throwRejectedNodeOperation<T>(
   results: readonly PromiseSettledResult<T>[],
   operation: string,
 ): void {
+  const failure = rejectedNodeOperation(results, operation);
+  if (failure !== null) {
+    throw failure;
+  }
+}
+
+function rejectedNodeOperation<T>(
+  results: readonly PromiseSettledResult<T>[],
+  operation: string,
+): Error | null {
   const failures = results.filter(
     (result): result is PromiseRejectedResult => result.status === "rejected",
   );
-  if (failures.length > 0) {
-    throw new Error(
-      `Unable to ${operation} both Android nodes: ${failures.map((failure) => errorMessage(failure.reason)).join("; ")}`,
-    );
+  if (failures.length === 0) {
+    return null;
   }
+  return new Error(
+    `Unable to ${operation} both Android nodes: ${failures.map((failure) => errorMessage(failure.reason)).join("; ")}`,
+  );
+}
+
+function combinedOperationFailure(
+  primary: unknown,
+  rollback: Error | null,
+  convergence: unknown | null,
+): Error {
+  const diagnostics = [
+    errorMessage(primary),
+    ...(rollback === null ? [] : [`rollback request failed: ${rollback.message}`]),
+    ...(convergence === null ? [] : [`rollback did not converge: ${errorMessage(convergence)}`]),
+  ];
+  return new Error(diagnostics.join("; "));
+}
+
+function fieldRecordingStatusPair(
+  statuses: readonly FieldRecordingNodeStatus[],
+): [FieldRecordingNodeStatus, FieldRecordingNodeStatus] {
+  const first = statuses[0];
+  const second = statuses[1];
+  if (statuses.length !== 2 || first === undefined || second === undefined) {
+    throw new Error("Dual-node field recording requires exactly two status responses");
+  }
+  return [first, second];
+}
+
+function consistentFieldRecordingId(statuses: readonly FieldRecordingNodeStatus[]): string | null {
+  fieldRecordingStatusPair(statuses);
+  const identifiers = new Set(
+    statuses.flatMap((status) =>
+      status.shared_recording_id === null ? [] : [status.shared_recording_id],
+    ),
+  );
+  if (identifiers.size > 1) {
+    throw new Error("Android nodes report different active field-recording IDs");
+  }
+  return identifiers.values().next().value ?? null;
 }
 
 function fulfilled<T>(result: PromiseSettledResult<T>): T {
@@ -1339,6 +2135,19 @@ function newSharedSessionId(): string {
   return `dual-${Date.now()}-${[...random].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function newFieldRecordingId(): string {
+  const random = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(random);
+  random[6] = ((random[6] ?? 0) & 0x0f) | 0x40;
+  random[8] = ((random[8] ?? 0) & 0x3f) | 0x80;
+  const hex = [...random].map((value) => value.toString(16).padStart(2, "0")).join("");
+  return `field-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function browserStorage(): AlignmentStorage | null {
   try {
     return globalThis.localStorage;
@@ -1379,6 +2188,10 @@ function asNonemptyString(value: unknown, label: string): string {
 
 function asNullableString(value: unknown, label: string): string | null {
   return value === null || value === undefined ? null : asNonemptyString(value, label);
+}
+
+function asNullableTimestamp(value: unknown, label: string): string | null {
+  return value === null ? null : asTimestamp(value, label);
 }
 
 function asRole(value: unknown, label: string): ReviewRole {
@@ -1425,6 +2238,17 @@ function asDecimalString(value: unknown, label: string): string {
     throw new Error(`${label} must be a nonnegative decimal string`);
   }
   return result;
+}
+
+function asNullableDecimalString(value: unknown, label: string): string | null {
+  return value === null ? null : asDecimalString(value, label);
+}
+
+function asNonnegativeNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a nonnegative number`);
+  }
+  return value;
 }
 
 function asSignedDecimalString(value: unknown, label: string): string {

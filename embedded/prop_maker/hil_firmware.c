@@ -4,6 +4,7 @@
 
 #include "embedded/prop_maker/board.h"
 #include "embedded/prop_maker/hil_protocol.h"
+#include "embedded/prop_maker/pcm_clip.h"
 #include "embedded/prop_maker/swing_sequence.h"
 
 // Pico SDK inline helpers use parameters only in assertions, which disappear
@@ -31,8 +32,7 @@
 #define AUDIO_SAMPLE_RATE_HZ 32000U
 #define AUDIO_WARMUP_SAMPLES 320U
 #define AUDIO_POWER_UP_LEAD_US 15000U
-#define AUDIO_MAX_SAMPLES \
-  ((SWING_HIL_TONE_MAX_DURATION_US * (uint64_t)AUDIO_SAMPLE_RATE_HZ) / 1000000ULL)
+#define AUDIO_MAX_SAMPLES SWING_HIL_PCM_MAX_SAMPLES
 
 typedef struct audio_output {
   PIO pio;
@@ -80,6 +80,12 @@ static uint32_t *tone_sample_storage(void) {
   return samples;
 }
 
+static void audio_set_sample_rate(audio_output *output, uint32_t sample_rate_hz) {
+  const uint32_t divider_fixed8 = clock_get_hz(clk_sys) * 4U / sample_rate_hz;
+  pio_sm_set_clkdiv_int_frac(output->pio, output->state_machine, divider_fixed8 >> 8U,
+                             (uint8_t)(divider_fixed8 & 0xffU));
+}
+
 static void initialize_output_pin_low(uint pin) {
   gpio_init(pin);
   gpio_set_dir(pin, (bool)GPIO_OUT);
@@ -102,9 +108,7 @@ static void initialize_audio(audio_output *output) {
   swing_audio_i2s_program_init(output->pio, output->state_machine, output->program_offset,
                                PROP_MAKER_I2S_DATA_PIN, PROP_MAKER_I2S_BIT_CLOCK_PIN);
 
-  const uint32_t divider_fixed8 = clock_get_hz(clk_sys) * 4U / AUDIO_SAMPLE_RATE_HZ;
-  pio_sm_set_clkdiv_int_frac(output->pio, output->state_machine, divider_fixed8 >> 8U,
-                             (uint8_t)(divider_fixed8 & 0xffU));
+  audio_set_sample_rate(output, AUDIO_SAMPLE_RATE_HZ);
 
   output->dma_channel = dma_claim_unused_channel(true);
   output->dma_config = dma_channel_get_default_config((uint)output->dma_channel);
@@ -166,7 +170,8 @@ static void initialize_fixture_neopixel_once(fixture_neopixel_output *output, bo
   *initialized = true;
 }
 
-static void audio_start(audio_output *output) {
+static void audio_start(audio_output *output, uint32_t sample_rate_hz) {
+  audio_set_sample_rate(output, sample_rate_hz);
   gpio_set_function(PROP_MAKER_I2S_DATA_PIN, GPIO_FUNC_PIO0);
   gpio_set_function(PROP_MAKER_I2S_BIT_CLOCK_PIN, GPIO_FUNC_PIO0);
   gpio_set_function(PROP_MAKER_I2S_WORD_SELECT_PIN, GPIO_FUNC_PIO0);
@@ -223,7 +228,7 @@ static void synthetic_fixture_reset_while_unpowered(audio_output *audio,
 
 static uint64_t synthetic_fixture_power_on(audio_output *audio,
                                            fixture_neopixel_output *fixture_pixel) {
-  audio_start(audio);
+  audio_start(audio, AUDIO_SAMPLE_RATE_HZ);
   audio_transfer(audio, silent_samples, AUDIO_WARMUP_SAMPLES);
   gpio_put(PROP_MAKER_EXTERNAL_POWER_PIN, true);
   const uint64_t power_on_us = time_us_64();
@@ -287,11 +292,14 @@ static void respond_runtime_error(uint32_t request_id, const char *code) {
 static void respond_query(uint32_t request_id) {
   printf(SWING_HIL_PROTOCOL_PREFIX
          " %lu OK QUERY firmware=" SWING_HIL_FIRMWARE_VERSION
-         " protocol=1 capabilities=query,led,tone,calibrate,swing lead_max_us=%u"
+         " protocol=1 capabilities=query,led,tone,pcm,calibrate,swing lead_max_us=%u"
          " led_duration_min_us=%u led_duration_max_us=%u"
          " tone_lead_min_us=%u tone_duration_min_us=%u tone_duration_max_us=%u"
          " tone_frequency_min_hz=%u tone_frequency_max_hz=%u"
          " tone_level_min_permille=%u tone_level_max_permille=%u"
+         " pcm_sample_rate_hz=%u pcm_max_samples=%u pcm_max_chunk_bytes=%u"
+         " pcm_lead_min_us=%u pcm_gain_min_permille=%u pcm_gain_max_permille=%u"
+         " pcm_white_us=%u"
          " swing_start_lead_us=%u swing_step_us=%u swing_pre_steps=%u swing_white_us=%u"
          " swing_post_steps=%u swing_tone_duration_us=%u swing_tone_frequency_hz=%u"
          " swing_tone_level_permille=%u swing_lateness_max_us=%u"
@@ -306,14 +314,17 @@ static void respond_query(uint32_t request_id) {
          SWING_HIL_LED_MAX_DURATION_US, SWING_HIL_TONE_MIN_LEAD_US, SWING_HIL_TONE_MIN_DURATION_US,
          SWING_HIL_TONE_MAX_DURATION_US, SWING_HIL_TONE_MIN_FREQUENCY_HZ,
          SWING_HIL_TONE_MAX_FREQUENCY_HZ, SWING_HIL_TONE_MIN_LEVEL_PERMILLE,
-         SWING_HIL_TONE_MAX_LEVEL_PERMILLE, SWING_HIL_SWING_START_LEAD_US, SWING_HIL_SWING_STEP_US,
-         SWING_HIL_SWING_PRE_STEPS, SWING_HIL_SWING_IMPACT_WHITE_US, SWING_HIL_SWING_POST_STEPS,
-         SWING_HIL_SWING_TONE_DURATION_US, SWING_HIL_SWING_TONE_FREQUENCY_HZ,
-         SWING_HIL_SWING_TONE_LEVEL_PERMILLE, SWING_HIL_SWING_MAX_LATENESS_US,
-         SWING_HIL_SWING_MAX_IMPACT_COMMAND_DELTA_US, SWING_HIL_SWING_COLOR_REFERENCE_BRIGHTNESS,
-         SWING_HIL_CALIBRATION_STEP_US, SWING_HIL_CALIBRATION_CANDIDATE_COUNT,
-         PROP_MAKER_EXTERNAL_NEOPIXEL_PIN, PROP_MAKER_EXTERNAL_POWER_PIN,
-         printable_time(SWING_HIL_PREPARE_TIMEOUT_US), printable_time(time_us_64()));
+         SWING_HIL_TONE_MAX_LEVEL_PERMILLE, SWING_HIL_PCM_SAMPLE_RATE_HZ, SWING_HIL_PCM_MAX_SAMPLES,
+         SWING_HIL_PCM_MAX_CHUNK_BYTES, SWING_HIL_PCM_MIN_LEAD_US, SWING_HIL_PCM_MIN_GAIN_PERMILLE,
+         SWING_HIL_PCM_MAX_GAIN_PERMILLE, SWING_HIL_PCM_WHITE_US, SWING_HIL_SWING_START_LEAD_US,
+         SWING_HIL_SWING_STEP_US, SWING_HIL_SWING_PRE_STEPS, SWING_HIL_SWING_IMPACT_WHITE_US,
+         SWING_HIL_SWING_POST_STEPS, SWING_HIL_SWING_TONE_DURATION_US,
+         SWING_HIL_SWING_TONE_FREQUENCY_HZ, SWING_HIL_SWING_TONE_LEVEL_PERMILLE,
+         SWING_HIL_SWING_MAX_LATENESS_US, SWING_HIL_SWING_MAX_IMPACT_COMMAND_DELTA_US,
+         SWING_HIL_SWING_COLOR_REFERENCE_BRIGHTNESS, SWING_HIL_CALIBRATION_STEP_US,
+         SWING_HIL_CALIBRATION_CANDIDATE_COUNT, PROP_MAKER_EXTERNAL_NEOPIXEL_PIN,
+         PROP_MAKER_EXTERNAL_POWER_PIN, printable_time(SWING_HIL_PREPARE_TIMEOUT_US),
+         printable_time(time_us_64()));
   stdio_flush();
 }
 
@@ -361,7 +372,7 @@ static void run_tone(audio_output *output, const swing_hil_command *command) {
   stdio_flush();
 
   sleep_until(from_us_since_boot(scheduled_us - AUDIO_POWER_UP_LEAD_US));
-  audio_start(output);
+  audio_start(output, AUDIO_SAMPLE_RATE_HZ);
   audio_transfer(output, silent_samples, AUDIO_WARMUP_SAMPLES);
   gpio_put(PROP_MAKER_EXTERNAL_POWER_PIN, true);
   audio_wait_until_drained(output);
@@ -383,6 +394,170 @@ static void run_tone(audio_output *output, const swing_hil_command *command) {
          (unsigned long)command->request_id, printable_time(start_us), printable_time(end_us),
          printable_time(end_us - start_us), (unsigned long)command->parameters.tone.duration_us,
          AUDIO_SAMPLE_RATE_HZ, (unsigned long)sample_count);
+  stdio_flush();
+}
+
+static void run_pcm_begin(swing_hil_pcm_clip *clip, const swing_hil_command *command) {
+  const swing_hil_pcm_result result =
+      swing_hil_pcm_begin(clip, command->request_id, command->parameters.pcm_begin.sample_count,
+                          command->parameters.pcm_begin.crc32);
+  if (result != SWING_HIL_PCM_OK) {
+    respond_runtime_error(command->request_id, swing_hil_pcm_result_code(result));
+    return;
+  }
+  printf(SWING_HIL_PROTOCOL_PREFIX
+         " %lu ACK PCM_BEGIN sample_rate_hz=%u sample_count=%lu byte_count=%lu"
+         " crc32=%lu max_chunk_bytes=%u\n",
+         (unsigned long)command->request_id, SWING_HIL_PCM_SAMPLE_RATE_HZ,
+         (unsigned long)clip->expected_sample_count,
+         (unsigned long)clip->expected_sample_count * 2UL, (unsigned long)clip->expected_crc32,
+         SWING_HIL_PCM_MAX_CHUNK_BYTES);
+  stdio_flush();
+}
+
+static void run_pcm_chunk(swing_hil_pcm_clip *clip, const swing_hil_command *command) {
+  const swing_hil_pcm_chunk_command *chunk = &command->parameters.pcm_chunk;
+  const swing_hil_pcm_result result = swing_hil_pcm_append(
+      clip, command->request_id, chunk->byte_offset, chunk->bytes, chunk->byte_count);
+  if (result != SWING_HIL_PCM_OK) {
+    respond_runtime_error(command->request_id, swing_hil_pcm_result_code(result));
+    return;
+  }
+  printf(SWING_HIL_PROTOCOL_PREFIX
+         " %lu ACK PCM_CHUNK byte_offset=%lu byte_count=%lu received_bytes=%lu"
+         " total_bytes=%lu\n",
+         (unsigned long)command->request_id, (unsigned long)chunk->byte_offset,
+         (unsigned long)chunk->byte_count, (unsigned long)clip->received_bytes,
+         (unsigned long)clip->expected_sample_count * 2UL);
+  stdio_flush();
+}
+
+static void run_pcm_commit(swing_hil_pcm_clip *clip, const swing_hil_command *command) {
+  const swing_hil_pcm_result result = swing_hil_pcm_commit(clip, command->request_id);
+  if (result != SWING_HIL_PCM_OK) {
+    respond_runtime_error(command->request_id, swing_hil_pcm_result_code(result));
+    return;
+  }
+  printf(SWING_HIL_PROTOCOL_PREFIX
+         " %lu ACK PCM_COMMIT sample_rate_hz=%u sample_count=%lu byte_count=%lu crc32=%lu\n",
+         (unsigned long)command->request_id, SWING_HIL_PCM_SAMPLE_RATE_HZ,
+         (unsigned long)clip->expected_sample_count, (unsigned long)clip->received_bytes,
+         (unsigned long)clip->expected_crc32);
+  stdio_flush();
+}
+
+static void run_pcm_abort(swing_hil_pcm_clip *clip, const swing_hil_command *command) {
+  const swing_hil_pcm_result result = swing_hil_pcm_abort(clip, command->request_id);
+  if (result != SWING_HIL_PCM_OK) {
+    respond_runtime_error(command->request_id, swing_hil_pcm_result_code(result));
+    return;
+  }
+  printf(SWING_HIL_PROTOCOL_PREFIX " %lu ACK PCM_ABORT cleared=1\n",
+         (unsigned long)command->request_id);
+  stdio_flush();
+}
+
+static uint32_t prepare_pcm(const swing_hil_pcm_clip *clip, uint32_t gain_permille) {
+  uint32_t *packed = tone_sample_storage();
+  for (uint32_t index = 0U; index < clip->expected_sample_count; ++index) {
+    const uint32_t sample =
+        (uint32_t)(uint16_t)swing_hil_pcm_scale_sample(clip->samples[index], gain_permille);
+    packed[index] = (sample << 16U) | sample;
+  }
+  return clip->expected_sample_count;
+}
+
+static void run_pcm_play(audio_output *audio, fixture_neopixel_output *fixture_pixel,
+                         swing_hil_prepare_state *prepare_state, const swing_hil_pcm_clip *clip,
+                         const swing_hil_command *command) {
+  const swing_hil_pcm_result playable =
+      swing_hil_pcm_validate_play(clip, command->parameters.pcm_play.marker_sample);
+  if (playable != SWING_HIL_PCM_OK) {
+    synthetic_fixture_shutdown(audio, fixture_pixel, prepare_state);
+    respond_runtime_error(command->request_id, swing_hil_pcm_result_code(playable));
+    return;
+  }
+
+  const uint32_t sample_count = prepare_pcm(clip, command->parameters.pcm_play.gain_permille);
+  const uint32_t played_crc32 = swing_hil_pcm_scaled_crc32(
+      clip->samples, sample_count, command->parameters.pcm_play.gain_permille);
+  const uint64_t accepted_us = time_us_64();
+  const uint64_t scheduled_audio_us = accepted_us + command->parameters.pcm_play.lead_us;
+  const uint64_t marker_offset_us =
+      ((uint64_t)command->parameters.pcm_play.marker_sample * 1000000ULL +
+       SWING_HIL_PCM_SAMPLE_RATE_HZ / 2U) /
+      SWING_HIL_PCM_SAMPLE_RATE_HZ;
+  const uint64_t scheduled_marker_us = scheduled_audio_us + marker_offset_us;
+
+  const bool calibration_prepared = swing_hil_prepare_consume(prepare_state, accepted_us);
+  const char *prepare_source = "self";
+  if (calibration_prepared) {
+    prepare_source = "calibration";
+  }
+  if (!calibration_prepared) {
+    synthetic_fixture_reset_while_unpowered(audio, prepare_state);
+    (void)synthetic_fixture_power_on(audio, fixture_pixel);
+  }
+  audio_start(audio, SWING_HIL_PCM_SAMPLE_RATE_HZ);
+  printf(
+      SWING_HIL_PROTOCOL_PREFIX
+      " %lu ACK PCM_PLAY accepted_us=%llu scheduled_audio_us=%llu scheduled_marker_us=%llu"
+      " lead_us=%lu marker_sample=%lu marker_offset_us=%llu gain_permille=%lu brightness=%lu"
+      " sample_rate_hz=%u sample_count=%lu source_crc32=%lu white_us=%u rail_powered=1 prepared=1"
+      " prepare_source=%s\n",
+      (unsigned long)command->request_id, printable_time(accepted_us),
+      printable_time(scheduled_audio_us), printable_time(scheduled_marker_us),
+      (unsigned long)command->parameters.pcm_play.lead_us,
+      (unsigned long)command->parameters.pcm_play.marker_sample, printable_time(marker_offset_us),
+      (unsigned long)command->parameters.pcm_play.gain_permille,
+      (unsigned long)command->parameters.pcm_play.brightness, SWING_HIL_PCM_SAMPLE_RATE_HZ,
+      (unsigned long)sample_count, (unsigned long)clip->expected_crc32, SWING_HIL_PCM_WHITE_US,
+      prepare_source);
+  stdio_flush();
+
+  sleep_until(from_us_since_boot(scheduled_audio_us));
+  const uint64_t audio_command_us = time_us_64();
+  audio_transfer(audio, tone_sample_storage(), sample_count);
+  busy_wait_until(from_us_since_boot(scheduled_marker_us));
+  const uint64_t white_command_us = time_us_64();
+  fixture_neopixel_set(fixture_pixel, swing_hil_swing_impact_color(
+                                          (uint8_t)command->parameters.pcm_play.brightness));
+  busy_wait_until(from_us_since_boot(white_command_us + SWING_HIL_PCM_WHITE_US));
+  fixture_neopixel_off(fixture_pixel);
+  const uint64_t white_end_us = time_us_64();
+  audio_wait_until_drained(audio);
+  const uint64_t audio_done_observed_us = time_us_64();
+  synthetic_fixture_shutdown(audio, fixture_pixel, prepare_state);
+  const uint64_t end_us = time_us_64();
+  const uint64_t command_delta_us = white_command_us - audio_command_us;
+  const uint64_t command_delta_error_us = absolute_delta_us(command_delta_us, marker_offset_us);
+
+  printf(SWING_HIL_PROTOCOL_PREFIX
+         " %lu EVENT PCM_PLAY START scheduled_audio_us=%llu audio_command_us=%llu"
+         " audio_lateness_us=%llu scheduled_marker_us=%llu marker_us=%llu marker_lateness_us=%llu"
+         " marker_sample=%lu marker_offset_us=%llu command_delta_us=%llu"
+         " command_delta_error_us=%llu\n",
+         (unsigned long)command->request_id, printable_time(scheduled_audio_us),
+         printable_time(audio_command_us),
+         printable_time(lateness_us(scheduled_audio_us, audio_command_us)),
+         printable_time(scheduled_marker_us), printable_time(white_command_us),
+         printable_time(lateness_us(scheduled_marker_us, white_command_us)),
+         (unsigned long)command->parameters.pcm_play.marker_sample,
+         printable_time(marker_offset_us), printable_time(command_delta_us),
+         printable_time(command_delta_error_us));
+  printf(SWING_HIL_PROTOCOL_PREFIX
+         " %lu EVENT PCM_PLAY DONE audio_command_us=%llu marker_us=%llu white_end_us=%llu"
+         " audio_done_observed_us=%llu end_us=%llu elapsed_us=%llu sample_rate_hz=%u"
+         " sample_count=%lu marker_sample=%lu gain_permille=%lu brightness=%lu played_crc32=%lu"
+         " white_us=%u outputs_inactive=1 pixel_off=1 i2s_inactive=1 rail_powered=0 prepared=0\n",
+         (unsigned long)command->request_id, printable_time(audio_command_us),
+         printable_time(white_command_us), printable_time(white_end_us),
+         printable_time(audio_done_observed_us), printable_time(end_us),
+         printable_time(end_us - audio_command_us), SWING_HIL_PCM_SAMPLE_RATE_HZ,
+         (unsigned long)sample_count, (unsigned long)command->parameters.pcm_play.marker_sample,
+         (unsigned long)command->parameters.pcm_play.gain_permille,
+         (unsigned long)command->parameters.pcm_play.brightness, (unsigned long)played_crc32,
+         SWING_HIL_PCM_WHITE_US);
   stdio_flush();
 }
 
@@ -479,7 +654,7 @@ static const char *run_swing_impact(audio_output *audio, fixture_neopixel_output
                                     const swing_hil_command *command, uint32_t tone_sample_count,
                                     swing_evidence *evidence) {
   sleep_until(from_us_since_boot(evidence->impact_scheduled_us - AUDIO_POWER_UP_LEAD_US));
-  audio_start(audio);
+  audio_start(audio, AUDIO_SAMPLE_RATE_HZ);
   audio_transfer(audio, silent_samples, AUDIO_WARMUP_SAMPLES);
   audio_wait_until_drained(audio);
   sleep_until(from_us_since_boot(evidence->impact_scheduled_us));
@@ -631,6 +806,64 @@ static void run_swing(audio_output *audio, fixture_neopixel_output *fixture_pixe
   emit_swing_evidence(command, &evidence, tone_sample_count);
 }
 
+static void shutdown_if_prepared(audio_output *audio, fixture_neopixel_output *fixture_pixel,
+                                 swing_hil_prepare_state *prepare_state) {
+  if (prepare_state->prepared) {
+    synthetic_fixture_shutdown(audio, fixture_pixel, prepare_state);
+  }
+}
+
+static void run_command(audio_output *audio, bool *audio_initialized,
+                        fixture_neopixel_output *fixture_neopixel,
+                        bool *fixture_neopixel_initialized, swing_hil_prepare_state *prepare_state,
+                        swing_hil_pcm_clip *pcm_clip, const swing_hil_command *command) {
+  switch (command->kind) {
+    case SWING_HIL_COMMAND_QUERY:
+      respond_query(command->request_id);
+      break;
+    case SWING_HIL_COMMAND_LED:
+      shutdown_if_prepared(audio, fixture_neopixel, prepare_state);
+      run_led(command);
+      break;
+    case SWING_HIL_COMMAND_TONE:
+      shutdown_if_prepared(audio, fixture_neopixel, prepare_state);
+      initialize_audio_once(audio, audio_initialized);
+      run_tone(audio, command);
+      break;
+    case SWING_HIL_COMMAND_PCM_BEGIN:
+      shutdown_if_prepared(audio, fixture_neopixel, prepare_state);
+      run_pcm_begin(pcm_clip, command);
+      break;
+    case SWING_HIL_COMMAND_PCM_CHUNK:
+      shutdown_if_prepared(audio, fixture_neopixel, prepare_state);
+      run_pcm_chunk(pcm_clip, command);
+      break;
+    case SWING_HIL_COMMAND_PCM_COMMIT:
+      shutdown_if_prepared(audio, fixture_neopixel, prepare_state);
+      run_pcm_commit(pcm_clip, command);
+      break;
+    case SWING_HIL_COMMAND_PCM_ABORT:
+      shutdown_if_prepared(audio, fixture_neopixel, prepare_state);
+      run_pcm_abort(pcm_clip, command);
+      break;
+    case SWING_HIL_COMMAND_PCM_PLAY:
+      initialize_audio_once(audio, audio_initialized);
+      initialize_fixture_neopixel_once(fixture_neopixel, fixture_neopixel_initialized);
+      run_pcm_play(audio, fixture_neopixel, prepare_state, pcm_clip, command);
+      break;
+    case SWING_HIL_COMMAND_CALIBRATE:
+      initialize_audio_once(audio, audio_initialized);
+      initialize_fixture_neopixel_once(fixture_neopixel, fixture_neopixel_initialized);
+      run_calibration(audio, fixture_neopixel, prepare_state, command);
+      break;
+    case SWING_HIL_COMMAND_SWING:
+      initialize_audio_once(audio, audio_initialized);
+      initialize_fixture_neopixel_once(fixture_neopixel, fixture_neopixel_initialized);
+      run_swing(audio, fixture_neopixel, prepare_state, command);
+      break;
+  }
+}
+
 int main(void) {
   initialize_output_pin_low(PICO_DEFAULT_LED_PIN);
   initialize_output_pin_low(PROP_MAKER_EXTERNAL_POWER_PIN);
@@ -646,6 +879,8 @@ int main(void) {
   bool audio_initialized = false;
   swing_hil_prepare_state prepare_state = {0};
   swing_hil_prepare_reset(&prepare_state);
+  static swing_hil_pcm_clip pcm_clip;
+  swing_hil_pcm_reset(&pcm_clip);
 
   printf(SWING_HIL_PROTOCOL_PREFIX " 0 EVENT BOOT firmware=" SWING_HIL_FIRMWARE_VERSION
                                    " device_us=%llu\n",
@@ -669,40 +904,13 @@ int main(void) {
       continue;
     }
     if (event.status == SWING_HIL_FEED_ERROR) {
-      if (prepare_state.prepared) {
-        synthetic_fixture_shutdown(&audio, &fixture_neopixel, &prepare_state);
-      }
+      shutdown_if_prepared(&audio, &fixture_neopixel, &prepare_state);
+      swing_hil_pcm_reset(&pcm_clip);
       respond_error(event.request_id, event.error);
       continue;
     }
 
-    switch (event.command.kind) {
-      case SWING_HIL_COMMAND_QUERY:
-        respond_query(event.command.request_id);
-        break;
-      case SWING_HIL_COMMAND_LED:
-        if (prepare_state.prepared) {
-          synthetic_fixture_shutdown(&audio, &fixture_neopixel, &prepare_state);
-        }
-        run_led(&event.command);
-        break;
-      case SWING_HIL_COMMAND_TONE:
-        if (prepare_state.prepared) {
-          synthetic_fixture_shutdown(&audio, &fixture_neopixel, &prepare_state);
-        }
-        initialize_audio_once(&audio, &audio_initialized);
-        run_tone(&audio, &event.command);
-        break;
-      case SWING_HIL_COMMAND_CALIBRATE:
-        initialize_audio_once(&audio, &audio_initialized);
-        initialize_fixture_neopixel_once(&fixture_neopixel, &fixture_neopixel_initialized);
-        run_calibration(&audio, &fixture_neopixel, &prepare_state, &event.command);
-        break;
-      case SWING_HIL_COMMAND_SWING:
-        initialize_audio_once(&audio, &audio_initialized);
-        initialize_fixture_neopixel_once(&fixture_neopixel, &fixture_neopixel_initialized);
-        run_swing(&audio, &fixture_neopixel, &prepare_state, &event.command);
-        break;
-    }
+    run_command(&audio, &audio_initialized, &fixture_neopixel, &fixture_neopixel_initialized,
+                &prepare_state, &pcm_clip, &event.command);
   }
 }

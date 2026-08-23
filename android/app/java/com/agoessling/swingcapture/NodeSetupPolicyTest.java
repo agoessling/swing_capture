@@ -22,7 +22,18 @@ public final class NodeSetupPolicyTest {
             existing, "replace", "http://pixel6:8080", "replacement-secret");
     NodeSetupPolicy.RedactedPeer redacted = NodeSetupPolicy.redact(replacement).orElseThrow();
     check(redacted.origin().equals("http://pixel6:8080"), "redacted origin");
+    check(
+        redacted.transportSecurity().equals("cleartext_trusted_lan_demo"),
+        "redacted peer reports the demo transport boundary");
     check(!redacted.toString().contains("replacement-secret"), "token never enters response view");
+    NodeSetupPolicy.RedactedPeer protectedPeer =
+        NodeSetupPolicy.redact(
+                new NodeSetupPolicy.PeerCredentials(
+                    "https://capture.example:8443", "protected-secret"))
+            .orElseThrow();
+    check(
+        protectedPeer.transportSecurity().equals("protected_https"),
+        "redacted peer reports protected transport");
 
     check(NodeSetupPolicy.revisionMatches(4, 4), "matching revision");
     check(!NodeSetupPolicy.revisionMatches(4, 5), "stale revision conflict");
@@ -100,6 +111,42 @@ public final class NodeSetupPolicyTest {
         topology("shadow", true, true, "node-b", "face_on", "leader")
             == NodeSetupPolicy.PeerTopologyIssue.NON_LEADER_HAS_PEER,
         "shadow cannot form a reciprocal outbound peer association");
+
+    operationalHealthReportsCaptureReadiness();
+  }
+
+  private static void operationalHealthReportsCaptureReadiness() {
+    long minimumFreeBytes = 2L * 1024 * 1024 * 1024;
+    NodeSetupPolicy.OperationalHealth nominal =
+        NodeSetupPolicy.operationalHealth(2, 0.72, false, minimumFreeBytes, minimumFreeBytes);
+    check(nominal.thermalReady(), "moderate thermal status remains ready");
+    check(nominal.storageReady(), "storage boundary is inclusive");
+    check(nominal.readyForCapture(), "nominal phone is ready");
+    check(nominal.readinessIssues().isEmpty(), "nominal phone has no health issue");
+    check(nominal.thermalHeadroom().orElseThrow() == 0.72, "finite headroom is retained");
+
+    NodeSetupPolicy.OperationalHealth unavailableTelemetry =
+        NodeSetupPolicy.operationalHealth(
+            -1, Double.NaN, true, minimumFreeBytes + 1, minimumFreeBytes);
+    check(unavailableTelemetry.thermalReady(), "unavailable thermal telemetry does not false-block");
+    check(
+        unavailableTelemetry.thermalHeadroom().isEmpty(),
+        "non-finite headroom is explicitly unavailable");
+    check(unavailableTelemetry.powerSaveMode(), "power-save observation is retained");
+
+    NodeSetupPolicy.OperationalHealth hotAndFull =
+        NodeSetupPolicy.operationalHealth(3, 0.0, false, minimumFreeBytes - 1, minimumFreeBytes);
+    check(!hotAndFull.thermalReady(), "severe thermal status blocks readiness");
+    check(!hotAndFull.storageReady(), "sub-threshold free storage blocks readiness");
+    check(!hotAndFull.readyForCapture(), "hot full phone is not ready");
+    check(hotAndFull.readinessIssues().size() == 2, "both health issues remain visible");
+
+    expectFailure(
+        () -> NodeSetupPolicy.operationalHealth(7, 0.0, false, minimumFreeBytes, minimumFreeBytes),
+        "invalid thermal status");
+    expectFailure(
+        () -> NodeSetupPolicy.operationalHealth(0, 0.0, false, -1, minimumFreeBytes),
+        "invalid usable storage");
   }
 
   private static NodeSetupPolicy.PeerTopologyIssue topology(

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "shared_session_id": "fixture-production-shared-001",
+  "created_at_utc": "2026-08-22T20:00:00.000Z",
+  "frame_count": 90,
+  "impact_frame_index": 45,
+  "nominal_fps": 30,
+  "encoded_width": 320,
+  "encoded_height": 180,
+  "all_frames_keyframes": false,
+  "keyframe_interval_frames": 30,
+  "roles": {
+    "down_the_line": {
+      "node_id": "fixture-node-dtl",
+      "local_session_id": "fixture-local-dtl-001",
+      "camera_serial": "FIXTURE-DTL",
+      "media_path": "down-the-line-gop30.mp4",
+      "encoded_bytes": 97502,
+      "trigger_timestamp_ns": "12001000000",
+      "clock_offset_ns": "12000000000"
+    },
+    "face_on": {
+      "node_id": "fixture-node-face",
+      "local_session_id": "fixture-local-face-001",
+      "camera_serial": "FIXTURE-FACE",
+      "media_path": "face-on-gop30.mp4",
+      "encoded_bytes": 94223,
+      "trigger_timestamp_ns": "22001200000",
+      "clock_offset_ns": "22000000000"
+    }
+  }
+}

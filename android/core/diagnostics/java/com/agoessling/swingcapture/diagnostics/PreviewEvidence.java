@@ -19,6 +19,7 @@ public final class PreviewEvidence {
   private final long timestampBoottimeNanos;
   private final byte[] compressedFrame;
   private final String modelId;
+  private final int imageRotationDegrees;
   private final long inferenceDurationNanos;
   private final double personConfidence;
   private final double addressConfidence;
@@ -38,11 +39,43 @@ public final class PreviewEvidence {
       boolean hittingRegionOccupied,
       ControllerState controllerState,
       String decisionReason) {
+    this(
+        timestampBoottimeNanos,
+        compressedFrame,
+        modelId,
+        0,
+        inferenceDurationNanos,
+        personConfidence,
+        addressConfidence,
+        motionMagnitude,
+        hittingRegionOccupied,
+        controllerState,
+        decisionReason);
+  }
+
+  public PreviewEvidence(
+      long timestampBoottimeNanos,
+      byte[] compressedFrame,
+      String modelId,
+      int imageRotationDegrees,
+      long inferenceDurationNanos,
+      double personConfidence,
+      double addressConfidence,
+      double motionMagnitude,
+      boolean hittingRegionOccupied,
+      ControllerState controllerState,
+      String decisionReason) {
     if (timestampBoottimeNanos < 0 || timestampBoottimeNanos == Long.MAX_VALUE) {
       throw new IllegalArgumentException("preview timestamp must permit a positive exclusive end");
     }
     Objects.requireNonNull(compressedFrame, "compressedFrame");
     requireBoundedText(modelId, MAXIMUM_MODEL_ID_BYTES, "modelId", false);
+    if (imageRotationDegrees != 0
+        && imageRotationDegrees != 90
+        && imageRotationDegrees != 180
+        && imageRotationDegrees != 270) {
+      throw new IllegalArgumentException("imageRotationDegrees must be 0, 90, 180, or 270");
+    }
     if (inferenceDurationNanos < 0) {
       throw new IllegalArgumentException("inference duration must be nonnegative");
     }
@@ -56,6 +89,7 @@ public final class PreviewEvidence {
     this.timestampBoottimeNanos = timestampBoottimeNanos;
     this.compressedFrame = compressedFrame.clone();
     this.modelId = modelId;
+    this.imageRotationDegrees = imageRotationDegrees;
     this.inferenceDurationNanos = inferenceDurationNanos;
     this.personConfidence = personConfidence;
     this.addressConfidence = addressConfidence;
@@ -87,6 +121,7 @@ public final class PreviewEvidence {
         timestampBoottimeNanos,
         frame,
         modelId,
+        imageRotationDegrees,
         inferenceDurationNanos,
         personConfidence,
         addressConfidence,
@@ -103,6 +138,11 @@ public final class PreviewEvidence {
 
   public String modelId() {
     return modelId;
+  }
+
+  /** Camera2 rotation applied by MediaPipe to this exact inference input. */
+  public int imageRotationDegrees() {
+    return imageRotationDegrees;
   }
 
   public long inferenceDurationNanos() {

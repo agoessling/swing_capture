@@ -113,6 +113,33 @@ void MissingAndLateImpactFail() {
   assert(!late.Finish().detected);
 }
 
+void RetainedBoundaryFailureIdentifiesOnlyTheStrictPointGate() {
+  // Reproduce the retained 2026-08-23 down-the-line failure: the first lit
+  // frame is just outside the strict 20 ms point gate while adjacent frame
+  // timestamps straddle that boundary. The interval must not turn this into a
+  // pass, but every independent reason must remain available as evidence.
+  const auto timings = Timings(20840);
+  RgbSwingSequenceAnalyzer analyzer(
+      RgbSwingSequenceConfiguration{.width = kWidth, .height = kHeight, .timings = timings});
+  for (std::size_t index = 0; index < timings.size(); ++index) {
+    analyzer.Append(Frame(index >= 24U && index <= 29U));
+  }
+
+  const auto result = analyzer.Finish();
+  assert(!result.detected);
+  assert(result.first_white_frame_index == 24U);
+  assert(result.white_frame_count == 6U);
+  assert(result.optical_to_audio_offset_us == -20832L);
+  assert(result.optical_onset_lower_bound_us == -24999L);
+  assert(result.optical_onset_upper_bound_us == -16665L);
+  assert(result.acceptance.minimum_white_delta_passed);
+  assert(result.acceptance.white_frame_count_passed);
+  assert(result.acceptance.white_duration_passed);
+  assert(!result.acceptance.optical_audio_offset_passed);
+  assert(result.acceptance.localized_response_passed);
+  assert(result.acceptance.maximum_absolute_optical_audio_offset_us == 20000L);
+}
+
 void IncompleteDecodeFails() {
   const auto timings = Timings();
   RgbSwingSequenceAnalyzer analyzer(
@@ -132,6 +159,7 @@ int main() {
   NominalWhiteImpactPasses();
   ColoredPostSequenceIsNotTreatedAsAnOffBaseline();
   MissingAndLateImpactFail();
+  RetainedBoundaryFailureIdentifiesOnlyTheStrictPointGate();
   GlobalFlashIsNotAStableLocalizedLed();
   IncompleteDecodeFails();
 }

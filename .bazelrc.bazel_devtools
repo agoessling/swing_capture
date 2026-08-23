@@ -6,13 +6,14 @@ common --incompatible_default_to_explicit_init_py
 # not execute them. Manual non-test targets retain Bazel's normal exclusion.
 build --build_manual_tests
 
-# Apply checks to every target requested by `bazel test`.
-test --aspects=//tools/bazel_devtools:aspects.bzl%ruff
-test --aspects=//tools/bazel_devtools:aspects.bzl%basedpyright
-test --aspects=//tools/bazel_devtools:aspects.bzl%ruff_format
-test --aspects=//tools/bazel_devtools:aspects.bzl%clang_tidy
-test --aspects=//tools/bazel_devtools:aspects.bzl%clang_format
-test --aspects=//tools/bazel_devtools:aspects.bzl%biome_lint
-test --aspects=//tools/bazel_devtools:aspects.bzl%biome_format
-test --@@aspect_rules_lint+//lint:fail_on_violation
+# Apply the expensive repository checks only at an explicit pre-commit or CI
+# checkpoint. Plain `bazel test` remains the canonical software test loop.
+test:precommit --aspects=//tools/bazel_devtools:aspects.bzl%ruff
+test:precommit --aspects=//tools/bazel_devtools:aspects.bzl%basedpyright
+test:precommit --aspects=//tools/bazel_devtools:aspects.bzl%ruff_format
+test:precommit --aspects=//tools/bazel_devtools:aspects.bzl%clang_tidy
+test:precommit --aspects=//tools/bazel_devtools:aspects.bzl%clang_format
+test:precommit --aspects=//tools/bazel_devtools:aspects.bzl%biome_lint
+test:precommit --aspects=//tools/bazel_devtools:aspects.bzl%biome_format
+test:precommit --@@aspect_rules_lint+//lint:fail_on_violation
 # ##BAZEL_DEVTOOLS_MANAGED_END:checks##

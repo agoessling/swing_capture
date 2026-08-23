@@ -1,5 +1,6 @@
 package com.agoessling.swingcapture;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -7,6 +8,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.BatteryManager;
 import android.os.Debug;
@@ -16,12 +18,17 @@ import android.os.SystemClock;
 import android.util.Log;
 import com.agoessling.swingcapture.audio.AudioTimestampMapper;
 import com.agoessling.swingcapture.audio.ImpactDetector;
+import com.agoessling.swingcapture.core.coordination.AutonomousPairLifecycle;
+import com.agoessling.swingcapture.core.coordination.ClockOffsetEstimate;
 import com.agoessling.swingcapture.core.coordination.CoordinationRecordStore;
+import com.agoessling.swingcapture.core.coordination.PairedCoordinationRecord;
+import com.agoessling.swingcapture.diagnostics.PreviewEvidence;
 import com.agoessling.swingcapture.diagnostics.PreviewEvidenceRing;
 import com.agoessling.swingcapture.node.CaptureRuntime;
 import com.agoessling.swingcapture.node.NodeCoordinationState;
 import com.agoessling.swingcapture.pose.PoseLandmarkObservationExtractor;
 import com.agoessling.swingcapture.pose.PoseTriggerController;
+import com.agoessling.swingcapture.pose.inference.PoseModelVariant;
 import com.agoessling.swingcapture.standby.StandbyDiagnosticCoordinator;
 import java.io.File;
 import java.io.FileInputStream;
@@ -31,6 +38,8 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -46,12 +55,19 @@ import org.json.JSONObject;
 /** Owns the camera/microphone capture loop and node API beyond the activity lifecycle. */
 public final class CaptureForegroundService extends Service
     implements NodeHttpServer.CaptureControl, ContinuousCaptureEngine.Listener {
+  private record SetupPreviewPayload(
+      SetupPreviewProvider.Snapshot snapshot, int imageRotationDegrees) {}
+
   public static final String ACTION_START = "com.agoessling.swingcapture.action.START";
   public static final String ACTION_ARM = "com.agoessling.swingcapture.action.ARM";
   public static final String ACTION_DISARM = "com.agoessling.swingcapture.action.DISARM";
   public static final String ACTION_TRIGGER = "com.agoessling.swingcapture.action.TRIGGER";
   public static final String ACTION_START_POSE_HIL =
       "com.agoessling.swingcapture.action.START_POSE_HIL";
+  public static final String ACTION_ARM_POSE_EXPERIMENT_HIL =
+      "com.agoessling.swingcapture.action.ARM_POSE_EXPERIMENT_HIL";
+  public static final String ACTION_PREPARE_AUTONOMOUS_RECOVERY_HIL =
+      "com.agoessling.swingcapture.action.PREPARE_AUTONOMOUS_RECOVERY_HIL";
   public static final String ACTION_ARM_CONTINUOUS_HIL =
       "com.agoessling.swingcapture.action.ARM_CONTINUOUS_HIL";
   public static final String ACTION_ARM_AUDIO_HIL =
@@ -60,17 +76,55 @@ public final class CaptureForegroundService extends Service
       "com.agoessling.swingcapture.action.ARM_SOAK_HIL";
   public static final String ACTION_FINISH_SOAK_HIL =
       "com.agoessling.swingcapture.action.FINISH_SOAK_HIL";
+  public static final String ACTION_REJECT_NEXT_FIELD_RECORDING_START_HIL =
+      "com.agoessling.swingcapture.action.REJECT_NEXT_FIELD_RECORDING_START_HIL";
+  public static final String ACTION_FAIL_NEXT_ACCEPTED_FIELD_RECORDING_START_HIL =
+      "com.agoessling.swingcapture.action.FAIL_NEXT_ACCEPTED_FIELD_RECORDING_START_HIL";
+  public static final String ACTION_RELEASE_ACCEPTED_FIELD_RECORDING_START_FAILURE_HIL =
+      "com.agoessling.swingcapture.action.RELEASE_ACCEPTED_FIELD_RECORDING_START_FAILURE_HIL";
+  public static final String ACTION_CLEAR_FIELD_RECORDING_START_HIL =
+      "com.agoessling.swingcapture.action.CLEAR_FIELD_RECORDING_START_HIL";
   public static final String EXTRA_SHARED_SESSION_ID = "shared_session_id";
+  public static final String EXTRA_PEER_NODE_ID = "peer_node_id";
+  public static final String EXTRA_POSE_EXPERIMENT_MODEL = "pose_experiment_model";
+  public static final String EXTRA_POSE_EXPERIMENT_STANDBY_WIDTH =
+      "pose_experiment_standby_width";
+  public static final String EXTRA_POSE_EXPERIMENT_STANDBY_HEIGHT =
+      "pose_experiment_standby_height";
   private static final String TAG = "SwingCaptureService";
   private static final String CHANNEL_ID = "capture_node";
   private static final int NOTIFICATION_ID = 240;
+  private static final int PEER_IMPACT_MAXIMUM_ATTEMPTS = 3;
+  private static final long PEER_IMPACT_RETRY_DELAY_MILLIS = 50;
+  private static final int PEER_ARM_MAXIMUM_ATTEMPTS = 3;
+  private static final int PEER_ARM_READY_MAXIMUM_PENDING_RESPONSES = 50;
+  private static final long PEER_ARM_RETRY_DELAY_MILLIS = 150;
+  private static final long PEER_CLOCK_POLL_INTERVAL_MILLIS = 1_000;
+  private static final long PEER_CLOCK_FAILURE_LOG_INTERVAL_NANOS =
+      TimeUnit.SECONDS.toNanos(30);
+  private static final int AUTONOMOUS_PEER_MAXIMUM_ATTEMPTS = 3;
+  private static final long AUTONOMOUS_PEER_RETRY_DELAY_MILLIS = 50;
+  private static final long AUTONOMOUS_PAIR_POLL_INTERVAL_MILLIS = 250;
+  // A phone can take roughly ten seconds to become peer-reachable after Wi-Fi reassociation.
+  // Keep a pending durable record's retry cadence inside the bounded recovery window.
+  private static final long AUTONOMOUS_BACKLOG_RETRY_INTERVAL_NANOS =
+      TimeUnit.SECONDS.toNanos(2);
   private static final long SOAK_TELEMETRY_INTERVAL_NANOS = 30_000_000_000L;
   private static final CaptureRuntime RUNTIME = new CaptureRuntime();
   private static final NodeCoordinationState COORDINATION = new NodeCoordinationState();
   private static volatile List<String> advertisedUrls = Collections.emptyList();
 
+  private final FieldRecordingStartFault fieldRecordingStartFault =
+      new FieldRecordingStartFault();
+
   private final ExecutorService controlExecutor = Executors.newSingleThreadExecutor();
   private final ExecutorService peerExecutor = Executors.newSingleThreadExecutor();
+  private final ScheduledExecutorService peerClockExecutor =
+      Executors.newSingleThreadScheduledExecutor(
+          runnable -> new Thread(runnable, "peer-clock-exchange"));
+  private final ScheduledExecutorService autonomousPairExecutor =
+      Executors.newSingleThreadScheduledExecutor(
+          runnable -> new Thread(runnable, "autonomous-pair-lifecycle"));
   private final ScheduledExecutorService poseTimeoutExecutor =
       Executors.newSingleThreadScheduledExecutor();
   private final ExecutorService standbyDiagnosticPublisherExecutor =
@@ -89,15 +143,51 @@ public final class CaptureForegroundService extends Service
   private final PoseTriggerControllerLease poseTriggerControllerLease =
       new PoseTriggerControllerLease();
   private final PeerArmStatusTracker peerArmStatus = new PeerArmStatusTracker();
+  private static final AutonomousPairLifecycle.Config AUTONOMOUS_PAIR_CONFIG =
+      new AutonomousPairLifecycle.Config(TimeUnit.SECONDS.toNanos(30));
+  private AutonomousPairLifecycle autonomousPair =
+      new AutonomousPairLifecycle(AUTONOMOUS_PAIR_CONFIG);
+  private final Object peerClockMonitor = new Object();
+  private PeerClockSynchronizer peerClockSynchronizer;
+  private String peerClockOrigin = "";
+  private long lastPeerClockFailureLogElapsedRealtimeNanos;
+  private int consecutivePeerClockFailures;
   private NodeConfiguration configuration;
+  private DeviceCapabilityPolicy.HardwareSnapshot deviceCapabilities;
   private NodeHttpServer server;
+  private volatile CoordinationRecordStore coordinationRecords;
+  private volatile AutonomousPairDurableStore autonomousPairDurableStore;
+  private volatile PoseStationConfigurationSnapshot autonomousPeerConfiguration;
+  private volatile NodeCoordinationState.TriggerReport autonomousLocalTrigger;
+  private volatile NodeCoordinationState.TriggerReport autonomousPeerTrigger;
+  private volatile PeerClockSynchronizer.Snapshot autonomousPeerClock;
+  private volatile PairedCoordinationRecord autonomousPendingRecord;
+  private volatile boolean autonomousRecoveredFromCheckpoint;
+  private volatile String autonomousRecoveryDiagnostic = "no durable checkpoint";
+  private volatile int autonomousReplicationBacklogSize;
+  private volatile String autonomousLastBacklogSessionId = "";
+  private volatile String autonomousLastBacklogOutcome = "none";
+  private volatile boolean autonomousRestartResumeInProgress;
+  private volatile long autonomousLastBacklogAttemptElapsedRealtimeNanos;
   private volatile ContinuousCaptureEngine engine;
   private volatile PoseStandbyEngine poseStandbyEngine;
+  private final SetupPreviewProvider setupPreviewProvider =
+      SetupPreviewProvider.create(
+          SetupPreviewProvider.Config.defaults(), new AndroidNv21SetupPreviewEncoder());
+  private Object activeSetupPreviewSource;
+  private long setupPreviewEvidenceTimestampNanos = -1L;
+  private int setupPreviewImageRotationDegrees;
   private volatile StandbyAudioRecorder standbyAudioRecorder;
+  private final SessionBoundValue<PeerImpactMappingEvidence> lastPeerImpactMappingEvidence =
+      new SessionBoundValue<>();
+  private volatile FieldDataRecorder fieldDataRecorder;
+  private volatile boolean fieldRecordingStopRequested;
   private volatile CaptureConfigurationSnapshot activeCaptureConfiguration;
   private volatile PoseStationConfigurationSnapshot activePoseConfiguration;
   private volatile PoseStandbyMetrics.Snapshot lastPoseMetrics;
+  private volatile PoseStandbyEngine.ReadyStatus lastPoseReadyStatus;
   private volatile PoseTriggerController.Decision lastPoseDecision;
+  private volatile PoseExperimentConfiguration poseExperimentConfiguration;
   private volatile boolean poseTransitionRequested;
   private volatile long poseArmCancelledForStandbyDiagnostic;
   private volatile String poseTransitionLastPrecedence = "none";
@@ -140,6 +230,7 @@ public final class CaptureForegroundService extends Service
   public void onCreate() {
     super.onCreate();
     configuration = new NodeConfiguration(this);
+    deviceCapabilities = AndroidDeviceCapabilityProbe.collectOrUnavailable(this);
     createNotificationChannel();
     startForeground(
         NOTIFICATION_ID,
@@ -150,7 +241,19 @@ public final class CaptureForegroundService extends Service
     wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "swing_capture:capture_node");
     wakeLock.setReferenceCounted(false);
     cleanupStaleSessionStaging();
+    initializeAutonomousPairDurability();
     startServer();
+    peerClockExecutor.scheduleWithFixedDelay(
+        this::pollPeerClock,
+        0,
+        PEER_CLOCK_POLL_INTERVAL_MILLIS,
+        TimeUnit.MILLISECONDS);
+    autonomousPairExecutor.scheduleWithFixedDelay(
+        this::maintainAutonomousPair,
+        AUTONOMOUS_PAIR_POLL_INTERVAL_MILLIS,
+        AUTONOMOUS_PAIR_POLL_INTERVAL_MILLIS,
+        TimeUnit.MILLISECONDS);
+    resumeAutonomousPairAfterRestart();
   }
 
   private void cleanupStaleSessionStaging() {
@@ -169,13 +272,212 @@ public final class CaptureForegroundService extends Service
     }
   }
 
+  private void initializeAutonomousPairDurability() {
+    try {
+      AutonomousPairDurableStore durableStore =
+          new AutonomousPairDurableStore(
+              new File(getFilesDir(), "autonomous_pair"), AndroidDirectorySync::synchronize);
+      autonomousPairDurableStore = durableStore;
+      Optional<AutonomousPairDurableStore.Recovery> recovered = durableStore.loadCheckpoint();
+      autonomousReplicationBacklogSize = durableStore.backlogSize();
+      if (recovered.isEmpty()) {
+        return;
+      }
+      AutonomousPairDurableStore.Recovery value = recovered.orElseThrow();
+      autonomousPair = AutonomousPairLifecycle.restore(AUTONOMOUS_PAIR_CONFIG, value.checkpoint());
+      autonomousPendingRecord = value.pendingRecord().orElse(null);
+      autonomousRecoveredFromCheckpoint = true;
+      autonomousRecoveryDiagnostic =
+          "restored "
+              + value.checkpoint().state().name().toLowerCase(java.util.Locale.ROOT)
+              + " checkpoint";
+    } catch (Throwable failure) {
+      autonomousRecoveryDiagnostic =
+          "durable recovery failed: " + failure.getClass().getSimpleName();
+      autonomousPair.durabilityFailed(failure.getClass().getSimpleName());
+      Log.e(TAG, "Unable to restore autonomous-pair durability state", failure);
+    }
+  }
+
+  private void resumeAutonomousPairAfterRestart() {
+    if (!autonomousRecoveredFromCheckpoint) {
+      return;
+    }
+    AutonomousPairLifecycle.State recoveredState = autonomousPair.snapshot().state();
+    if (recoveredState == AutonomousPairLifecycle.State.STOPPED
+        || recoveredState == AutonomousPairLifecycle.State.TERMINAL_FAILURE) {
+      return;
+    }
+    try {
+      PoseStationConfigurationSnapshot poseConfiguration = configuration.poseConfigurationSnapshot();
+      if (poseConfiguration.mode() != PoseNodeMode.LEADER || !poseConfiguration.hasPeer()) {
+        handleAutonomousTransition(
+            autonomousPair.durabilityFailed(
+                "restored leader checkpoint has no configured authenticated peer"));
+        return;
+      }
+      autonomousPeerConfiguration = poseConfiguration;
+      if (recoveredState != AutonomousPairLifecycle.State.STOPPING) {
+        autonomousRestartResumeInProgress = true;
+        try {
+          setArmed(true, null);
+        } finally {
+          autonomousRestartResumeInProgress = false;
+        }
+      }
+      boolean durableRecord = autonomousPendingRecord != null;
+      handleAutonomousTransition(
+          autonomousPair.recover(durableRecord, SystemClock.elapsedRealtimeNanos()));
+      autonomousRecoveryDiagnostic =
+          "recovery actions dispatched for existing checkpoint session";
+    } catch (Throwable failure) {
+      autonomousRestartResumeInProgress = false;
+      autonomousRecoveryDiagnostic =
+          "checkpoint resume failed: " + failure.getClass().getSimpleName();
+      handleAutonomousTransition(
+          autonomousPair.durabilityFailed(failure.getClass().getSimpleName()));
+      Log.e(TAG, "Unable to resume autonomous pair after process restart", failure);
+    }
+  }
+
+  /** Builds deterministic published evidence for the bounded process-restart HIL only. */
+  private synchronized void prepareAutonomousRecoveryHil(
+      String sharedSessionId, String peerNodeId) throws IOException {
+    PoseHilEndpointAccess.requireEnabled(poseArmHilEnabled);
+    com.agoessling.swingcapture.node.NodeCoordinationState.validateSharedSessionId(sharedSessionId);
+    if (peerNodeId == null || !peerNodeId.matches("[A-Za-z0-9._-]{1,128}")) {
+      throw new IllegalArgumentException("peer node ID is invalid");
+    }
+    if (autonomousPair.snapshot().state() != AutonomousPairLifecycle.State.STOPPED
+        || RUNTIME.snapshot().state() != CaptureRuntime.State.STOPPED) {
+      throw new IllegalStateException("autonomous recovery HIL requires a stopped station");
+    }
+    PoseStationConfigurationSnapshot poseConfiguration = configuration.poseConfigurationSnapshot();
+    if (poseConfiguration.mode() != PoseNodeMode.LEADER || !poseConfiguration.hasPeer()) {
+      throw new IllegalStateException("autonomous recovery HIL requires a configured leader peer");
+    }
+    AutonomousPairDurableStore durableStore =
+        Objects.requireNonNull(autonomousPairDurableStore, "autonomous durable store");
+    if (durableStore.loadCheckpoint().isPresent()) {
+      throw new IllegalStateException("autonomous recovery HIL refuses to replace a checkpoint");
+    }
+    CoordinationRecordStore recordStore =
+        Objects.requireNonNull(coordinationRecords, "coordination record store");
+    CaptureConfigurationSnapshot capture = configuration.captureSnapshot();
+    capture.requireAssignedRole();
+    com.agoessling.swingcapture.core.coordination.CaptureRole localRole =
+        com.agoessling.swingcapture.core.coordination.CaptureRole.parse(capture.role().wireName());
+    com.agoessling.swingcapture.core.coordination.CaptureRole peerRole =
+        localRole == com.agoessling.swingcapture.core.coordination.CaptureRole.DOWN_THE_LINE
+            ? com.agoessling.swingcapture.core.coordination.CaptureRole.FACE_ON
+            : com.agoessling.swingcapture.core.coordination.CaptureRole.DOWN_THE_LINE;
+    long timestamp = SystemClock.elapsedRealtimeNanos();
+    PairedCoordinationRecord.NodeEvidence local =
+        autonomousRecoveryHilEvidence(
+            localRole,
+            capture.nodeId(),
+            "hil-local-" + sharedSessionId,
+            timestamp,
+            "hil_restart_local");
+    PairedCoordinationRecord.NodeEvidence peer =
+        autonomousRecoveryHilEvidence(
+            peerRole,
+            peerNodeId,
+            "hil-peer-" + sharedSessionId,
+            Math.addExact(timestamp, TimeUnit.MILLISECONDS.toNanos(1)),
+            "hil_restart_peer");
+    PairedCoordinationRecord record =
+        localRole == com.agoessling.swingcapture.core.coordination.CaptureRole.DOWN_THE_LINE
+            ? PairedCoordinationRecord.create(
+                sharedSessionId, System.currentTimeMillis(), local, peer)
+            : PairedCoordinationRecord.create(
+                sharedSessionId, System.currentTimeMillis(), peer, local);
+
+    AutonomousPairLifecycle prepared = new AutonomousPairLifecycle(AUTONOMOUS_PAIR_CONFIG);
+    prepared.startStation();
+    prepared.peerStandbyStarted();
+    prepared.claimSwing(sharedSessionId, timestamp);
+    prepared.peerArmAccepted(sharedSessionId);
+    prepared.localTriggered(sharedSessionId, local.localSessionId());
+    prepared.peerTriggered(sharedSessionId, peer.localSessionId(), true);
+    prepared.localPublished(sharedSessionId, local.localSessionId());
+    prepared.peerPublished(sharedSessionId, peer.localSessionId());
+    prepared.pairAdmitted(sharedSessionId);
+
+    CoordinationRecordStore.StoreStatus localStore = recordStore.storeIfAbsent(record).status();
+    if (localStore == CoordinationRecordStore.StoreStatus.CONFLICT) {
+      throw new IOException("autonomous recovery HIL local record conflicts");
+    }
+    AutonomousPairDurableStore.EnqueueStatus queued = durableStore.enqueue(record);
+    if (queued == AutonomousPairDurableStore.EnqueueStatus.CONFLICT) {
+      throw new IOException("autonomous recovery HIL backlog conflicts");
+    }
+    autonomousPair = prepared;
+    autonomousPendingRecord = record;
+    autonomousPeerConfiguration = poseConfiguration;
+    durableStore.saveCheckpoint(prepared.checkpoint(), Optional.of(record));
+    autonomousReplicationBacklogSize = durableStore.backlogSize();
+    autonomousLastBacklogSessionId = sharedSessionId;
+    autonomousLastBacklogOutcome = "hil_queued_for_restart";
+    autonomousRecoveryDiagnostic = "deterministic HIL checkpoint ready for force-stop";
+  }
+
+  private static PairedCoordinationRecord.NodeEvidence autonomousRecoveryHilEvidence(
+      com.agoessling.swingcapture.core.coordination.CaptureRole role,
+      String nodeId,
+      String localSessionId,
+      long timestampNanos,
+      String source) {
+    return new PairedCoordinationRecord.NodeEvidence(
+        role,
+        nodeId,
+        localSessionId,
+        timestampNanos,
+        TimeUnit.MICROSECONDS.toNanos(100),
+        timestampNanos,
+        TimeUnit.MICROSECONDS.toNanos(100),
+        0,
+        0,
+        TimeUnit.MILLISECONDS.toNanos(1),
+        TimeUnit.MILLISECONDS.toNanos(1),
+        3,
+        source);
+  }
+
   @Override
   public int onStartCommand(Intent intent, int flags, int startId) {
     String action = intent == null ? ACTION_START : intent.getAction();
     if (ACTION_START_POSE_HIL.equals(action)) {
       poseArmHilEnabled = true;
     }
-    if (ACTION_ARM.equals(action)
+    if (ACTION_REJECT_NEXT_FIELD_RECORDING_START_HIL.equals(action)) {
+      fieldRecordingStartFault.arm();
+      Log.i(TAG, "Next field-recording start will be rejected by explicit HIL request");
+    }
+    if (ACTION_FAIL_NEXT_ACCEPTED_FIELD_RECORDING_START_HIL.equals(action)) {
+      fieldRecordingStartFault.armAcceptedFailure();
+      Log.i(TAG, "Next accepted field-recording start will wait at its explicit HIL fault gate");
+    }
+    if (ACTION_RELEASE_ACCEPTED_FIELD_RECORDING_START_FAILURE_HIL.equals(action)) {
+      boolean released = fieldRecordingStartFault.releaseAcceptedStartFailure();
+      Log.i(TAG, "Accepted field-recording start HIL fault release=" + released);
+    }
+    if (ACTION_CLEAR_FIELD_RECORDING_START_HIL.equals(action)) {
+      fieldRecordingStartFault.clear();
+      Log.i(TAG, "Cleared explicit field-recording start HIL request");
+    }
+    if (ACTION_PREPARE_AUTONOMOUS_RECOVERY_HIL.equals(action)) {
+      try {
+        prepareAutonomousRecoveryHil(
+            intent == null ? null : intent.getStringExtra(EXTRA_SHARED_SESSION_ID),
+            intent == null ? null : intent.getStringExtra(EXTRA_PEER_NODE_ID));
+      } catch (Throwable failure) {
+        autonomousRecoveryDiagnostic =
+            "HIL checkpoint preparation failed: " + failure.getClass().getSimpleName();
+        Log.e(TAG, "Unable to prepare autonomous recovery HIL checkpoint", failure);
+      }
+    } else if (ACTION_ARM.equals(action)
+        || ACTION_ARM_POSE_EXPERIMENT_HIL.equals(action)
         || ACTION_ARM_CONTINUOUS_HIL.equals(action)
         || ACTION_ARM_AUDIO_HIL.equals(action)
         || ACTION_ARM_SOAK_HIL.equals(action)) {
@@ -183,7 +485,12 @@ public final class CaptureForegroundService extends Service
       boolean previousAudioHilRequested = audioHilRequested;
       boolean previousSoakHilRequested = soakHilRequested;
       boolean previousCaptureReady = captureReady;
+      PoseExperimentConfiguration previousPoseExperiment = poseExperimentConfiguration;
       try {
+        poseExperimentConfiguration =
+            ACTION_ARM_POSE_EXPERIMENT_HIL.equals(action)
+                ? requirePoseExperimentConfiguration(intent)
+                : null;
         continuousHilRequested =
             ACTION_ARM_CONTINUOUS_HIL.equals(action)
                 || ACTION_ARM_AUDIO_HIL.equals(action)
@@ -196,14 +503,19 @@ public final class CaptureForegroundService extends Service
         soakLastIncidentalSessionId = "";
         lastSoakTelemetryElapsedRealtimeNanos = 0L;
         captureReady = false;
-        setArmed(
-            true,
-            intent == null ? null : intent.getStringExtra(EXTRA_SHARED_SESSION_ID));
+        String requestedSessionId =
+            intent == null ? null : intent.getStringExtra(EXTRA_SHARED_SESSION_ID);
+        if (ACTION_ARM_POSE_EXPERIMENT_HIL.equals(action)) {
+          setArmed(true, requestedSessionId, false);
+        } else {
+          setArmed(true, requestedSessionId);
+        }
       } catch (IllegalArgumentException | IllegalStateException rejected) {
         continuousHilRequested = previousContinuousHilRequested;
         audioHilRequested = previousAudioHilRequested;
         soakHilRequested = previousSoakHilRequested;
         captureReady = previousCaptureReady;
+        poseExperimentConfiguration = previousPoseExperiment;
         Log.i(TAG, "Arm request rejected: " + rejected.getMessage());
       }
     } else if (ACTION_FINISH_SOAK_HIL.equals(action)) {
@@ -232,6 +544,9 @@ public final class CaptureForegroundService extends Service
   @Override
   public void onDestroy() {
     stopCapture();
+    fieldRecordingStartFault.clear();
+    stopFieldRecordingNow(fieldDataRecorder);
+    setupPreviewProvider.close();
     if (server != null) {
       server.stop();
     }
@@ -239,6 +554,8 @@ public final class CaptureForegroundService extends Service
     drainStandbyDiagnosticPublisher();
     controlExecutor.shutdownNow();
     peerExecutor.shutdownNow();
+    peerClockExecutor.shutdownNow();
+    autonomousPairExecutor.shutdownNow();
     poseTimeoutExecutor.shutdownNow();
     releaseWakeLock();
     RUNTIME.stopped();
@@ -273,7 +590,20 @@ public final class CaptureForegroundService extends Service
 
   @Override
   public void setArmed(boolean armed, String sharedSessionId) {
+    if (armed) {
+      poseExperimentConfiguration = null;
+    }
     setArmed(armed, sharedSessionId, false);
+  }
+
+  private static PoseExperimentConfiguration requirePoseExperimentConfiguration(Intent intent) {
+    if (intent == null) {
+      throw new IllegalArgumentException("pose experiment HIL requires explicit configuration");
+    }
+    return PoseExperimentConfiguration.parse(
+        intent.getStringExtra(EXTRA_POSE_EXPERIMENT_MODEL),
+        intent.getIntExtra(EXTRA_POSE_EXPERIMENT_STANDBY_WIDTH, -1),
+        intent.getIntExtra(EXTRA_POSE_EXPERIMENT_STANDBY_HEIGHT, -1));
   }
 
   private void setArmed(
@@ -285,11 +615,37 @@ public final class CaptureForegroundService extends Service
       if (sharedSessionId != null) {
         throw new IllegalArgumentException("shared_session_id is valid only while arming");
       }
+      lastPeerImpactMappingEvidence.clear();
+      PoseStationConfigurationSnapshot stoppingPose = activePoseConfiguration;
+      if (stoppingPose != null && stoppingPose.mode() == PoseNodeMode.LEADER) {
+        handleAutonomousTransition(autonomousPair.stopStation());
+      }
       controlExecutor.execute(this::stopCapture);
       return;
     }
+    PoseStationConfigurationSnapshot requestedPoseConfiguration;
+    long stationArmRequestedElapsedRealtimeNanos;
     synchronized (this) {
+      lastPeerImpactMappingEvidence.clear();
+      if (fieldRecordingInProgress(fieldDataRecorder)) {
+        throw new IllegalStateException("field data recording is active");
+      }
       CaptureRuntime.Snapshot snapshot = RUNTIME.snapshot();
+      CaptureConfigurationSnapshot requestedConfiguration = configuration.captureSnapshot();
+      requestedConfiguration.requireAssignedRole();
+      DeviceCapabilityPolicy.assess(currentDeviceCapabilities(), requestedConfiguration.profile())
+          .requireReady();
+      requestedPoseConfiguration = configuration.poseConfigurationSnapshot();
+      if (!preserveCompletedTriggerReport
+          && requestedPoseConfiguration.mode() == PoseNodeMode.SHADOW
+          && activePoseConfiguration != null
+          && activePoseConfiguration.mode() == PoseNodeMode.SHADOW
+          && (snapshot.state() == CaptureRuntime.State.STARTING
+              || snapshot.state() == CaptureRuntime.State.ARMED)) {
+        // Station-start retransmission and the legacy browser's concurrent shadow arm are both
+        // idempotent. The per-swing shared ID still arrives through the strict pose-arm endpoint.
+        return;
+      }
       if (snapshot.state() != CaptureRuntime.State.STOPPED
           && snapshot.state() != CaptureRuntime.State.ERROR) {
         throw new IllegalStateException("capture is already running");
@@ -297,10 +653,6 @@ public final class CaptureForegroundService extends Service
       if (activeCaptureConfiguration != null) {
         throw new IllegalStateException("the previous capture is still shutting down");
       }
-      CaptureConfigurationSnapshot requestedConfiguration = configuration.captureSnapshot();
-      requestedConfiguration.requireAssignedRole();
-      PoseStationConfigurationSnapshot requestedPoseConfiguration =
-          configuration.poseConfigurationSnapshot();
       if (preserveCompletedTriggerReport) {
         if (sharedSessionId != null) {
           throw new IllegalArgumentException(
@@ -319,6 +671,14 @@ public final class CaptureForegroundService extends Service
       poseThermalHardStopElapsedRealtimeNanos = 0L;
       peerArmStatus.reset();
       armRequestedElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
+      stationArmRequestedElapsedRealtimeNanos = armRequestedElapsedRealtimeNanos;
+    }
+    if (!preserveCompletedTriggerReport
+        && !autonomousRestartResumeInProgress
+        && requestedPoseConfiguration.mode() == PoseNodeMode.LEADER
+        && requestedPoseConfiguration.hasPeer()) {
+      autonomousPeerConfiguration = requestedPoseConfiguration;
+      handleAutonomousTransition(autonomousPair.startStation());
     }
     if (!continuousHilRequested
         && activePoseConfiguration.mode() != PoseNodeMode.DISABLED) {
@@ -326,8 +686,238 @@ public final class CaptureForegroundService extends Service
       controlExecutor.execute(this::startPoseStandby);
     } else {
       updateNotification("Starting camera, microphone, and encoded pre-roll…");
-      controlExecutor.execute(this::startCapture);
+      controlExecutor.execute(
+          () -> startCapture(stationArmRequestedElapsedRealtimeNanos));
     }
+  }
+
+  @Override
+  public JSONObject fieldRecordingStatus() {
+    FieldDataRecorder current = fieldDataRecorder;
+    JSONObject status = new JSONObject();
+    try {
+      status
+          .put("schema_version", 1)
+          .put("max_duration_seconds", FieldDataRecorder.MAXIMUM_DURATION_MILLIS / 1_000L)
+          .put("hil_reject_next_start", fieldRecordingStartFault.armed())
+          .put(
+              "hil_fail_next_accepted_start",
+              fieldRecordingStartFault.acceptedFailureArmed())
+          .put(
+              "hil_accepted_start_waiting",
+              fieldRecordingStartFault.acceptedStartWaiting());
+      if (current == null) {
+        return status
+            .put("state", "idle")
+            .put("active_recording_id", JSONObject.NULL)
+            .put("shared_recording_id", JSONObject.NULL)
+            .put("started_at_utc", JSONObject.NULL)
+            .put("started_elapsed_realtime_ns", JSONObject.NULL)
+            .put("elapsed_ms", 0)
+            .put("video_bytes", "0")
+            .put("audio_frames", "0")
+            .put("error", "");
+      }
+
+      FieldDataRecorder.Status recorderStatus = current.status();
+      boolean active = fieldRecordingInProgress(recorderStatus);
+      String wireState = fieldRecordingState(recorderStatus, fieldRecordingStopRequested);
+      return status
+          .put("state", wireState)
+          .put(
+              "active_recording_id",
+              active ? recorderStatus.recordingId() : JSONObject.NULL)
+          .put("shared_recording_id", recorderStatus.sharedRecordingId())
+          .put("started_at_utc", recorderStatus.createdAtUtc())
+          .put(
+              "started_elapsed_realtime_ns",
+              recorderStatus.startedElapsedRealtimeNs() == 0
+                  ? JSONObject.NULL
+                  : Long.toString(recorderStatus.startedElapsedRealtimeNs()))
+          .put("elapsed_ms", recorderStatus.elapsedMillis())
+          .put("video_bytes", Long.toString(recorderStatus.videoBytes()))
+          .put("audio_frames", Long.toString(recorderStatus.audioFrames()))
+          .put("error", recorderStatus.error());
+    } catch (org.json.JSONException impossible) {
+      throw new IllegalStateException("Unable to serialize field recording status", impossible);
+    }
+  }
+
+  @Override
+  public JSONObject startFieldRecording(String sharedRecordingId) {
+    CaptureConfigurationSnapshot captureConfiguration = configuration.captureSnapshot();
+    captureConfiguration.requireAssignedRole();
+    FieldDataRecorder created;
+    synchronized (this) {
+      if (fieldRecordingInProgress(fieldDataRecorder)) {
+        throw new IllegalStateException("field data recording is already active");
+      }
+      fieldRecordingStartFault.rejectIfArmed();
+      CaptureRuntime.Snapshot snapshot = RUNTIME.snapshot();
+      if ((snapshot.state() != CaptureRuntime.State.STOPPED
+              && snapshot.state() != CaptureRuntime.State.ERROR)
+          || activeCaptureConfiguration != null
+          || engine != null
+          || poseStandbyEngine != null
+          || standbyAudioRecorder != null) {
+        throw new IllegalStateException("disarm high-speed capture before field recording");
+      }
+      String recordingId = sharedRecordingId;
+      created =
+          new FieldDataRecorder(
+              this,
+              FieldDataRecorder.Config.tenMinutePortrait(
+                  recordingId,
+                  sharedRecordingId,
+                  captureConfiguration.nodeId(),
+                  captureConfiguration.role().wireName()),
+              new FieldDataRecorder.Listener() {
+                @Override
+                public void onCompleted(FieldDataRecorder.Result ignored) {
+                  finishFieldRecordingNotification(recordingId, false);
+                }
+
+                @Override
+                public void onFailure(Throwable failure) {
+                  Log.e(TAG, "Field data recording failed", failure);
+                  finishFieldRecordingNotification(recordingId, true);
+                }
+              });
+      fieldDataRecorder = created;
+      fieldRecordingStopRequested = false;
+    }
+    updateNotification("Starting 720p field data recording…");
+    controlExecutor.execute(() -> startFieldRecordingNow(created));
+    return fieldRecordingStatus();
+  }
+
+  @Override
+  public JSONObject stopFieldRecording() {
+    FieldDataRecorder current = fieldDataRecorder;
+    FieldDataRecorder.Status currentStatus = current == null ? null : current.status();
+    boolean active = currentStatus != null && fieldRecordingInProgress(currentStatus);
+    boolean failed =
+        currentStatus != null && currentStatus.state() == FieldDataRecorder.State.FAILED;
+    FieldRecordingStopPolicy.Action action =
+        FieldRecordingStopPolicy.decide(current != null, active, failed);
+    if (action == FieldRecordingStopPolicy.Action.NO_OP) {
+      return fieldRecordingStatus();
+    }
+    if (action == FieldRecordingStopPolicy.Action.ACKNOWLEDGE_FAILED) {
+      JSONObject failure = fieldRecordingStatus();
+      synchronized (this) {
+        if (fieldDataRecorder != current
+            || current.status().state() != FieldDataRecorder.State.FAILED) {
+          return fieldRecordingStatus();
+        }
+        fieldDataRecorder = null;
+        fieldRecordingStopRequested = false;
+      }
+      releaseWakeLock();
+      updateNotification("Field data recording failure acknowledged; ready to retry");
+      try {
+        return failure
+            .put("state", "idle")
+            .put("active_recording_id", JSONObject.NULL)
+            .put("acknowledged_terminal_failure", true);
+      } catch (org.json.JSONException impossible) {
+        throw new IllegalStateException(
+            "Unable to acknowledge field recording failure", impossible);
+      }
+    }
+    fieldRecordingStopRequested = true;
+    updateNotification("Stopping and publishing field data recording…");
+    controlExecutor.execute(() -> stopFieldRecordingNow(current));
+    return fieldRecordingStatus();
+  }
+
+  private void startFieldRecordingNow(FieldDataRecorder recorder) {
+    try {
+      acquireWakeLock();
+      recorder.start(fieldRecordingStartFault::failAcceptedStartIfArmed);
+      updateNotification("Recording 720p video and raw audio for field analysis");
+    } catch (Throwable failure) {
+      Log.e(TAG, "Unable to start field data recording", failure);
+      releaseWakeLock();
+    }
+  }
+
+  private void stopFieldRecordingNow(FieldDataRecorder recorder) {
+    if (recorder == null) {
+      return;
+    }
+    try {
+      if (fieldRecordingInProgress(recorder)) {
+        recorder.stop();
+      }
+    } catch (Throwable failure) {
+      Log.e(TAG, "Unable to stop field data recording", failure);
+    } finally {
+      boolean acknowledgedFailure = false;
+      synchronized (this) {
+        if (fieldDataRecorder == recorder) {
+          fieldRecordingStopRequested = false;
+          if (recorder.status().state() == FieldDataRecorder.State.FAILED) {
+            fieldDataRecorder = null;
+            acknowledgedFailure = true;
+          }
+        }
+      }
+      releaseWakeLock();
+      if (acknowledgedFailure) {
+        updateNotification("Field data recording failure acknowledged; ready to retry");
+      } else if (fieldDataRecorder == recorder) {
+        updateNotification(
+            recorder.status().state() == FieldDataRecorder.State.FAILED
+                ? "Field data recording failed"
+                : "Field data recording ready to download");
+      }
+    }
+  }
+
+  private void finishFieldRecordingNotification(String recordingId, boolean failed) {
+    FieldDataRecorder current = fieldDataRecorder;
+    if (current == null || !current.status().recordingId().equals(recordingId)) {
+      return;
+    }
+    fieldRecordingStopRequested = false;
+    releaseWakeLock();
+    updateNotification(
+        failed
+            ? "Field data recording failed"
+            : "Field data recording ready to download");
+  }
+
+  private static boolean fieldRecordingInProgress(FieldDataRecorder recorder) {
+    if (recorder == null) {
+      return false;
+    }
+    return fieldRecordingInProgress(recorder.status());
+  }
+
+  private static boolean fieldRecordingInProgress(FieldDataRecorder.Status status) {
+    return switch (status.state()) {
+      case NEW, STARTING, RECORDING, STOPPING -> true;
+      case COMPLETED, FAILED, CLOSED -> false;
+    };
+  }
+
+  private static String fieldRecordingState(
+      FieldDataRecorder.Status status, boolean stopRequested) {
+    if (stopRequested
+        && (status.state() == FieldDataRecorder.State.NEW
+            || status.state() == FieldDataRecorder.State.STARTING
+            || status.state() == FieldDataRecorder.State.RECORDING)) {
+      return "stopping";
+    }
+    return switch (status.state()) {
+      case NEW, STARTING -> "starting";
+      case RECORDING -> "recording";
+      case STOPPING -> "stopping";
+      case COMPLETED -> "ready";
+      case FAILED -> "error";
+      case CLOSED -> status.error().isEmpty() ? "ready" : "error";
+    };
   }
 
   @Override
@@ -341,12 +931,29 @@ public final class CaptureForegroundService extends Service
   }
 
   @Override
-  public void triggerPoseArm(PosePeerArmClient.Candidate candidate) {
+  public boolean triggerPoseArm(PosePeerArmClient.Candidate candidate) {
     if (candidate == null) {
       throw new IllegalArgumentException("pose-arm candidate is required");
     }
     PoseExternalArmLifecycle externalArmLifecycle;
+    long highSpeedArmRequestedElapsedRealtimeNanos;
     synchronized (this) {
+      PeerArmStatusTracker.InboundRequestDisposition disposition =
+          peerArmStatus.classifyInboundRequest(candidate.sharedSessionId());
+      if (disposition == PeerArmStatusTracker.InboundRequestDisposition.STALE) {
+        throw new IllegalStateException("pose-arm session was already completed or abandoned");
+      }
+      if (disposition == PeerArmStatusTracker.InboundRequestDisposition.DUPLICATE_ACTIVE) {
+        if (poseHighSpeedAttempt) {
+          return captureReady
+              && engine != null
+              && RUNTIME.snapshot().state() == CaptureRuntime.State.ARMED;
+        }
+        if (poseTransitionRequested) {
+          return false;
+        }
+        throw new IllegalStateException("the duplicated pose-arm session is no longer active");
+      }
       PoseStationConfigurationSnapshot poseConfiguration = activePoseConfiguration;
       CaptureConfigurationSnapshot captureConfiguration = activeCaptureConfiguration;
       if (poseConfiguration == null
@@ -376,9 +983,70 @@ public final class CaptureForegroundService extends Service
       poseTransitionRequested = true;
       poseTransitionLastPrecedence = "peer_pose_arm_claimed";
       peerArmStatus.inboundAccepted(candidate.sharedSessionId());
+      highSpeedArmRequestedElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
+      armRequestedElapsedRealtimeNanos = highSpeedArmRequestedElapsedRealtimeNanos;
     }
     controlExecutor.execute(
-        () -> beginPoseHighSpeed(candidate.sharedSessionId(), false, null, externalArmLifecycle));
+        () ->
+            beginPoseHighSpeed(
+                candidate.sharedSessionId(),
+                false,
+                null,
+                externalArmLifecycle,
+                highSpeedArmRequestedElapsedRealtimeNanos));
+    return false;
+  }
+
+  @Override
+  public void triggerPoseImpact(PosePeerArmClient.ImpactTrigger trigger) {
+    if (trigger == null) {
+      throw new IllegalArgumentException("pose-impact trigger is required");
+    }
+    ContinuousCaptureEngine current;
+    synchronized (this) {
+      PoseStationConfigurationSnapshot poseConfiguration = activePoseConfiguration;
+      CaptureConfigurationSnapshot captureConfiguration = activeCaptureConfiguration;
+      current = engine;
+      if (poseConfiguration == null
+          || captureConfiguration == null
+          || poseConfiguration.mode() != PoseNodeMode.SHADOW
+          || !poseHighSpeedAttempt
+          || current == null
+          || RUNTIME.snapshot().state() != CaptureRuntime.State.ARMED) {
+        throw new IllegalStateException("shadow high-speed capture is not ready");
+      }
+      if (captureConfiguration.nodeId().equals(trigger.leaderNodeId())) {
+        throw new IllegalArgumentException("pose leader and peer must be distinct nodes");
+      }
+      if (trigger.hasClockMapping()
+          && !captureConfiguration.nodeId().equals(trigger.targetPeerNodeId())) {
+        throw new IllegalArgumentException("peer impact clock mapping targets another node");
+      }
+    }
+    boolean mappingWithinPolicy =
+        trigger.hasClockMapping()
+            && trigger.mappingAgeAtSendNanos()
+                <= PeerClockSynchronizer.MAXIMUM_SNAPSHOT_AGE_NANOS
+            && trigger.mappingUncertaintyNanos()
+                <= PeerClockSynchronizer.MAXIMUM_SNAPSHOT_UNCERTAINTY_NANOS;
+    PosePeerArmClient.ImpactTrigger effectiveTrigger =
+        !trigger.hasClockMapping() || mappingWithinPolicy
+            ? trigger
+            : new PosePeerArmClient.ImpactTrigger(
+                trigger.sharedSessionId(),
+                trigger.leaderNodeId(),
+                trigger.leaderTriggerElapsedRealtimeNanos());
+    ContinuousCaptureEngine.TriggerAttempt attempt =
+        current.triggerPeerImpact(trigger, effectiveTrigger);
+    if (!attempt.accepted()) {
+      throw new IllegalStateException(attempt.diagnostic());
+    }
+    NodeCoordinationState.TriggerReport report = COORDINATION.latestTrigger();
+    if (report != null && report.sharedSessionId().equals(trigger.sharedSessionId())) {
+      lastPeerImpactMappingEvidence.set(
+          trigger.sharedSessionId(),
+          new PeerImpactMappingEvidence(trigger, mappingWithinPolicy, report.source()));
+    }
   }
 
   @Override
@@ -423,6 +1091,7 @@ public final class CaptureForegroundService extends Service
       poseTransitionRequested = true;
       poseTransitionLastPrecedence = "hil_leader_pose_arm_claimed";
       peerArmStatus.pending(sharedSessionId);
+      armRequestedElapsedRealtimeNanos = candidateTimestamp;
     }
     PosePeerArmClient.Candidate candidate =
         new PosePeerArmClient.Candidate(
@@ -431,9 +1100,17 @@ public final class CaptureForegroundService extends Service
             candidateTimestamp,
             1.0,
             1.0);
+    handleAutonomousTransition(
+        autonomousPair.claimSwing(sharedSessionId, candidateTimestamp));
     peerExecutor.execute(() -> requestPeerPoseArm(poseConfiguration, candidate));
     controlExecutor.execute(
-        () -> beginPoseHighSpeed(sharedSessionId, true, null, externalArmLifecycle));
+        () ->
+            beginPoseHighSpeed(
+                sharedSessionId,
+                true,
+                null,
+                externalArmLifecycle,
+                candidateTimestamp));
     return sharedSessionId;
   }
 
@@ -445,7 +1122,23 @@ public final class CaptureForegroundService extends Service
     }
     PoseStandbyEngine standby = poseStandbyEngine;
     PoseStandbyMetrics.Snapshot metrics = standby == null ? lastPoseMetrics : standby.metrics();
+    String posePhase = poseHighSpeedAttempt ? "high_speed" : "idle";
+    if (standby != null) {
+      if (metrics == null || metrics.warmupInferenceCount() == 0) {
+        posePhase = "warming_up";
+      } else if (metrics.failedWarmupInferences() != 0) {
+        posePhase = "warmup_failed";
+      } else {
+        posePhase = "monitoring";
+      }
+    }
     PoseTriggerController.Decision decision = lastPoseDecision;
+    PoseExperimentConfiguration experiment = poseExperimentConfiguration;
+    PoseStandbyEngine.ReadyStatus readyStatus = lastPoseReadyStatus;
+    PoseModelVariant modelVariant =
+        readyStatus != null
+            ? readyStatus.modelVariant()
+            : (experiment == null ? PoseModelVariant.productionDefault() : experiment.modelVariant());
     StandbyDiagnosticTelemetry.Snapshot diagnosticTelemetry =
         standbyDiagnosticTelemetry.snapshot();
     JSONObject status = new JSONObject();
@@ -454,13 +1147,25 @@ public final class CaptureForegroundService extends Service
           .put("mode", poseConfiguration.mode().wireName())
           .put("hil_pose_arm_enabled", poseArmHilEnabled)
           .put("configured_delegate", poseConfiguration.delegateWireName())
-          .put("debug_evidence_enabled", poseConfiguration.debugEvidenceEnabled())
-          .put("peer_configured", poseConfiguration.hasPeer())
+          .put("experiment_enabled", experiment != null)
+          .put("model_variant", modelVariant.wireName())
+          .put("model_asset_path", modelVariant.assetPath())
           .put(
-              "phase",
-              standby != null
-                  ? "monitoring"
-                  : (poseHighSpeedAttempt ? "high_speed" : "idle"))
+              "requested_standby_width",
+              experiment == null ? JSONObject.NULL : experiment.standbyWidth())
+          .put(
+              "requested_standby_height",
+              experiment == null ? JSONObject.NULL : experiment.standbyHeight())
+          .put(
+              "actual_standby_width",
+              readyStatus == null ? JSONObject.NULL : readyStatus.standbySize().getWidth())
+          .put(
+              "actual_standby_height",
+              readyStatus == null ? JSONObject.NULL : readyStatus.standbySize().getHeight())
+          .put("debug_evidence_enabled", poseConfiguration.debugEvidenceEnabled())
+          .put("process_cpu_time_ms", android.os.Process.getElapsedCpuTime())
+          .put("peer_configured", poseConfiguration.hasPeer())
+          .put("phase", posePhase)
           .put("transition_requested", poseTransitionRequested)
           .put("transition_last_precedence", poseTransitionLastPrecedence)
           .put(
@@ -489,10 +1194,30 @@ public final class CaptureForegroundService extends Service
                 .put("offered_images", metrics.offeredImages())
                 .put("scheduled_images", metrics.scheduledImages())
                 .put("dropped_images", metrics.droppedImages())
+                .put("successful_warmup_inferences", metrics.successfulWarmupInferences())
+                .put("failed_warmup_inferences", metrics.failedWarmupInferences())
+                .put("total_warmup_duration_ns", metrics.totalWarmupDurationNs())
+                .put("maximum_warmup_duration_ns", metrics.maximumWarmupDurationNs())
                 .put("successful_inferences", metrics.successfulInferences())
                 .put("failed_inferences", metrics.failedInferences())
                 .put("mean_inference_duration_ms", metrics.meanInferenceDurationMs())
                 .put("maximum_inference_duration_ns", metrics.maximumInferenceDurationNs())
+                .put("inference_duration_p50_ns", metrics.inferenceDurationP50Ns())
+                .put("inference_duration_p90_ns", metrics.inferenceDurationP90Ns())
+                .put("inference_duration_p95_ns", metrics.inferenceDurationP95Ns())
+                .put("inference_duration_p99_ns", metrics.inferenceDurationP99Ns())
+                .put("inference_deadline_ns", PoseStandbyMetrics.INFERENCE_DEADLINE_NS)
+                .put("inference_outlier_bound_ns", PoseStandbyMetrics.INFERENCE_OUTLIER_BOUND_NS)
+                .put("inference_deadline_misses", metrics.inferenceDeadlineMisses())
+                .put("inference_outliers", metrics.inferenceOutliers())
+                .put("decision_age_samples", metrics.decisionAgeSamples())
+                .put("rejected_decision_timestamps", metrics.rejectedDecisionTimestamps())
+                .put("mean_decision_age_ms", metrics.meanDecisionAgeMs())
+                .put("maximum_decision_age_ns", metrics.maximumDecisionAgeNs())
+                .put("decision_age_p50_ns", metrics.decisionAgeP50Ns())
+                .put("decision_age_p90_ns", metrics.decisionAgeP90Ns())
+                .put("decision_age_p95_ns", metrics.decisionAgeP95Ns())
+                .put("decision_age_p99_ns", metrics.decisionAgeP99Ns())
                 .put("retained_observation_rows", metrics.retainedObservationRows())
                 .put("failed_observation_rows", metrics.failedObservationRows())
                 .put("offered_evidence_frames", metrics.offeredEvidenceFrames())
@@ -527,6 +1252,81 @@ public final class CaptureForegroundService extends Service
               .put(
                   "failure_type",
                   peerArm.failureType().isEmpty() ? JSONObject.NULL : peerArm.failureType()));
+      AutonomousPairLifecycle.Snapshot autonomous = autonomousPair.snapshot();
+      status.put(
+          "autonomous_pair",
+          new JSONObject()
+              .put("state", autonomous.state().name().toLowerCase(java.util.Locale.ROOT))
+              .put(
+                  "active_shared_session_id",
+                  autonomous.activeSessionId().isEmpty()
+                      ? JSONObject.NULL
+                      : autonomous.activeSessionId())
+              .put("peer_available", autonomous.peerAvailable())
+              .put("peer_armed", autonomous.peerArmed())
+              .put("local_triggered", autonomous.localTriggered())
+              .put("peer_triggered", autonomous.peerTriggered())
+              .put("local_published", autonomous.localPublished())
+              .put("peer_published", autonomous.peerPublished())
+              .put("clock_fresh", autonomous.clockFresh())
+              .put("recovered_from_checkpoint", autonomousRecoveredFromCheckpoint)
+              .put("recovery_diagnostic", autonomousRecoveryDiagnostic)
+              .put("replication_backlog_size", autonomousReplicationBacklogSize)
+              .put(
+                  "last_backlog_shared_session_id",
+                  autonomousLastBacklogSessionId.isEmpty()
+                      ? JSONObject.NULL
+                      : autonomousLastBacklogSessionId)
+              .put("last_backlog_outcome", autonomousLastBacklogOutcome)
+              .put(
+                  "last_outcome",
+                  autonomous.lastOutcome().name().toLowerCase(java.util.Locale.ROOT))
+              .put(
+                  "last_completed_shared_session_id",
+                  autonomous.lastCompletedSessionId().isEmpty()
+                      ? JSONObject.NULL
+                      : autonomous.lastCompletedSessionId())
+              .put("diagnostic", autonomous.diagnostic()));
+      PeerClockSynchronizer.Snapshot peerClock = latestPeerClockSnapshot(poseConfiguration);
+      status.put(
+          "peer_clock",
+          peerClock == null
+              ? JSONObject.NULL
+              : new JSONObject()
+                  .put("peer_node_id", peerClock.peerNodeId())
+                  .put("peer_minus_local_ns", Long.toString(peerClock.peerMinusLocalNanos()))
+                  .put("uncertainty_ns", Long.toString(peerClock.uncertaintyNanos()))
+                  .put(
+                      "measured_at_elapsed_realtime_ns",
+                      Long.toString(peerClock.measuredAtLocalNanos()))
+                  .put(
+                      "age_ns",
+                      Long.toString(
+                          Math.max(
+                              0,
+                              SystemClock.elapsedRealtimeNanos()
+                                  - peerClock.measuredAtLocalNanos())))
+                  .put(
+                      "minimum_round_trip_ns",
+                      Long.toString(peerClock.minimumRoundTripNanos()))
+                  .put(
+                      "maximum_round_trip_ns",
+                      Long.toString(peerClock.maximumRoundTripNanos()))
+                  .put("sample_count", peerClock.sampleCount()));
+      PeerImpactMappingEvidence peerImpact =
+          lastPeerImpactMappingEvidence.current(COORDINATION.sharedSessionId());
+      status.put(
+          "peer_impact_mapping",
+          peerImpact == null
+              ? JSONObject.NULL
+              : peerImpact.toJson());
+      status.put(
+          "high_speed_audio",
+          new JSONObject()
+              .put("ready", engine != null && captureReady)
+              .put("maximum_peak_amplitude", audioPeakAmplitude)
+              .put("noise_floor", audioNoiseFloor)
+              .put("threshold", audioThreshold));
       StandbyAudioRecorder standbyAudio = standbyAudioRecorder;
       status.put(
           "standby_audio",
@@ -549,6 +1349,19 @@ public final class CaptureForegroundService extends Service
     } catch (org.json.JSONException impossible) {
       throw new IllegalStateException("Unable to serialize pose status", impossible);
     }
+  }
+
+  @Override
+  public NodeHttpServer.CaptureControl.SetupPreview setupPreview() {
+    SetupPreviewPayload payload = setupPreviewSnapshot();
+    SetupPreviewProvider.Snapshot preview = payload.snapshot();
+    return new NodeHttpServer.CaptureControl.SetupPreview(
+        preview.state().name().toLowerCase(java.util.Locale.ROOT),
+        preview.reason().name().toLowerCase(java.util.Locale.ROOT),
+        preview.generation(),
+        preview.frameAgeNanos(),
+        payload.imageRotationDegrees(),
+        preview.jpeg());
   }
 
   private NodeHttpServer.CaptureControl.TriggeredSession triggerOperatorCapture(
@@ -607,7 +1420,12 @@ public final class CaptureForegroundService extends Service
     RUNTIME.armed();
     updateNotification("Armed: waiting for a local audio impact");
     if (poseHighSpeedAttempt) {
-      schedulePoseNoImpactTimeout();
+      ContinuousCaptureEngine current = engine;
+      if (current != null && current.activeEvidenceTimeoutAllowed()) {
+        schedulePoseNoImpactTimeout();
+      } else {
+        schedulePoseThermalHardStopOnly();
+      }
     }
     if (continuousHilRequested) {
       if (audioHilRequested) {
@@ -642,9 +1460,9 @@ public final class CaptureForegroundService extends Service
       long audioFrames, float peakAmplitude, float noiseFloor, float threshold) {
     audioNoiseFloor = noiseFloor;
     audioThreshold = threshold;
-    if (audioHilRequested && captureReady) {
+    if (captureReady) {
       audioPeakAmplitude = Math.max(audioPeakAmplitude, peakAmplitude);
-      if (!soakHilRequested) {
+      if (audioHilRequested && !soakHilRequested) {
         writeContinuousHilArmedReport();
       }
     }
@@ -666,7 +1484,121 @@ public final class CaptureForegroundService extends Service
         triggerTimestampNanos,
         timestampUncertaintyNanos,
         source);
+    NodeCoordinationState.TriggerReport localTrigger = COORDINATION.latestTrigger();
     updateNotification("Impact detected; collecting post-roll");
+    PoseStationConfigurationSnapshot poseConfiguration = activePoseConfiguration;
+    if (poseHighSpeedAttempt
+        && poseConfiguration != null
+        && poseConfiguration.mode() == PoseNodeMode.LEADER
+        && localTrigger != null) {
+      autonomousLocalTrigger = localTrigger;
+      handleAutonomousTransition(
+          autonomousPair.localTriggered(localTrigger.sharedSessionId(), sessionId));
+    }
+    if (poseHighSpeedAttempt
+        && "local_audio".equals(source)
+        && poseConfiguration != null
+        && poseConfiguration.mode() == PoseNodeMode.LEADER
+        && poseConfiguration.hasPeer()) {
+      PosePeerArmClient.ImpactTrigger peerTrigger =
+          buildPeerImpactTrigger(
+              poseConfiguration,
+              PosePeerArmClient.sharedSessionIdForLocalTrigger(
+                  COORDINATION.latestTrigger(), sessionId),
+              captureConfiguration.nodeId(),
+              triggerTimestampNanos,
+              timestampUncertaintyNanos);
+      peerExecutor.execute(() -> requestPeerPoseImpact(poseConfiguration, peerTrigger));
+    }
+  }
+
+  private PosePeerArmClient.ImpactTrigger buildPeerImpactTrigger(
+      PoseStationConfigurationSnapshot poseConfiguration,
+      String sessionId,
+      String leaderNodeId,
+      long triggerTimestampNanos,
+      long triggerTimestampUncertaintyNanos) {
+    PeerClockSynchronizer.Snapshot snapshot = latestPeerClockSnapshot(poseConfiguration);
+    long now = SystemClock.elapsedRealtimeNanos();
+    if (snapshot != null
+        && snapshot.usableAt(
+            now,
+            PeerClockSynchronizer.MAXIMUM_SNAPSHOT_AGE_NANOS,
+            PeerClockSynchronizer.MAXIMUM_SNAPSHOT_UNCERTAINTY_NANOS)) {
+      try {
+        long mappingUncertaintyNanos =
+            Math.addExact(snapshot.uncertaintyNanos(), triggerTimestampUncertaintyNanos);
+        if (mappingUncertaintyNanos
+            > PeerClockSynchronizer.MAXIMUM_SNAPSHOT_UNCERTAINTY_NANOS) {
+          return new PosePeerArmClient.ImpactTrigger(
+              sessionId, leaderNodeId, triggerTimestampNanos);
+        }
+        return PosePeerArmClient.ImpactTrigger.mapped(
+            sessionId,
+            leaderNodeId,
+            triggerTimestampNanos,
+            snapshot.peerNodeId(),
+            snapshot.localToPeerNanos(triggerTimestampNanos),
+            mappingUncertaintyNanos,
+            Math.subtractExact(now, snapshot.measuredAtLocalNanos()),
+            snapshot.minimumRoundTripNanos(),
+            snapshot.maximumRoundTripNanos(),
+            snapshot.sampleCount());
+      } catch (ArithmeticException | IllegalArgumentException invalidMapping) {
+        Log.d(TAG, "Peer impact clock mapping overflowed; using schema 1 fallback");
+      }
+    }
+    return new PosePeerArmClient.ImpactTrigger(sessionId, leaderNodeId, triggerTimestampNanos);
+  }
+
+  private record PeerImpactMappingEvidence(
+      PosePeerArmClient.ImpactTrigger trigger,
+      boolean mappingWithinPolicy,
+      String selectedSource) {
+    private JSONObject toJson() throws org.json.JSONException {
+      return new JSONObject()
+          .put("schema_version", trigger.schemaVersion())
+          .put("shared_session_id", trigger.sharedSessionId())
+          .put("leader_node_id", trigger.leaderNodeId())
+          .put("target_peer_node_id", nullableText(trigger.targetPeerNodeId()))
+          .put(
+              "mapped_peer_trigger_elapsed_realtime_ns",
+              trigger.hasClockMapping()
+                  ? Long.toString(trigger.mappedPeerTriggerElapsedRealtimeNanos())
+                  : JSONObject.NULL)
+          .put(
+              "mapping_uncertainty_ns",
+              trigger.hasClockMapping()
+                  ? Long.toString(trigger.mappingUncertaintyNanos())
+                  : JSONObject.NULL)
+          .put(
+              "mapping_age_at_send_ns",
+              trigger.hasClockMapping()
+                  ? Long.toString(trigger.mappingAgeAtSendNanos())
+                  : JSONObject.NULL)
+          .put(
+              "minimum_round_trip_ns",
+              trigger.hasClockMapping()
+                  ? Long.toString(trigger.minimumRoundTripNanos())
+                  : JSONObject.NULL)
+          .put(
+              "maximum_round_trip_ns",
+              trigger.hasClockMapping()
+                  ? Long.toString(trigger.maximumRoundTripNanos())
+                  : JSONObject.NULL)
+          .put("sample_count", trigger.hasClockMapping() ? trigger.sampleCount() : JSONObject.NULL)
+          .put("selected_source", selectedSource)
+          .put("mapping_within_policy", mappingWithinPolicy)
+          .put(
+              "fallback_semantics",
+              trigger.hasClockMapping() && mappingWithinPolicy
+                  ? "mapped_candidate_else_arrival"
+                  : "fresh_local_candidate_else_arrival");
+    }
+
+    private static Object nullableText(String value) {
+      return value.isEmpty() ? JSONObject.NULL : value;
+    }
   }
 
   @Override
@@ -681,6 +1613,13 @@ public final class CaptureForegroundService extends Service
     boolean restartPoseStandby = poseHighSpeedAttempt && !continuousHilRequested;
     boolean operatorCapture = !continuousHilRequested && !restartPoseStandby;
     RUNTIME.published(sessionId);
+    NodeCoordinationState.TriggerReport localTrigger = autonomousLocalTrigger;
+    if (restartPoseStandby
+        && localTrigger != null
+        && localTrigger.localSessionId().equals(sessionId)) {
+      handleAutonomousTransition(
+          autonomousPair.localPublished(localTrigger.sharedSessionId(), sessionId));
+    }
     updateNotification("Armed: last published " + sessionId);
     if (continuousHilRequested) {
       if (soakHilRequested && !soakCompletionRequested) {
@@ -751,8 +1690,9 @@ public final class CaptureForegroundService extends Service
     controlExecutor.execute(this::stopEngineOnly);
   }
 
-  private void startCapture() {
+  private void startCapture(long captureArmRequestedElapsedRealtimeNanos) {
     try {
+      markSetupPreviewSourceUnavailable(SetupPreviewProvider.Reason.HIGH_SPEED_CAPTURE);
       acquireWakeLock();
       CaptureConfigurationSnapshot captureConfiguration = requireActiveCaptureConfiguration();
       ContinuousCaptureEngine created =
@@ -762,6 +1702,7 @@ public final class CaptureForegroundService extends Service
               COORDINATION.sharedSessionId(),
               audioHilRequested,
               !soakHilRequested,
+              captureArmRequestedElapsedRealtimeNanos,
               this);
       engine = created;
       created.start();
@@ -783,8 +1724,14 @@ public final class CaptureForegroundService extends Service
               poseConfiguration.delegatePolicy(),
               poseConfiguration.hittingRegion(),
               poseConfiguration.debugEvidenceEnabled());
+      PoseExperimentConfiguration experiment = poseExperimentConfiguration;
+      if (experiment != null) {
+        standbyConfig = standbyConfig.withExperiment(experiment);
+      }
+      lastPoseReadyStatus = null;
       PoseTriggerController triggerController =
           poseTriggerControllerLease.acquire(standbyConfig.controllerConfig());
+      Object previewSource = new Object();
       PoseStandbyEngine created =
           PoseStandbyEngine.start(
               this,
@@ -793,6 +1740,7 @@ public final class CaptureForegroundService extends Service
               new PoseStandbyEngine.Listener() {
                 @Override
                 public void onReady(PoseStandbyEngine.ReadyStatus ready) {
+                  lastPoseReadyStatus = ready;
                   lastPoseMetrics = createdPoseMetrics();
                   updateNotification(
                       "Pose camera ready: "
@@ -802,6 +1750,22 @@ public final class CaptureForegroundService extends Service
                           + " at 5 Hz ("
                           + ready.inferenceDelegate().name()
                           + ")");
+                }
+
+                @Override
+                public void onSetupPreviewNv21(
+                    long timestampBoottimeNanos,
+                    int width,
+                    int height,
+                    int imageRotationDegrees,
+                    byte[] nv21) {
+                  offerSetupPreviewNv21(
+                      previewSource,
+                      timestampBoottimeNanos,
+                      width,
+                      height,
+                      imageRotationDegrees,
+                      nv21);
                 }
 
                 @Override
@@ -822,6 +1786,8 @@ public final class CaptureForegroundService extends Service
                   }
                   if (decision.command() == PoseTriggerController.Command.START_HIGH_SPEED
                       && poseConfiguration.mode() == PoseNodeMode.LEADER) {
+                    long highSpeedArmRequestedElapsedRealtimeNanos =
+                        decision.armRequestedNs().orElse(evaluation.timestampNs());
                     boolean diagnosticWins = false;
                     synchronized (CaptureForegroundService.this) {
                       StandbyAudioRecorder currentAudio = standbyAudioRecorder;
@@ -849,6 +1815,8 @@ public final class CaptureForegroundService extends Service
                         poseTransitionLastPrecedence = "local_pose_arm_claimed";
                         poseThermalHardStopElapsedRealtimeNanos =
                             decision.thermalHardStopNs().orElse(0L);
+                        armRequestedElapsedRealtimeNanos =
+                            highSpeedArmRequestedElapsedRealtimeNanos;
                       }
                     }
                     if (diagnosticWins) {
@@ -879,13 +1847,22 @@ public final class CaptureForegroundService extends Service
                             evaluation.personConfidence(),
                             evaluation.addressConfidence());
                     if (poseConfiguration.hasPeer()) {
+                      handleAutonomousTransition(
+                          autonomousPair.claimSwing(
+                              sharedSessionId, evaluation.timestampNs()));
                       peerArmStatus.pending(sharedSessionId);
                       peerExecutor.execute(() -> requestPeerPoseArm(poseConfiguration, candidate));
                     } else {
                       peerArmStatus.reset();
                     }
                     controlExecutor.execute(
-                        () -> beginPoseHighSpeed(sharedSessionId, true, decision, null));
+                        () ->
+                            beginPoseHighSpeed(
+                                sharedSessionId,
+                                true,
+                                decision,
+                                null,
+                                highSpeedArmRequestedElapsedRealtimeNanos));
                   }
                 }
 
@@ -895,6 +1872,7 @@ public final class CaptureForegroundService extends Service
                 }
               });
       poseStandbyEngine = created;
+      markSetupPreviewSourceAvailable(previewSource);
       lastPoseMetrics = created.metrics();
       resetStandbyDiagnosticStatus();
       StandbyAudioRecorder createdAudio =
@@ -913,6 +1891,59 @@ public final class CaptureForegroundService extends Service
   private PoseStandbyMetrics.Snapshot createdPoseMetrics() {
     PoseStandbyEngine current = poseStandbyEngine;
     return current == null ? lastPoseMetrics : current.metrics();
+  }
+
+  private synchronized void markSetupPreviewSourceAvailable(Object source) {
+    activeSetupPreviewSource = Objects.requireNonNull(source, "source");
+    setupPreviewProvider.markSourceAvailable();
+    setupPreviewEvidenceTimestampNanos = -1L;
+    setupPreviewImageRotationDegrees = 0;
+  }
+
+  private synchronized void markSetupPreviewSourceUnavailable(SetupPreviewProvider.Reason reason) {
+    activeSetupPreviewSource = null;
+    SetupPreviewProvider.Snapshot current =
+        setupPreviewProvider.snapshot(SystemClock.elapsedRealtimeNanos());
+    if (current.reason() != reason) {
+      setupPreviewProvider.markSourceUnavailable(reason);
+    }
+    setupPreviewEvidenceTimestampNanos = -1L;
+  }
+
+  private synchronized void offerSetupPreviewNv21(
+      Object source,
+      long timestampBoottimeNanos,
+      int width,
+      int height,
+      int imageRotationDegrees,
+      byte[] nv21) {
+    if (source != activeSetupPreviewSource) {
+      return;
+    }
+    CameraImageRotation.fromSensorOrientation(imageRotationDegrees);
+    setupPreviewProvider.offerNv21(timestampBoottimeNanos, width, height, nv21);
+    setupPreviewImageRotationDegrees = imageRotationDegrees;
+  }
+
+  /** Publishes only the newest already-encoded diagnostic frame; this never touches Camera2. */
+  private synchronized SetupPreviewPayload setupPreviewSnapshot() {
+    PoseStandbyEngine standby = poseStandbyEngine;
+    if (standby != null) {
+      PreviewEvidenceRing.Snapshot evidence = standby.previewEvidenceSnapshot();
+      for (int index = evidence.entryCount() - 1; index >= 0; --index) {
+        PreviewEvidence candidate = evidence.entryAt(index);
+        if (candidate.hasCompressedFrame()
+            && candidate.timestampBoottimeNanos() > setupPreviewEvidenceTimestampNanos) {
+          setupPreviewProvider.offerEvidence(candidate);
+          setupPreviewEvidenceTimestampNanos = candidate.timestampBoottimeNanos();
+          setupPreviewImageRotationDegrees = candidate.imageRotationDegrees();
+          break;
+        }
+      }
+    }
+    return new SetupPreviewPayload(
+        setupPreviewProvider.snapshot(SystemClock.elapsedRealtimeNanos()),
+        setupPreviewImageRotationDegrees);
   }
 
   private StandbyAudioRecorder.Listener standbyAudioListener() {
@@ -1063,18 +2094,672 @@ public final class CaptureForegroundService extends Service
   private void requestPeerPoseArm(
       PoseStationConfigurationSnapshot poseConfiguration,
       PosePeerArmClient.Candidate candidate) {
+    AutomaticTriggerReadinessGate.PeerArmResolution readinessResolution =
+        AutomaticTriggerReadinessGate.PeerArmResolution.UNCONFIRMED;
+    boolean resolveCaptureGate = true;
     try {
       PosePeerArmClient.Response response =
           new PosePeerArmClient(
                   poseConfiguration.peerOrigin(), poseConfiguration.peerControlToken())
-              .arm(candidate);
-      if (!response.accepted()) {
+              .armUntilReady(
+                  candidate,
+                  PEER_ARM_MAXIMUM_ATTEMPTS,
+                  PEER_ARM_READY_MAXIMUM_PENDING_RESPONSES,
+                  PEER_ARM_RETRY_DELAY_MILLIS,
+                  () -> poseArmAttemptActive(candidate.sharedSessionId()));
+      boolean peerReady = response.accepted() && response.poseReady();
+      if (peerReady) {
+        readinessResolution = AutomaticTriggerReadinessGate.PeerArmResolution.READY;
+        peerArmStatus.response(candidate.sharedSessionId(), true, response.statusCode());
+        handleAutonomousTransition(autonomousPair.peerArmAccepted(candidate.sharedSessionId()));
+      } else if (response.accepted() || response.statusCode() >= 500) {
+        Log.e(
+            TAG,
+            "Peer did not confirm high-speed pre-roll readiness before the bounded poll ended"
+                + " (HTTP "
+                + response.statusCode()
+                + ")");
+        IllegalStateException readinessFailure =
+            new IllegalStateException("peer high-speed pre-roll readiness was not confirmed");
+        peerArmStatus.failed(candidate.sharedSessionId(), readinessFailure);
+        handleAutonomousTransition(
+            autonomousPair.peerArmUnconfirmed(
+                candidate.sharedSessionId(), "HTTP " + response.statusCode()));
+      } else {
+        readinessResolution = AutomaticTriggerReadinessGate.PeerArmResolution.FAILED;
         Log.e(TAG, "Peer rejected pose arm with HTTP " + response.statusCode());
+        peerArmStatus.response(candidate.sharedSessionId(), false, response.statusCode());
+        handleAutonomousTransition(
+            autonomousPair.peerArmFailed(
+                candidate.sharedSessionId(), "HTTP " + response.statusCode()));
       }
-      peerArmStatus.response(candidate.sharedSessionId(), response.accepted(), response.statusCode());
+    } catch (PosePeerArmClient.ArmPollingCancelledException cancelled) {
+      resolveCaptureGate = false;
+      Log.i(TAG, "Peer pose-arm readiness polling ended with its local arm lifecycle");
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      peerArmStatus.failed(candidate.sharedSessionId(), interrupted);
+      handleAutonomousTransition(
+          autonomousPair.peerArmUnconfirmed(candidate.sharedSessionId(), "interrupted"));
+      Log.e(TAG, "Peer pose-arm delivery was interrupted", interrupted);
     } catch (Throwable failure) {
+      if (!(failure instanceof IOException)) {
+        readinessResolution = AutomaticTriggerReadinessGate.PeerArmResolution.FAILED;
+      }
       peerArmStatus.failed(candidate.sharedSessionId(), failure);
+      handleAutonomousTransition(
+          failure instanceof IOException
+              ? autonomousPair.peerArmUnconfirmed(
+                  candidate.sharedSessionId(), failure.getClass().getSimpleName())
+              : autonomousPair.peerArmFailed(
+                  candidate.sharedSessionId(), failure.getClass().getSimpleName()));
       Log.e(TAG, "Unable to arm pose peer; local capture is continuing", failure);
+    } finally {
+      if (resolveCaptureGate) {
+        AutomaticTriggerReadinessGate.PeerArmResolution completedResolution = readinessResolution;
+        try {
+          controlExecutor.execute(
+              () -> resolvePeerArmForCapture(candidate.sharedSessionId(), completedResolution));
+        } catch (RejectedExecutionException shuttingDown) {
+          Log.d(TAG, "Peer arm resolution discarded during shutdown");
+        }
+      }
+    }
+  }
+
+  private boolean poseArmAttemptActive(String sharedSessionId) {
+    PeerArmStatusTracker.Snapshot snapshot = peerArmStatus.snapshot();
+    return snapshot.state() == PeerArmStatusTracker.State.PENDING
+        && snapshot.sharedSessionId().equals(sharedSessionId)
+        && (poseTransitionRequested || poseHighSpeedAttempt);
+  }
+
+  private void resolvePeerArmForCapture(
+      String sharedSessionId, AutomaticTriggerReadinessGate.PeerArmResolution resolution) {
+    ContinuousCaptureEngine current = engine;
+    if (current == null) {
+      return;
+    }
+    current.resolvePeerArmForAutomaticTriggers(sharedSessionId, resolution);
+    if (poseHighSpeedAttempt
+        && captureReady
+        && current.activeEvidenceTimeoutAllowed()
+        && poseNoImpactTimeout == null) {
+      schedulePoseActiveEvidenceTimeout();
+    }
+  }
+
+  private void handleAutonomousTransition(AutonomousPairLifecycle.Transition transition) {
+    try {
+      persistAutonomousCheckpoint(transition);
+    } catch (IOException persistenceFailure) {
+      AutonomousPairLifecycle.Transition terminal =
+          autonomousPair.durabilityFailed(persistenceFailure.getClass().getSimpleName());
+      autonomousRecoveryDiagnostic =
+          "checkpoint write failed: " + persistenceFailure.getClass().getSimpleName();
+      try {
+        persistAutonomousCheckpoint(terminal);
+      } catch (IOException stillUnavailable) {
+        Log.e(TAG, "Unable to persist terminal autonomous-pair state", stillUnavailable);
+      }
+      Log.e(TAG, "Autonomous-pair action withheld because its checkpoint was not durable", persistenceFailure);
+      return;
+    }
+    Set<AutonomousPairLifecycle.Action> actions = transition.actions();
+    try {
+      if (actions.contains(AutonomousPairLifecycle.Action.START_PEER_STANDBY)) {
+        autonomousPairExecutor.execute(this::startAutonomousPeerStandby);
+      }
+      if (actions.contains(AutonomousPairLifecycle.Action.STOP_PEER_STANDBY)) {
+        autonomousPairExecutor.execute(this::stopAutonomousPeerStandby);
+      }
+      if (actions.contains(AutonomousPairLifecycle.Action.ADMIT_PAIR)) {
+        autonomousPairExecutor.execute(this::admitAutonomousPair);
+      }
+      if (actions.contains(AutonomousPairLifecycle.Action.STORE_LOCAL_RECORD)) {
+        autonomousPairExecutor.execute(this::storeAutonomousPairLocally);
+      }
+      if (actions.contains(AutonomousPairLifecycle.Action.REPLICATE_RECORD_TO_PEER)) {
+        autonomousPairExecutor.execute(this::replicateAutonomousPairToPeer);
+      }
+      if (actions.contains(AutonomousPairLifecycle.Action.REARM_LOCAL)
+          || actions.contains(AutonomousPairLifecycle.Action.REARM_PEER)) {
+        autonomousPairExecutor.execute(this::completeAutonomousRearm);
+      }
+    } catch (RejectedExecutionException shuttingDown) {
+      Log.d(TAG, "Autonomous pair action discarded during shutdown");
+    }
+  }
+
+  private void persistAutonomousCheckpoint(AutonomousPairLifecycle.Transition transition)
+      throws IOException {
+    AutonomousPairDurableStore durableStore = autonomousPairDurableStore;
+    if (durableStore == null) {
+      throw new IOException("autonomous-pair durable store is unavailable");
+    }
+    AutonomousPairLifecycle.Snapshot snapshot = transition.snapshot();
+    if (snapshot.state() == AutonomousPairLifecycle.State.STOPPED) {
+      durableStore.clearCheckpoint();
+      return;
+    }
+    PairedCoordinationRecord pending = autonomousPendingRecord;
+    Optional<PairedCoordinationRecord> durablePending =
+        pending != null && pending.sharedSessionId().equals(snapshot.activeSessionId())
+            ? Optional.of(pending)
+            : Optional.empty();
+    durableStore.saveCheckpoint(transition.checkpoint(), durablePending);
+  }
+
+  private void startAutonomousPeerStandby() {
+    PoseStationConfigurationSnapshot poseConfiguration = autonomousPeerConfiguration;
+    if (poseConfiguration == null
+        || poseConfiguration.mode() != PoseNodeMode.LEADER
+        || !poseConfiguration.hasPeer()) {
+      return;
+    }
+    try {
+      AutonomousPairPeerClient.Response response =
+          new AutonomousPairPeerClient(
+                  poseConfiguration.peerOrigin(), poseConfiguration.peerControlToken())
+              .setStandbyWithRetries(
+                  true,
+                  AUTONOMOUS_PEER_MAXIMUM_ATTEMPTS,
+                  AUTONOMOUS_PEER_RETRY_DELAY_MILLIS);
+      handleAutonomousTransition(
+          response.accepted()
+              ? autonomousPair.peerStandbyStarted()
+              : autonomousPair.peerUnavailable("station start HTTP " + response.statusCode()));
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      handleAutonomousTransition(autonomousPair.peerUnavailable("station start interrupted"));
+    } catch (Exception failure) {
+      handleAutonomousTransition(
+          autonomousPair.peerUnavailable(
+              "station start " + failure.getClass().getSimpleName()));
+    }
+  }
+
+  private void stopAutonomousPeerStandby() {
+    PoseStationConfigurationSnapshot poseConfiguration = autonomousPeerConfiguration;
+    try {
+      if (poseConfiguration != null && poseConfiguration.hasPeer()) {
+        new AutonomousPairPeerClient(
+                poseConfiguration.peerOrigin(), poseConfiguration.peerControlToken())
+            .setStandbyWithRetries(
+                false,
+                AUTONOMOUS_PEER_MAXIMUM_ATTEMPTS,
+                AUTONOMOUS_PEER_RETRY_DELAY_MILLIS);
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+    } catch (Exception failure) {
+      Log.i(TAG, "Peer was unavailable while stopping autonomous station", failure);
+    } finally {
+      if (autonomousPair.snapshot().state() == AutonomousPairLifecycle.State.STOPPING) {
+        handleAutonomousTransition(autonomousPair.stopped());
+      }
+      autonomousPeerConfiguration = null;
+      clearAutonomousPairEvidence();
+    }
+  }
+
+  private void maintainAutonomousPair() {
+    try {
+      PoseStationConfigurationSnapshot poseConfiguration = activePoseConfiguration;
+      if (poseConfiguration == null || poseConfiguration.mode() != PoseNodeMode.LEADER) {
+        return;
+      }
+      AutonomousPairLifecycle.Snapshot snapshot = autonomousPair.snapshot();
+      if (snapshot.state() == AutonomousPairLifecycle.State.MONITORING
+          || snapshot.state() == AutonomousPairLifecycle.State.DEGRADED_MONITORING) {
+        retryAutonomousReplicationBacklog(poseConfiguration);
+        snapshot = autonomousPair.snapshot();
+        if (snapshot.state() == AutonomousPairLifecycle.State.TERMINAL_FAILURE) {
+          return;
+        }
+      }
+      if (snapshot.state() == AutonomousPairLifecycle.State.DEGRADED_MONITORING) {
+        handleAutonomousTransition(autonomousPair.retryPeer());
+        return;
+      }
+      if (snapshot.localTriggered()
+          && (snapshot.state() == AutonomousPairLifecycle.State.WAITING_EVIDENCE
+              || snapshot.state() == AutonomousPairLifecycle.State.CAPTURING
+              || snapshot.state() == AutonomousPairLifecycle.State.ARMING_SWING)) {
+        pollAutonomousPeerEvidence(poseConfiguration, snapshot);
+      }
+      handleAutonomousTransition(autonomousPair.tick(SystemClock.elapsedRealtimeNanos()));
+    } catch (Throwable failure) {
+      Log.e(TAG, "Autonomous pair maintenance failed", failure);
+    }
+  }
+
+  private void retryAutonomousReplicationBacklog(
+      PoseStationConfigurationSnapshot poseConfiguration) {
+    AutonomousPairDurableStore durableStore = autonomousPairDurableStore;
+    if (durableStore == null || !poseConfiguration.hasPeer()) {
+      return;
+    }
+    long now = SystemClock.elapsedRealtimeNanos();
+    long previous = autonomousLastBacklogAttemptElapsedRealtimeNanos;
+    if (previous != 0 && now - previous < AUTONOMOUS_BACKLOG_RETRY_INTERVAL_NANOS) {
+      return;
+    }
+    autonomousLastBacklogAttemptElapsedRealtimeNanos = now;
+    try {
+      List<PairedCoordinationRecord> backlog = durableStore.backlog();
+      autonomousReplicationBacklogSize = backlog.size();
+      if (backlog.isEmpty()) {
+        return;
+      }
+      PairedCoordinationRecord record = backlog.get(0);
+      autonomousLastBacklogSessionId = record.sharedSessionId();
+      AutonomousPairPeerClient.Response response =
+          new AutonomousPairPeerClient(
+                  poseConfiguration.peerOrigin(), poseConfiguration.peerControlToken())
+              .storeCoordinationRecord(record);
+      if (response.statusCode() == 409) {
+        autonomousLastBacklogOutcome = "conflict";
+        handleAutonomousTransition(
+            autonomousPair.backlogReplicationConflict(record.sharedSessionId()));
+        return;
+      }
+      if (!response.accepted()) {
+        autonomousLastBacklogOutcome = "http_" + response.statusCode();
+        return;
+      }
+      durableStore.markReplicated(record);
+      autonomousReplicationBacklogSize = durableStore.backlogSize();
+      autonomousLastBacklogOutcome = "replicated";
+    } catch (IOException failure) {
+      autonomousLastBacklogOutcome = "unavailable_" + failure.getClass().getSimpleName();
+      Log.i(TAG, "Autonomous-pair replication backlog remains pending", failure);
+    }
+  }
+
+  private void pollAutonomousPeerEvidence(
+      PoseStationConfigurationSnapshot poseConfiguration,
+      AutonomousPairLifecycle.Snapshot snapshot)
+      throws Exception {
+    AutonomousPairPeerClient client =
+        new AutonomousPairPeerClient(
+            poseConfiguration.peerOrigin(), poseConfiguration.peerControlToken());
+    NodeCoordinationState.TriggerReport peerTrigger = autonomousPeerTrigger;
+    if (peerTrigger == null) {
+      AutonomousPairPeerClient.Response response = client.triggerReport();
+      if (response.statusCode() == 404) {
+        return;
+      }
+      if (!response.accepted()) {
+        handleAutonomousTransition(
+            autonomousPair.peerUnavailable("trigger report HTTP " + response.statusCode()));
+        return;
+      }
+      peerTrigger = parseAutonomousPeerTrigger(response.body());
+      PeerClockSynchronizer.Snapshot clock = latestPeerClockSnapshot(poseConfiguration);
+      long now = SystemClock.elapsedRealtimeNanos();
+      boolean freshClock =
+          clock != null
+              && clock.peerNodeId().equals(peerTrigger.nodeId())
+              && clock.usableAt(
+                  now,
+                  PeerClockSynchronizer.MAXIMUM_SNAPSHOT_AGE_NANOS,
+                  PeerClockSynchronizer.MAXIMUM_SNAPSHOT_UNCERTAINTY_NANOS);
+      autonomousPeerTrigger = peerTrigger;
+      autonomousPeerClock = freshClock ? clock : null;
+      handleAutonomousTransition(
+          autonomousPair.peerTriggered(
+              peerTrigger.sharedSessionId(), peerTrigger.localSessionId(), freshClock));
+      if (autonomousPair.snapshot().state() == AutonomousPairLifecycle.State.TERMINAL_FAILURE) {
+        return;
+      }
+    }
+    if (!snapshot.peerPublished()) {
+      AutonomousPairPeerClient.PublicationProbe publication =
+          client.publishedCapture(peerTrigger.localSessionId(), peerTrigger.role());
+      if (publication.published()) {
+        handleAutonomousTransition(
+            autonomousPair.peerPublished(
+                peerTrigger.sharedSessionId(), peerTrigger.localSessionId()));
+      } else if (publication.statusCode() != 404) {
+        handleAutonomousTransition(
+            autonomousPair.peerUnavailable(
+                "peer publication "
+                    + publication.stage()
+                    + " HTTP "
+                    + publication.statusCode()));
+      }
+    }
+  }
+
+  private static NodeCoordinationState.TriggerReport parseAutonomousPeerTrigger(String json)
+      throws Exception {
+    JSONObject body = new JSONObject(json);
+    Set<String> fields =
+        Set.of(
+            "schema_version",
+            "role",
+            "node_id",
+            "shared_session_id",
+            "local_session_id",
+            "trigger_elapsed_realtime_ns",
+            "timestamp_uncertainty_ns",
+            "source");
+    if (body.length() != fields.size() || body.getInt("schema_version") != 1) {
+      throw new IllegalArgumentException("peer trigger report fields do not match schema 1");
+    }
+    for (String field : fields) {
+      if (!body.has(field) || body.isNull(field)) {
+        throw new IllegalArgumentException("peer trigger report is missing " + field);
+      }
+    }
+    String timestamp = body.getString("trigger_elapsed_realtime_ns");
+    long parsedTimestamp = Long.parseLong(timestamp);
+    if (!Long.toString(parsedTimestamp).equals(timestamp)) {
+      throw new IllegalArgumentException("peer trigger timestamp is not canonical decimal");
+    }
+    Object uncertaintyValue = body.get("timestamp_uncertainty_ns");
+    if (!(uncertaintyValue instanceof Integer) && !(uncertaintyValue instanceof Long)) {
+      throw new IllegalArgumentException("peer trigger uncertainty must be an integer");
+    }
+    return new NodeCoordinationState.TriggerReport(
+        body.getString("role"),
+        body.getString("node_id"),
+        body.getString("shared_session_id"),
+        body.getString("local_session_id"),
+        parsedTimestamp,
+        ((Number) uncertaintyValue).longValue(),
+        body.getString("source"));
+  }
+
+  private void admitAutonomousPair() {
+    String sharedSessionId = autonomousPair.snapshot().activeSessionId();
+    try {
+      NodeCoordinationState.TriggerReport local =
+          Objects.requireNonNull(autonomousLocalTrigger, "local trigger");
+      NodeCoordinationState.TriggerReport peer =
+          Objects.requireNonNull(autonomousPeerTrigger, "peer trigger");
+      PeerClockSynchronizer.Snapshot peerClock =
+          Objects.requireNonNull(autonomousPeerClock, "fresh peer clock");
+      if (!sharedSessionId.equals(local.sharedSessionId())
+          || !sharedSessionId.equals(peer.sharedSessionId())) {
+        throw new IllegalArgumentException("trigger reports contain split shared sessions");
+      }
+
+      PairedCoordinationRecord.NodeEvidence localEvidence =
+          durableNodeEvidence(
+              sharedSessionId,
+              local,
+              new ClockOffsetEstimate(local.nodeId(), 0, 0, 0, 0, 1));
+      PairedCoordinationRecord.NodeEvidence peerEvidence =
+          durableNodeEvidence(
+              sharedSessionId,
+              peer,
+              new ClockOffsetEstimate(
+                  peer.nodeId(),
+                  peerClock.peerMinusLocalNanos(),
+                  peerClock.uncertaintyNanos(),
+                  peerClock.minimumRoundTripNanos(),
+                  peerClock.maximumRoundTripNanos(),
+                  peerClock.sampleCount()));
+      if (localEvidence.mappedCoordinatorUncertaintyNs() > 10_000_000L
+          || peerEvidence.mappedCoordinatorUncertaintyNs() > 10_000_000L
+          || Math.addExact(
+                  localEvidence.mappedCoordinatorUncertaintyNs(),
+                  peerEvidence.mappedCoordinatorUncertaintyNs())
+              > 20_000_000L) {
+        throw new IllegalArgumentException("paired trigger uncertainty exceeds policy");
+      }
+      PairedCoordinationRecord record =
+          localEvidence.role()
+                  == com.agoessling.swingcapture.core.coordination.CaptureRole.DOWN_THE_LINE
+              ? PairedCoordinationRecord.create(
+                  sharedSessionId, System.currentTimeMillis(), localEvidence, peerEvidence)
+              : PairedCoordinationRecord.create(
+                  sharedSessionId, System.currentTimeMillis(), peerEvidence, localEvidence);
+      if (record.maximumTriggerSeparationNs() > 50_000_000L) {
+        throw new IllegalArgumentException("dual triggers cannot prove a match within 50 ms");
+      }
+      autonomousPendingRecord = record;
+      handleAutonomousTransition(autonomousPair.pairAdmitted(sharedSessionId));
+    } catch (Throwable failure) {
+      Log.e(TAG, "Autonomous pair admission failed", failure);
+      handleAutonomousTransition(
+          autonomousPair.pairAdmissionFailed(
+              sharedSessionId, failure.getClass().getSimpleName()));
+    }
+  }
+
+  private static PairedCoordinationRecord.NodeEvidence durableNodeEvidence(
+      String sharedSessionId,
+      NodeCoordinationState.TriggerReport report,
+      ClockOffsetEstimate clock) {
+    com.agoessling.swingcapture.core.coordination.NodeTriggerReport coreReport =
+        new com.agoessling.swingcapture.core.coordination.NodeTriggerReport(
+            com.agoessling.swingcapture.core.coordination.CaptureRole.parse(report.role()),
+            report.nodeId(),
+            report.sharedSessionId(),
+            report.triggerElapsedRealtimeNanos(),
+            report.timestampUncertaintyNanos());
+    return PairedCoordinationRecord.NodeEvidence.map(
+        sharedSessionId, coreReport, report.localSessionId(), report.source(), clock);
+  }
+
+  private void storeAutonomousPairLocally() {
+    PairedCoordinationRecord record = autonomousPendingRecord;
+    CoordinationRecordStore store = coordinationRecords;
+    AutonomousPairDurableStore durableStore = autonomousPairDurableStore;
+    if (record == null || store == null || durableStore == null) {
+      return;
+    }
+    AutonomousPairLifecycle.ImmutableStoreOutcome outcome;
+    try {
+      CoordinationRecordStore.StoreStatus status = store.storeIfAbsent(record).status();
+      outcome =
+          switch (status) {
+            case STORED -> AutonomousPairLifecycle.ImmutableStoreOutcome.STORED;
+            case ALREADY_PRESENT -> AutonomousPairLifecycle.ImmutableStoreOutcome.ALREADY_PRESENT;
+            case CONFLICT -> AutonomousPairLifecycle.ImmutableStoreOutcome.CONFLICT;
+          };
+      if (outcome != AutonomousPairLifecycle.ImmutableStoreOutcome.CONFLICT) {
+        AutonomousPairDurableStore.EnqueueStatus enqueue = durableStore.enqueue(record);
+        if (enqueue == AutonomousPairDurableStore.EnqueueStatus.CONFLICT) {
+          outcome = AutonomousPairLifecycle.ImmutableStoreOutcome.CONFLICT;
+          autonomousLastBacklogOutcome = "local_conflict";
+        } else {
+          autonomousReplicationBacklogSize = durableStore.backlogSize();
+          autonomousLastBacklogSessionId = record.sharedSessionId();
+          autonomousLastBacklogOutcome = "queued";
+        }
+      }
+    } catch (IOException failure) {
+      autonomousLastBacklogOutcome = "durability_unavailable";
+      handleAutonomousTransition(
+          autonomousPair.durabilityFailed(failure.getClass().getSimpleName()));
+      return;
+    }
+    handleAutonomousTransition(
+        autonomousPair.localRecordStored(record.sharedSessionId(), outcome));
+  }
+
+  private void replicateAutonomousPairToPeer() {
+    PairedCoordinationRecord record = autonomousPendingRecord;
+    PoseStationConfigurationSnapshot poseConfiguration = autonomousPeerConfiguration;
+    AutonomousPairDurableStore durableStore = autonomousPairDurableStore;
+    if (record == null || poseConfiguration == null || durableStore == null) {
+      return;
+    }
+    AutonomousPairLifecycle.ImmutableStoreOutcome outcome;
+    try {
+      AutonomousPairPeerClient.Response response =
+          new AutonomousPairPeerClient(
+                  poseConfiguration.peerOrigin(), poseConfiguration.peerControlToken())
+              .storeCoordinationRecord(record);
+      outcome =
+          response.statusCode() == 409
+              ? AutonomousPairLifecycle.ImmutableStoreOutcome.CONFLICT
+              : (response.accepted()
+                  ? AutonomousPairLifecycle.ImmutableStoreOutcome.STORED
+                  : AutonomousPairLifecycle.ImmutableStoreOutcome.UNAVAILABLE);
+      if (outcome == AutonomousPairLifecycle.ImmutableStoreOutcome.STORED) {
+        durableStore.markReplicated(record);
+        autonomousReplicationBacklogSize = durableStore.backlogSize();
+        autonomousLastBacklogSessionId = record.sharedSessionId();
+        autonomousLastBacklogOutcome = "replicated";
+      } else if (outcome == AutonomousPairLifecycle.ImmutableStoreOutcome.CONFLICT) {
+        autonomousLastBacklogSessionId = record.sharedSessionId();
+        autonomousLastBacklogOutcome = "conflict";
+      } else {
+        autonomousLastBacklogOutcome = "pending_http_" + response.statusCode();
+      }
+    } catch (IOException failure) {
+      outcome = AutonomousPairLifecycle.ImmutableStoreOutcome.UNAVAILABLE;
+      autonomousLastBacklogOutcome = "pending_" + failure.getClass().getSimpleName();
+    }
+    handleAutonomousTransition(
+        autonomousPair.peerRecordStored(record.sharedSessionId(), outcome));
+  }
+
+  private void completeAutonomousRearm() {
+    if (autonomousPair.snapshot().state() != AutonomousPairLifecycle.State.REARMING) {
+      return;
+    }
+    boolean peerReady = autonomousPair.snapshot().peerAvailable();
+    handleAutonomousTransition(autonomousPair.rearmed(peerReady));
+    clearAutonomousPairEvidence();
+  }
+
+  private void clearAutonomousPairEvidence() {
+    autonomousLocalTrigger = null;
+    autonomousPeerTrigger = null;
+    autonomousPeerClock = null;
+    autonomousPendingRecord = null;
+  }
+
+  private void pollPeerClock() {
+    try {
+      PeerClockTarget target = configuredPeerClockTarget();
+      if (target == null) {
+        synchronized (peerClockMonitor) {
+          clearPeerClockStateLocked();
+        }
+        return;
+      }
+      PeerClockClient.Exchange exchange =
+          new PeerClockClient(
+                  target.origin(),
+                  target.peerNodeId(),
+                  SystemClock::elapsedRealtimeNanos,
+                  PeerClockJsonResponseParser::parse)
+              .exchange();
+      consecutivePeerClockFailures = 0;
+      synchronized (peerClockMonitor) {
+        PeerClockTarget current = configuredPeerClockTarget();
+        if (!target.equals(current)) {
+          clearPeerClockStateLocked();
+          return;
+        }
+        if (!target.origin().equals(peerClockOrigin)
+            || peerClockSynchronizer == null
+            || !target.peerNodeId().equals(peerClockSynchronizer.peerNodeId())) {
+          peerClockOrigin = target.origin();
+          peerClockSynchronizer =
+              new PeerClockSynchronizer(target.origin(), target.peerNodeId());
+        }
+        peerClockSynchronizer.record(exchange.sample());
+      }
+    } catch (Exception failure) {
+      // Clock evidence is optional. The terminal path retains its local/arrival fallback and must
+      // not be affected by a peer reboot, Wi-Fi outage, malformed response, or poller failure.
+      long now = SystemClock.elapsedRealtimeNanos();
+      ++consecutivePeerClockFailures;
+      if (consecutivePeerClockFailures >= 3) {
+        PoseStationConfigurationSnapshot poseConfiguration = activePoseConfiguration;
+        if (poseConfiguration != null && poseConfiguration.mode() == PoseNodeMode.LEADER) {
+          handleAutonomousTransition(
+              autonomousPair.peerUnavailable("three consecutive clock exchanges failed"));
+        }
+      }
+      if (lastPeerClockFailureLogElapsedRealtimeNanos == 0
+          || now - lastPeerClockFailureLogElapsedRealtimeNanos
+              >= PEER_CLOCK_FAILURE_LOG_INTERVAL_NANOS) {
+        lastPeerClockFailureLogElapsedRealtimeNanos = now;
+        Log.d(
+            TAG,
+            "Peer clock exchange unavailable: "
+                + failure.getClass().getSimpleName()
+                + ": "
+                + String.valueOf(failure.getMessage()));
+      }
+    }
+  }
+
+  private record PeerClockTarget(String origin, String peerNodeId) {}
+
+  /** Uses only the authenticated durable pairing as identity for the public clock hint. */
+  private PeerClockTarget configuredPeerClockTarget() {
+    NodeConfiguration.StationConfiguration station = configuration.stationConfiguration();
+    PoseStationConfigurationSnapshot poseConfiguration = activePoseConfiguration;
+    if (poseConfiguration == null) {
+      poseConfiguration = station.pose();
+    }
+    if (!poseConfiguration.hasPeer()) {
+      return null;
+    }
+    PeerPairingBinding binding = station.pairing().orElse(null);
+    if (binding == null
+        || binding.state() != PeerPairingBinding.State.ACTIVE
+        || !binding.origin().equals(poseConfiguration.peerOrigin())) {
+      return null;
+    }
+    return new PeerClockTarget(binding.origin(), binding.peerNodeId());
+  }
+
+  private PeerClockSynchronizer.Snapshot latestPeerClockSnapshot(
+      PoseStationConfigurationSnapshot poseConfiguration) {
+    synchronized (peerClockMonitor) {
+      if (!poseConfiguration.hasPeer()
+          || !poseConfiguration.peerOrigin().equals(peerClockOrigin)
+          || peerClockSynchronizer == null) {
+        clearPeerClockStateLocked();
+        return null;
+      }
+      PeerClockSynchronizer.Snapshot snapshot = peerClockSynchronizer.snapshot().orElse(null);
+      if (snapshot == null
+          || !snapshot.belongsTo(
+              poseConfiguration.peerOrigin(), peerClockSynchronizer.peerNodeId())) {
+        clearPeerClockStateLocked();
+        return null;
+      }
+      return snapshot;
+    }
+  }
+
+  /** Called only while {@link #peerClockMonitor} is held. */
+  private void clearPeerClockStateLocked() {
+    peerClockOrigin = "";
+    peerClockSynchronizer = null;
+  }
+
+  private void requestPeerPoseImpact(
+      PoseStationConfigurationSnapshot poseConfiguration,
+      PosePeerArmClient.ImpactTrigger trigger) {
+    try {
+      PosePeerArmClient.Response response =
+          new PosePeerArmClient(
+                  poseConfiguration.peerOrigin(), poseConfiguration.peerControlToken())
+              .triggerImpactWithRetriesAndMappingFallback(
+                  trigger,
+                  PEER_IMPACT_MAXIMUM_ATTEMPTS,
+                  PEER_IMPACT_RETRY_DELAY_MILLIS);
+      if (!response.accepted()) {
+        Log.e(TAG, "Peer rejected pose impact with HTTP " + response.statusCode());
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      Log.e(TAG, "Peer impact delivery was interrupted", interrupted);
+    } catch (Throwable failure) {
+      Log.e(TAG, "Unable to trigger pose peer impact; leader capture is continuing", failure);
     }
   }
 
@@ -1082,7 +2767,8 @@ public final class CaptureForegroundService extends Service
       String sharedSessionId,
       boolean leaderInitiated,
       PoseTriggerController.Decision decision,
-      PoseExternalArmLifecycle externalArmLifecycle) {
+      PoseExternalArmLifecycle externalArmLifecycle,
+      long highSpeedArmRequestedElapsedRealtimeNanos) {
     WarmCameraLease warmCamera = null;
     try {
       PoseStandbyEngine standby = poseStandbyEngine;
@@ -1120,6 +2806,7 @@ public final class CaptureForegroundService extends Service
           leaderInitiated
               ? "Pose detected address; starting 720p240…"
               : "Pose leader requested 720p240…");
+      markSetupPreviewSourceUnavailable(SetupPreviewProvider.Reason.HIGH_SPEED_CAPTURE);
       warmCamera = standby.transferToHighSpeed();
       lastPoseMetrics = standby.metrics();
       PreviewEvidenceRing.Snapshot previewSnapshot = standby.previewEvidenceSnapshot();
@@ -1135,13 +2822,13 @@ public final class CaptureForegroundService extends Service
           PoseHighSpeedNoImpactDeadline.fromDecision(decision);
       poseNoImpactDeadline = noImpactDeadline;
       poseThermalHardStopElapsedRealtimeNanos = noImpactDeadline.thermalHardStopNs();
+      lastPeerImpactMappingEvidence.clear();
       COORDINATION.armed(sharedSessionId);
       RUNTIME.transitioningToHighSpeed();
       if (currentAudio != null) {
         closeStandbyAudioRecorder();
       }
       CaptureConfigurationSnapshot captureConfiguration = requireActiveCaptureConfiguration();
-      armRequestedElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
       poseHighSpeedAttempt = true;
       ContinuousCaptureEngine created =
           new ContinuousCaptureEngine(
@@ -1149,17 +2836,36 @@ public final class CaptureForegroundService extends Service
               captureConfiguration,
               sharedSessionId,
               poseArmHilEnabled,
-              true,
+              leaderInitiated,
               warmCamera,
               previewSnapshot,
               peerArmStatus,
+              leaderInitiated && requireActivePoseConfiguration().hasPeer(),
+              highSpeedArmRequestedElapsedRealtimeNanos,
               this);
       engine = created;
+      PeerArmStatusTracker.Snapshot peerArmSnapshot = peerArmStatus.snapshot();
+      if (peerArmSnapshot.sharedSessionId().equals(sharedSessionId)
+          && peerArmSnapshot.state() != PeerArmStatusTracker.State.PENDING) {
+        AutomaticTriggerReadinessGate.PeerArmResolution completedResolution =
+            switch (peerArmSnapshot.state()) {
+              case ACCEPTED -> AutomaticTriggerReadinessGate.PeerArmResolution.READY;
+              case REJECTED -> AutomaticTriggerReadinessGate.PeerArmResolution.FAILED;
+              case FAILED -> AutomaticTriggerReadinessGate.PeerArmResolution.UNCONFIRMED;
+              case NOT_REQUESTED, PENDING, INBOUND_ACCEPTED -> null;
+            };
+        if (completedResolution != null) {
+          created.resolvePeerArmForAutomaticTriggers(sharedSessionId, completedResolution);
+        }
+      }
       warmCamera = null;
       created.start();
     } catch (Throwable failure) {
       if (warmCamera != null) {
         warmCamera.close();
+      }
+      if (!leaderInitiated) {
+        peerArmStatus.inboundFailed(sharedSessionId, failure);
       }
       onFailure(failure);
     }
@@ -1190,13 +2896,23 @@ public final class CaptureForegroundService extends Service
 
   private void schedulePoseNoImpactTimeout() {
     cancelPoseNoImpactTimeout();
-    long now = SystemClock.elapsedRealtimeNanos();
+    schedulePoseActiveEvidenceTimeout();
+    schedulePoseThermalHardStopTimeout();
+  }
+
+  private void schedulePoseThermalHardStopOnly() {
+    cancelPoseNoImpactTimeout();
+    schedulePoseThermalHardStopTimeout();
+  }
+
+  private void schedulePoseActiveEvidenceTimeout() {
+    cancelPoseActiveEvidenceTimeout();
     PoseHighSpeedNoImpactDeadline.Deadline deadline = poseNoImpactDeadline;
     if (deadline == null) {
       onFailure(new IllegalStateException("Pose no-impact deadline is unavailable"));
       return;
     }
-    long delayNanos = deadline.delayFrom(now);
+    long delayNanos = deadline.delayFrom(SystemClock.elapsedRealtimeNanos());
     poseNoImpactTimeout =
         poseTimeoutExecutor.schedule(
             () ->
@@ -1228,6 +2944,15 @@ public final class CaptureForegroundService extends Service
                     }),
             delayNanos,
             TimeUnit.NANOSECONDS);
+  }
+
+  private void schedulePoseThermalHardStopTimeout() {
+    cancelPoseThermalHardStopTimeout();
+    PoseHighSpeedNoImpactDeadline.Deadline deadline = poseNoImpactDeadline;
+    if (deadline == null) {
+      onFailure(new IllegalStateException("Pose no-impact deadline is unavailable"));
+      return;
+    }
     poseThermalHardStopTimeout =
         poseTimeoutExecutor.schedule(
             () ->
@@ -1248,7 +2973,7 @@ public final class CaptureForegroundService extends Service
                           new IllegalStateException(
                               "Pose 240 fps capture exceeded its absolute thermal hard cap"));
                     }),
-            deadline.thermalHardCapDelayFrom(now),
+            deadline.thermalHardCapDelayFrom(SystemClock.elapsedRealtimeNanos()),
             TimeUnit.NANOSECONDS);
   }
 
@@ -1262,6 +2987,10 @@ public final class CaptureForegroundService extends Service
 
   private void cancelPoseNoImpactTimeout() {
     cancelPoseActiveEvidenceTimeout();
+    cancelPoseThermalHardStopTimeout();
+  }
+
+  private void cancelPoseThermalHardStopTimeout() {
     ScheduledFuture<?> hardStop = poseThermalHardStopTimeout;
     poseThermalHardStopTimeout = null;
     if (hardStop != null) {
@@ -1296,6 +3025,7 @@ public final class CaptureForegroundService extends Service
     closeStandbyAudioRecorder();
     PoseStandbyEngine currentPose = poseStandbyEngine;
     poseStandbyEngine = null;
+    markSetupPreviewSourceUnavailable(SetupPreviewProvider.Reason.SOURCE_PAUSED);
     if (currentPose != null) {
       lastPoseMetrics = currentPose.metrics();
       currentPose.close();
@@ -1348,20 +3078,28 @@ public final class CaptureForegroundService extends Service
     return captureConfiguration;
   }
 
+  private DeviceCapabilityPolicy.HardwareSnapshot currentDeviceCapabilities() {
+    return deviceCapabilities.withPermissions(
+        checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED,
+        checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED);
+  }
+
   private void startServer() {
     try {
-      CoordinationRecordStore coordinationRecords =
+      CoordinationRecordStore createdCoordinationRecords =
           new CoordinationRecordStore(
               new CoordinationFileTextStore(
                   new File(getFilesDir(), "coordination"), AndroidDirectorySync::synchronize));
+      coordinationRecords = createdCoordinationRecords;
       server =
           new NodeHttpServer(
               this,
               configuration,
               RUNTIME,
               COORDINATION,
-              coordinationRecords,
+              createdCoordinationRecords,
               this,
+              deviceCapabilities,
               NodeHttpServer.DEFAULT_PORT);
       server.start();
       advertisedUrls = List.copyOf(server.advertisedUrls());
@@ -1493,43 +3231,15 @@ public final class CaptureForegroundService extends Service
     }
     ContinuousCaptureEngine current = engine;
     if (current != null) {
-      CaptureStartupTiming startupTiming =
-          current.startupTiming(armRequestedElapsedRealtimeNanos).orElse(null);
+      CaptureStartupTimingManifest startupTiming =
+          current.startupTimingManifest().orElse(null);
       if (startupTiming != null) {
         report.put(
-            "startup_timing",
-            startupTimingJson(startupTiming)
-                .put(
-                    "startup_continuity_reset_count",
-                    Long.toString(current.startupContinuityResetCount()))
-                .put(
-                    "maximum_startup_continuity_gap_ns",
-                    Long.toString(current.maximumStartupContinuityGapNanos())));
+            CaptureStartupTimingManifest.MANIFEST_FIELD_NAME,
+            new JSONObject(startupTiming.toCanonicalJson()));
       }
     }
     return report;
-  }
-
-  private static JSONObject startupTimingJson(CaptureStartupTiming timing) throws Exception {
-    return new JSONObject()
-        .put("arm_requested_elapsed_realtime_ns", Long.toString(timing.armRequestedNs()))
-        .put("engine_started_elapsed_realtime_ns", Long.toString(timing.engineStartedNs()))
-        .put("first_camera_frame_elapsed_realtime_ns", Long.toString(timing.firstCameraFrameNs()))
-        .put(
-            "first_usable_encoded_frame_elapsed_realtime_ns",
-            Long.toString(timing.firstUsableEncodedFrameNs()))
-        .put(
-            "full_pre_roll_ready_elapsed_realtime_ns",
-            Long.toString(timing.fullPreRollReadyNs()))
-        .put("arm_to_engine_start_ns", Long.toString(timing.armToEngineStartNs()))
-        .put("arm_to_first_camera_frame_ns", Long.toString(timing.armToFirstCameraFrameNs()))
-        .put(
-            "arm_to_first_usable_encoded_frame_ns",
-            Long.toString(timing.armToFirstUsableEncodedFrameNs()))
-        .put("arm_to_full_pre_roll_ready_ns", Long.toString(timing.armToFullPreRollReadyNs()))
-        .put(
-            "first_usable_encoded_frame_to_full_pre_roll_ready_ns",
-            Long.toString(timing.firstUsableEncodedFrameToFullPreRollReadyNs()));
   }
 
   private JSONObject runtimeTelemetry() throws Exception {

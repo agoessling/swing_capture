@@ -22,9 +22,9 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Objects;
 
-/** Synchronous MediaPipe Pose Landmarker Lite wrapper with explicit delegate policy. */
+/** Synchronous MediaPipe Pose Landmarker wrapper with explicit model and delegate policy. */
 public final class MediaPipePoseLandmarker implements PoseFrameInference {
-  public static final String MODEL_ASSET_PATH = "pose_landmarker_lite.task";
+  public static final String MODEL_ASSET_PATH = PoseModelVariant.LITE.assetPath();
 
   private static final PoseJoint[] REQUIRED_JOINTS = {
     PoseJoint.LEFT_SHOULDER,
@@ -44,6 +44,7 @@ public final class MediaPipePoseLandmarker implements PoseFrameInference {
 
   private final PoseLandmarker landmarker;
   private final PoseInferenceDelegate actualDelegate;
+  private final PoseModelVariant modelVariant;
   private final ImageProcessingOptions[] processingOptions = new ImageProcessingOptions[4];
   private ByteBuffer cameraRgbBuffer;
   private int cameraBufferWidth;
@@ -52,9 +53,12 @@ public final class MediaPipePoseLandmarker implements PoseFrameInference {
   private boolean closed;
 
   private MediaPipePoseLandmarker(
-      PoseLandmarker landmarker, PoseInferenceDelegate actualDelegate) {
+      PoseLandmarker landmarker,
+      PoseInferenceDelegate actualDelegate,
+      PoseModelVariant modelVariant) {
     this.landmarker = Objects.requireNonNull(landmarker, "landmarker");
     this.actualDelegate = Objects.requireNonNull(actualDelegate, "actualDelegate");
+    this.modelVariant = Objects.requireNonNull(modelVariant, "modelVariant");
     for (int quarterTurn = 0; quarterTurn < processingOptions.length; ++quarterTurn) {
       processingOptions[quarterTurn] =
           ImageProcessingOptions.builder().setRotationDegrees(quarterTurn * 90).build();
@@ -63,19 +67,41 @@ public final class MediaPipePoseLandmarker implements PoseFrameInference {
 
   public static MediaPipePoseLandmarker open(
       Context context, PoseInferenceDelegatePolicy policy) {
+    return open(context, policy, PoseModelVariant.productionDefault());
+  }
+
+  public static MediaPipePoseLandmarker open(
+      Context context, PoseInferenceDelegatePolicy policy, PoseModelVariant modelVariant) {
     Objects.requireNonNull(context, "context");
     Objects.requireNonNull(policy, "policy");
+    Objects.requireNonNull(modelVariant, "modelVariant");
     return switch (policy) {
-      case CPU_ONLY -> create(context, PoseInferenceDelegate.CPU);
-      case GPU_REQUIRED -> create(context, PoseInferenceDelegate.GPU);
+      case CPU_ONLY -> create(context, PoseInferenceDelegate.CPU, modelVariant);
+      case GPU_REQUIRED -> create(context, PoseInferenceDelegate.GPU, modelVariant);
+      case NPU_REQUIRED -> create(context, PoseInferenceDelegate.NPU, modelVariant);
       case GPU_PREFERRED -> {
         try {
-          yield create(context, PoseInferenceDelegate.GPU);
+          yield create(context, PoseInferenceDelegate.GPU, modelVariant);
         } catch (RuntimeException gpuFailure) {
-          yield create(context, PoseInferenceDelegate.CPU);
+          yield create(context, PoseInferenceDelegate.CPU, modelVariant);
+        }
+      }
+      case NPU_PREFERRED -> {
+        try {
+          yield create(context, PoseInferenceDelegate.NPU, modelVariant);
+        } catch (RuntimeException npuFailure) {
+          try {
+            yield create(context, PoseInferenceDelegate.GPU, modelVariant);
+          } catch (RuntimeException gpuFailure) {
+            yield create(context, PoseInferenceDelegate.CPU, modelVariant);
+          }
         }
       }
     };
+  }
+
+  public PoseModelVariant modelVariant() {
+    return modelVariant;
   }
 
   @Override
@@ -138,12 +164,16 @@ public final class MediaPipePoseLandmarker implements PoseFrameInference {
   }
 
   private static MediaPipePoseLandmarker create(
-      Context context, PoseInferenceDelegate delegate) {
+      Context context, PoseInferenceDelegate delegate, PoseModelVariant modelVariant) {
     Delegate mediaPipeDelegate =
-        delegate == PoseInferenceDelegate.GPU ? Delegate.GPU : Delegate.CPU;
+        switch (delegate) {
+          case CPU -> Delegate.CPU;
+          case GPU -> Delegate.GPU;
+          case NPU -> Delegate.NPU;
+        };
     BaseOptions baseOptions =
         BaseOptions.builder()
-            .setModelAssetPath(MODEL_ASSET_PATH)
+            .setModelAssetPath(modelVariant.assetPath())
             .setDelegate(mediaPipeDelegate)
             .build();
     PoseLandmarker.PoseLandmarkerOptions options =
@@ -157,7 +187,9 @@ public final class MediaPipePoseLandmarker implements PoseFrameInference {
             .setOutputSegmentationMasks(false)
             .build();
     return new MediaPipePoseLandmarker(
-        PoseLandmarker.createFromOptions(context.getApplicationContext(), options), delegate);
+        PoseLandmarker.createFromOptions(context.getApplicationContext(), options),
+        delegate,
+        modelVariant);
   }
 
   private static PoseLandmarkFrame convert(PoseLandmarkerResult result, long timestampNs) {

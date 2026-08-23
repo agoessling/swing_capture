@@ -59,8 +59,63 @@ the lifetime of the service.
 
 An occasional 3--4 second gap in visible paired-preview updates was observed
 on 2026-08-08 after the sustained lockups were addressed. Both views resumed
-without intervention. This remains an instrumentation/performance follow-up;
-it is not yet attributed to capture, rendering, HTTP delivery, or the browser.
+without intervention. The old run did not preserve enough evidence to assign
+that gap to a stage, so its root cause remains unknown; it must not be described
+as a camera, renderer, network, or browser failure based on that observation
+alone.
+
+Current builds preserve stage evidence for the next occurrence without
+attaching a debugger. Each camera's `preview_performance` status reports the SDK
+callback-receipt frame ID and age, the capture-ring sink and preview-sampler
+completion frame IDs and ages, latest published sample sequence and age,
+rendered-source and render-completion ages, render-queue time, renderer stage,
+and pending-work state. This distinction matters when the rendered sequence is
+unchanged: a callback newer than the completed sink identifies host capture-ring
+work; a completed sink newer than the sampler identifies sampling work; equal
+stage IDs plus an old callback points upstream of the callback; and fresh
+capture/sampling with an old rendered source points at the renderer. The browser
+polls these values even when it correctly skips a duplicate preview sequence.
+
+Every preview response also echoes the requested and served sequences and
+includes capture/sink/sample/render snapshots, backend/observable response
+preparation times, and `Server-Timing`. The handler cutoff includes content
+copying and non-timing headers. The subsequent cpp-httplib serialization and
+socket write happen outside the route and are not server-observable. The browser independently times response headers, response
+body consumption, both image decodes, paired-loader queue wait, total
+request-to-presentation time, and the interval since the prior presented pair.
+Its **Preview timing** disclosure retains the most recent pair above 500 ms and
+the most recent server-side capture/sink/sample/render threshold crossing. The
+server-side record is a single size-bounded browser-session entry scoped to the
+current station-service instance and two camera serials. It survives a same-tab
+reload, clears on station mismatch or service restart, expires after six hours,
+and records recovery so a later same-sequence crossing can replace it.
+
+The attribution labels have deliberately narrow meanings:
+
+| Evidence at the threshold crossing | Attribution |
+| --- | --- |
+| Callback frame is newer than sink completion for at least 500 ms | Host capture-ring sink |
+| Sink completion is newer than sampler completion for at least 500 ms | Preview sampler |
+| Callback, sink, and sampler IDs agree while callback age is at least 500 ms | Camera acquisition or work upstream of callback receipt |
+| Capture and sink are fresh but latest published sampled input is old | Latest-frame sampling cadence |
+| Capture and sampling are fresh but rendered source is old | Preview rendering |
+| Server handler time dominates | HTTP handler |
+| Header wait minus reported handler time dominates | HTTP dispatch, host scheduling, or network transport |
+| Response-body time dominates | Response-body delivery |
+| Decode time dominates | Browser image decode |
+| A newer pair waited behind an in-flight pair | Browser paired-loader backpressure |
+| Only the presented-pair interval is long | Status polling or browser scheduling |
+
+These labels are evidence-based heuristics rather than causal proof. Concurrent
+bottlenecks remain visible for both roles, while the headline names the largest
+observed threshold crossing. The HTTP/transport label cannot distinguish the
+listener's pre-handler queue, post-handler response serialization, host
+scheduling, and the LAN because those intervals do not share a clock. If it recurs, retain
+a screenshot of **Preview timing** and the `/api/v1/status` response before
+restarting the service. Reproducing the original gap and narrowing that one
+combined interval further still requires the two Daheng cameras or an
+equivalent traffic-level trace; no such hardware run was performed while the
+cameras were disconnected.
 
 Run and validate with:
 

@@ -1,0 +1,64 @@
+{
+  "detector": {
+    "algorithm_id": "robust-envelope-hp120-x12-v1",
+    "config_by_device": {
+      "pixel5a": {
+        "background_block_us": 10000,
+        "background_guard_us": 10000,
+        "background_multiplier": 12.0,
+        "background_window_us": 240000,
+        "cluster_gap_us": 20000,
+        "fast_window_us": 1500,
+        "high_pass_hz": 120.0,
+        "hop_us": 500,
+        "minimum_crest_factor": 0.0,
+        "minimum_high_frequency_ratio": 0.0,
+        "minimum_peak": 0.004,
+        "name": "robust_hp120_x12",
+        "refractory_us": 30000,
+        "rise_ratio": 1.4
+      },
+      "pixel6": {
+        "background_block_us": 10000,
+        "background_guard_us": 10000,
+        "background_multiplier": 12.0,
+        "background_window_us": 240000,
+        "cluster_gap_us": 20000,
+        "fast_window_us": 1500,
+        "high_pass_hz": 120.0,
+        "hop_us": 500,
+        "minimum_crest_factor": 0.0,
+        "minimum_high_frequency_ratio": 0.0,
+        "minimum_peak": 0.004,
+        "name": "robust_hp120_x12",
+        "refractory_us": 30000,
+        "rise_ratio": 1.4
+      }
+    },
+    "implementation_sha256": "277b87bfc444942ee2ec020c2ed86ec07db8af069db697a5d5337ac68a9af6b9",
+    "implementation_target": "//capture/offline/experiments/envelope:streaming_envelope_replay"
+  },
+  "development_recording_ids": [
+    "field-95482d93-f024-400e-9532-5ba7082de05e"
+  ],
+  "evaluation": {
+    "audio_ready_delay_ms": 2450,
+    "leader_role": "face_on",
+    "maximum_armed_ms": 15000,
+    "maximum_false_terminal_attempts": 0,
+    "maximum_high_speed_duty_ppm": 300000,
+    "maximum_negative_continuous_candidates": 0,
+    "minimum_lifecycle_capture_ppm": 1000000,
+    "minimum_quiet_target_recall_ppm": 1000000,
+    "minimum_target_recall_ppm": 1000000,
+    "post_terminal_ms": 1000,
+    "rearm_delay_ms": 2000,
+    "retained_history_ms": 3000,
+    "target_tolerance_ms": 100,
+    "video_ready_delay_ms": 800
+  },
+  "frozen_at_utc": "2026-08-23T11:10:13Z",
+  "policy_id": "robust-envelope-hp120-x12-candidate-v1",
+  "report_type": "audio_detector_policy_lock",
+  "schema_version": 1
+}

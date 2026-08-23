@@ -9,6 +9,26 @@ common --tool_java_language_version=17
 common --tool_java_runtime_version=remotejdk_21
 try-import %workspace%/.bazelrc.local
 
+# Keep the one shared development server and its persistent workers bounded. A
+# prior profiling failure left eleven servers alive; the ordinary server also
+# retained four desugar and two javac workers plus an 8 GiB server heap. These
+# limits preserve warm workers while preventing one checkout from claiming the
+# whole 32 GiB host. Thirty idle minutes releases the pool after a work session.
+startup --host_jvm_args=-Xmx3072m
+startup --max_idle_secs=1800
+build --jobs=8
+build --local_resources=memory=12288
+build --worker_max_instances=4
+# rules_android launches each persistent Desugar worker with an 8 GiB JVM
+# ceiling. Two workers retain useful parallelism while preventing four such
+# JVMs from expanding together during an APK rebuild.
+build --worker_max_instances=Desugar=2
+build --experimental_worker_memory_limit_mb=1536
+# Worker instance limits apply independently to each worker key. Bound the
+# aggregate retained worker pool as well, evicting idle workers only after all
+# worker kinds together exceed 6 GiB.
+build --experimental_total_worker_memory_limit_mb=6144
+
 mobile-install:linux --adb=external/+android+androidsdk_linux/platform-tools/linux/adb
 mobile-install:macos --adb=external/+android+androidsdk_darwin/platform-tools/darwin/adb
 mobile-install:windows --adb=external/+android+androidsdk_windows/platform-tools/windows/adb.exe
@@ -56,3 +76,28 @@ build:ubsan --linkopt=-fsanitize=undefined
 # ##BAZEL_DEVTOOLS_MANAGED_BEGIN:bazelrc-import##
 try-import %workspace%/.bazelrc.bazel_devtools
 # ##BAZEL_DEVTOOLS_MANAGED_END:bazelrc-import##
+
+# Wildcard software validation excludes `manual` tests from analysis and
+# compilation. Physical tests remain explicit, while the named static-check
+# configuration below keeps manual-only sources and dependencies from rotting.
+build --nobuild_manual_tests
+
+# Keep the transition-sensitive lint failure build setting aligned across
+# build/run/test without running lint aspects during ordinary tests or APK
+# packaging. The aspects run only under the explicit precommit configuration.
+build --@@aspect_rules_lint+//lint:fail_on_violation
+
+# Fast Android Java inner loop. This deliberately skips non-test siblings such
+# as the APK; build //android/app:swing_capture separately when packaging code
+# changes, and retain `bazel test //...` as the repository-wide checkpoint.
+test:android_inner --build_tests_only
+test:android_inner --nobuild_manual_tests
+
+# Opt-in physical Android development lane. The runner skips APK installation
+# only after the installed monolithic base APK exactly matches the Bazel APK.
+# The ordinary HIL target remains a forced verified reinstall.
+test:android_hil_inner --test_env=SWING_CAPTURE_ANDROID_SKIP_EXACT_APK_INSTALL=true
+
+# Compile (but never execute) every manual test selected by a wildcard. Use
+# this explicit check after editing HIL-only code.
+build:manual_test_static_check --build_manual_tests

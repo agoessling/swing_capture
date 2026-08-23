@@ -174,7 +174,8 @@ PoseReplayReportInspection InspectPoseReplayReport(std::string_view report) noex
       Invalid("role and projection disagree");
     }
     RequireOneOf(StringField(root, "delegate_policy"),
-                 {"cpu_only", "gpu_preferred", "gpu_required"}, "delegate_policy");
+                 {"cpu_only", "gpu_preferred", "gpu_required", "npu_preferred", "npu_required"},
+                 "delegate_policy");
     const auto delegate = root.find("actual_delegate");
     if (delegate == root.end()) {
       Invalid("actual_delegate is required");
@@ -184,7 +185,7 @@ PoseReplayReportInspection InspectPoseReplayReport(std::string_view report) noex
         Invalid("actual_delegate must be null or a string");
       }
       inspection.actual_delegate = delegate->get<std::string>();
-      RequireOneOf(*inspection.actual_delegate, {"cpu", "gpu"}, "actual_delegate");
+      RequireOneOf(*inspection.actual_delegate, {"cpu", "gpu", "npu"}, "actual_delegate");
     }
     const std::string expectation = StringField(root, "expectation");
     RequireOneOf(expectation, {"observe_only", "require_arm", "require_no_arm"}, "expectation");

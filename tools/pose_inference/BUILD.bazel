@@ -59,6 +59,9 @@ py_binary(
         ":pose_landmarker",
         "//android/core/pose:pose_landmarks_to_observations",
         "//android/core/pose:pose_trigger_replay",
+        "@pose_landmarker_full_task//file",
+        "@pose_landmarker_heavy_task//file",
+        "@pose_landmarker_lite_task//file",
     ],
     legacy_create_init = False,
     deps = [

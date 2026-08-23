@@ -63,6 +63,15 @@ public final class EncodedAccessUnitRetention {
       boolean idr,
       int payloadBytes) {}
 
+  /** Stable timing policy and achieved history for one completed snapshot. */
+  public record SnapshotMetadata(
+      long triggerSensorTimestampNs,
+      long firstAccessUnitSensorTimestampNs,
+      long configuredPreRollNs,
+      long minimumRequiredPreRollNs,
+      long actualPreRollNs,
+      boolean startupPreRollTruncated) {}
+
   /** Trigger admission result; failures do not mutate an existing capture. */
   public enum TriggerStatus {
     ACCEPTED,
@@ -206,6 +215,16 @@ public final class EncodedAccessUnitRetention {
       return owner.snapshotTriggerTimestamp(recordIndex, generation, closed);
     }
 
+    /**
+     * Reports the actual IDR-backed history retained before the trigger.
+     *
+     * <p>{@link SnapshotMetadata#startupPreRollTruncated()} is true only for an explicitly opted-in
+     * startup admission whose history was shorter than the configured normal pre-roll.
+     */
+    public SnapshotMetadata snapshotMetadata() {
+      return owner.snapshotMetadata(recordIndex, generation, closed);
+    }
+
     public AccessUnitMetadata metadata(int accessUnitIndex) {
       return owner.snapshotMetadata(recordIndex, generation, closed, accessUnitIndex);
     }
@@ -253,6 +272,10 @@ public final class EncodedAccessUnitRetention {
     private long captureId;
     private long triggerSensorTimestampNs;
     private long postEndSensorTimestampNs;
+    private long firstAccessUnitSensorTimestampNs;
+    private long minimumRequiredPreRollNs;
+    private long actualPreRollNs;
+    private boolean startupPreRollTruncated;
     private int count;
 
     private SnapshotRecord(int maxAccessUnits) {
@@ -285,6 +308,8 @@ public final class EncodedAccessUnitRetention {
   private long lastOrdinal;
   private long lastPresentationTimeUs;
   private long lastSensorTimestampNs;
+  private boolean startupHistoryIntact = true;
+  private boolean startupContinuityCompromised;
   private long cooldownUntilSensorTimestampNs = Long.MIN_VALUE;
   private long nextCaptureId = 1;
 
@@ -389,8 +414,37 @@ public final class EncodedAccessUnitRetention {
     updateActiveCaptureForAppend(slotId, sensorTimestampNs);
   }
 
-  /** Starts a 1.4-second-pre/0.5-second-post snapshot according to the supplied limits. */
+  /** Starts a full-pre-roll snapshot according to the supplied limits. */
   public synchronized TriggerResult trigger(long triggerSensorTimestampNs) {
+    return triggerInternal(triggerSensorTimestampNs, false, limits.preRollNs());
+  }
+
+  /**
+   * Experimental opt-in admission for the encoder-startup interval.
+   *
+   * <p>Normal callers should use {@link #trigger(long)}. This path may admit an IDR-backed,
+   * continuous snapshot before the configured pre-roll has accumulated, but only while the
+   * beginning of the current continuity epoch is still retained and the actual history reaches
+   * {@code minimumStartupHistoryNs}. Once full history exists, this method is exactly equivalent
+   * to {@code trigger}; it does not continue using a shorter rolling window. Eviction and an
+   * unreset continuity failure disable startup truncation. The tradeoff is earlier trigger
+   * readiness at the cost of losing the portion of pre-trigger motion before encoder startup; it
+   * is intended for an experiment where Camera2 starts before the backswing, not as the production
+   * default.
+   */
+  public synchronized TriggerResult triggerAllowingStartupTruncatedPreRoll(
+      long triggerSensorTimestampNs, long minimumStartupHistoryNs) {
+    if (minimumStartupHistoryNs < 0 || minimumStartupHistoryNs > limits.preRollNs()) {
+      throw new IllegalArgumentException(
+          "minimum startup history must be between zero and configured pre-roll");
+    }
+    return triggerInternal(triggerSensorTimestampNs, true, minimumStartupHistoryNs);
+  }
+
+  private TriggerResult triggerInternal(
+      long triggerSensorTimestampNs,
+      boolean allowStartupTruncatedPreRoll,
+      long minimumStartupHistoryNs) {
     if (triggerSensorTimestampNs < 0) {
       throw new IllegalArgumentException("trigger timestamp must be nonnegative");
     }
@@ -411,13 +465,35 @@ public final class EncodedAccessUnitRetention {
 
     long preStart = saturatingSubtract(triggerSensorTimestampNs, limits.preRollNs());
     Slot oldest = slots[ringSlotId(0)];
-    if (oldest.sensorTimestampNs > preStart) {
-      return triggerResult(TriggerStatus.INSUFFICIENT_PRE_ROLL, 0, 0);
-    }
-    int firstAtOrAfterPreStart = firstRingIndexAtOrAfter(preStart);
-    int idrIndex = precedingIdrIndex(firstAtOrAfterPreStart);
-    if (idrIndex == NO_INDEX) {
-      return triggerResult(TriggerStatus.NO_PRECEDING_IDR, 0, 0);
+    boolean fullHistoryAvailable =
+        triggerSensorTimestampNs >= limits.preRollNs() && oldest.sensorTimestampNs <= preStart;
+    int idrIndex;
+    boolean startupPreRollTruncated = false;
+    long minimumRequiredPreRollNs = limits.preRollNs();
+    if (fullHistoryAvailable) {
+      int firstAtOrAfterPreStart = firstRingIndexAtOrAfter(preStart);
+      idrIndex = precedingIdrIndex(firstAtOrAfterPreStart);
+      if (idrIndex == NO_INDEX) {
+        return triggerResult(TriggerStatus.NO_PRECEDING_IDR, 0, 0);
+      }
+    } else {
+      if (!allowStartupTruncatedPreRoll || !startupHistoryIntact) {
+        return triggerResult(TriggerStatus.INSUFFICIENT_PRE_ROLL, 0, 0);
+      }
+      if (startupContinuityCompromised) {
+        return triggerResult(TriggerStatus.GAP_IN_RETAINED_WINDOW, 0, 0);
+      }
+      idrIndex = firstIdrIndexAtOrBefore(lastAtTrigger);
+      if (idrIndex == NO_INDEX) {
+        return triggerResult(TriggerStatus.NO_PRECEDING_IDR, 0, 0);
+      }
+      long startupHistoryNs =
+          triggerSensorTimestampNs - slots[ringSlotId(idrIndex)].sensorTimestampNs;
+      if (startupHistoryNs < minimumStartupHistoryNs) {
+        return triggerResult(TriggerStatus.INSUFFICIENT_PRE_ROLL, 0, 0);
+      }
+      startupPreRollTruncated = true;
+      minimumRequiredPreRollNs = minimumStartupHistoryNs;
     }
 
     long postEnd = saturatingAdd(triggerSensorTimestampNs, limits.postRollNs());
@@ -440,6 +516,11 @@ public final class EncodedAccessUnitRetention {
     record.captureId = allocateCaptureId();
     record.triggerSensorTimestampNs = triggerSensorTimestampNs;
     record.postEndSensorTimestampNs = postEnd;
+    record.firstAccessUnitSensorTimestampNs = slots[ringSlotId(idrIndex)].sensorTimestampNs;
+    record.minimumRequiredPreRollNs = minimumRequiredPreRollNs;
+    record.actualPreRollNs =
+        triggerSensorTimestampNs - record.firstAccessUnitSensorTimestampNs;
+    record.startupPreRollTruncated = startupPreRollTruncated;
     record.count = 0;
     for (int ringIndex = idrIndex; ringIndex <= snapshotEnd; ++ringIndex) {
       retainForSnapshot(record, ringSlotId(ringIndex));
@@ -477,6 +558,8 @@ public final class EncodedAccessUnitRetention {
     long abortedCapture = abortActiveCapture();
     clearRing();
     hasLastAccessUnit = false;
+    startupHistoryIntact = true;
+    startupContinuityCompromised = false;
     cooldownUntilSensorTimestampNs = Long.MIN_VALUE;
     if (abortedCapture != 0) {
       throw new RetentionException(
@@ -567,6 +650,7 @@ public final class EncodedAccessUnitRetention {
 
   private RetentionException appendContinuityFailure(
       Failure failure, String message, ContinuityDiagnostic diagnostic) {
+    startupContinuityCompromised = true;
     long captureId = abortActiveCapture();
     return new RetentionException(
         failure,
@@ -653,6 +737,7 @@ public final class EncodedAccessUnitRetention {
   }
 
   private void evictOldestRingEntry() {
+    startupHistoryIntact = false;
     int slotId = ringSlotIds[ringHead];
     ringHead = (ringHead + 1) % ringSlotIds.length;
     --ringCount;
@@ -713,6 +798,15 @@ public final class EncodedAccessUnitRetention {
 
   private int precedingIdrIndex(int fromIndex) {
     for (int index = fromIndex; index >= 0; --index) {
+      if (slots[ringSlotId(index)].idr) {
+        return index;
+      }
+    }
+    return NO_INDEX;
+  }
+
+  private int firstIdrIndexAtOrBefore(int lastIndex) {
+    for (int index = 0; index <= lastIndex; ++index) {
       if (slots[ringSlotId(index)].idr) {
         return index;
       }
@@ -808,6 +902,20 @@ public final class EncodedAccessUnitRetention {
     }
   }
 
+  private SnapshotMetadata snapshotMetadata(
+      int recordIndex, long generation, boolean handleClosed) {
+    synchronized (this) {
+      SnapshotRecord record = checkedLeasedRecord(recordIndex, generation, handleClosed);
+      return new SnapshotMetadata(
+          record.triggerSensorTimestampNs,
+          record.firstAccessUnitSensorTimestampNs,
+          limits.preRollNs(),
+          record.minimumRequiredPreRollNs,
+          record.actualPreRollNs,
+          record.startupPreRollTruncated);
+    }
+  }
+
   private AccessUnitMetadata snapshotMetadata(
       int recordIndex, long generation, boolean handleClosed, int accessUnitIndex) {
     synchronized (this) {
@@ -882,6 +990,10 @@ public final class EncodedAccessUnitRetention {
     record.captureId = 0;
     record.triggerSensorTimestampNs = 0;
     record.postEndSensorTimestampNs = 0;
+    record.firstAccessUnitSensorTimestampNs = 0;
+    record.minimumRequiredPreRollNs = 0;
+    record.actualPreRollNs = 0;
+    record.startupPreRollTruncated = false;
     record.count = 0;
   }
 

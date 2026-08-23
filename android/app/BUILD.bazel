@@ -8,6 +8,21 @@ java_library(
     visibility = ["//visibility:private"],
 )
 
+java_library(
+    name = "camera_image_rotation",
+    srcs = ["java/com/agoessling/swingcapture/CameraImageRotation.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "camera_image_rotation_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/CameraImageRotationTest.java"],
+    main_class = "com.agoessling.swingcapture.CameraImageRotationTest",
+    use_testrunner = False,
+    deps = [":camera_image_rotation"],
+)
+
 java_test(
     name = "capture_role_test",
     srcs = ["java/com/agoessling/swingcapture/CaptureRoleTest.java"],
@@ -23,11 +38,42 @@ java_library(
 )
 
 java_test(
+    name = "pose_experiment_configuration_test",
+    size = "small",
+    srcs = [
+        "java/com/agoessling/swingcapture/PoseExperimentConfiguration.java",
+        "java/com/agoessling/swingcapture/PoseExperimentConfigurationTest.java",
+    ],
+    main_class = "com.agoessling.swingcapture.PoseExperimentConfigurationTest",
+    use_testrunner = False,
+    deps = ["//android/pose_inference:pose_inference_core"],
+)
+
+java_test(
     name = "pose_node_mode_test",
     srcs = ["java/com/agoessling/swingcapture/PoseNodeModeTest.java"],
     main_class = "com.agoessling.swingcapture.PoseNodeModeTest",
     use_testrunner = False,
     deps = [":pose_node_mode"],
+)
+
+java_library(
+    name = "pose_intent_peer_policy",
+    srcs = ["java/com/agoessling/swingcapture/PoseIntentPeerPolicy.java"],
+    visibility = ["//visibility:private"],
+    deps = [":pose_node_mode"],
+)
+
+java_test(
+    name = "pose_intent_peer_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PoseIntentPeerPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.PoseIntentPeerPolicyTest",
+    use_testrunner = False,
+    deps = [
+        ":pose_intent_peer_policy",
+        ":pose_node_mode",
+    ],
 )
 
 java_library(
@@ -46,10 +92,91 @@ java_test(
 )
 
 java_library(
+    name = "peer_transport_security_policy",
+    srcs = ["java/com/agoessling/swingcapture/PeerTransportSecurityPolicy.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "peer_transport_security_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerTransportSecurityPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerTransportSecurityPolicyTest",
+    use_testrunner = False,
+    deps = [":peer_transport_security_policy"],
+)
+
+java_library(
     name = "pose_peer_arm_client",
     srcs = ["java/com/agoessling/swingcapture/PosePeerArmClient.java"],
     visibility = ["//visibility:private"],
-    deps = ["//android/core/node:node_core"],
+    deps = [
+        "//android/core/node:node_core",
+        ":peer_transport_security_policy",
+    ],
+)
+
+java_library(
+    name = "automatic_trigger_readiness_gate",
+    srcs = ["java/com/agoessling/swingcapture/AutomaticTriggerReadinessGate.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "automatic_trigger_readiness_gate_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/AutomaticTriggerReadinessGateTest.java"],
+    main_class = "com.agoessling.swingcapture.AutomaticTriggerReadinessGateTest",
+    use_testrunner = False,
+    deps = [":automatic_trigger_readiness_gate"],
+)
+
+java_library(
+    name = "autonomous_pair_peer_client",
+    srcs = ["java/com/agoessling/swingcapture/AutonomousPairPeerClient.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/coordination:coordination_record_store",
+        "//android/core/node:node_core",
+        ":peer_transport_security_policy",
+    ],
+)
+
+java_test(
+    name = "autonomous_pair_peer_client_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/AutonomousPairPeerClientTest.java"],
+    main_class = "com.agoessling.swingcapture.AutonomousPairPeerClientTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/coordination:coordination",
+        "//android/core/coordination:coordination_record_store",
+        "//android/core/node:node_core",
+        ":autonomous_pair_peer_client",
+    ],
+)
+
+java_library(
+    name = "autonomous_pair_durable_store",
+    srcs = ["java/com/agoessling/swingcapture/AutonomousPairDurableStore.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/coordination:coordination",
+        "//android/core/coordination:coordination_record_store",
+    ],
+)
+
+java_test(
+    name = "autonomous_pair_durable_store_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/AutonomousPairDurableStoreTest.java"],
+    main_class = "com.agoessling.swingcapture.AutonomousPairDurableStoreTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/coordination:coordination",
+        "//android/core/coordination:coordination_record_store",
+        ":autonomous_pair_durable_store",
+    ],
 )
 
 java_test(
@@ -64,6 +191,148 @@ java_test(
 )
 
 java_library(
+    name = "peer_audio_impact_selection",
+    srcs = ["java/com/agoessling/swingcapture/PeerAudioImpactSelection.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_library(
+    name = "peer_impact_mapping_manifest",
+    srcs = ["java/com/agoessling/swingcapture/PeerImpactMappingManifest.java"],
+    visibility = ["//visibility:private"],
+    deps = [":pose_peer_arm_client"],
+)
+
+java_test(
+    name = "peer_impact_mapping_manifest_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerImpactMappingManifestTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerImpactMappingManifestTest",
+    use_testrunner = False,
+    deps = [
+        ":peer_impact_mapping_manifest",
+        ":pose_peer_arm_client",
+    ],
+)
+
+java_library(
+    name = "peer_setup_verification_retrier",
+    srcs = ["java/com/agoessling/swingcapture/PeerSetupVerificationRetrier.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "peer_setup_verification_retrier_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerSetupVerificationRetrierTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerSetupVerificationRetrierTest",
+    use_testrunner = False,
+    deps = [":peer_setup_verification_retrier"],
+)
+
+java_test(
+    name = "peer_audio_impact_selection_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerAudioImpactSelectionTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerAudioImpactSelectionTest",
+    use_testrunner = False,
+    deps = [":peer_audio_impact_selection"],
+)
+
+java_library(
+    name = "monitor_candidate_wait",
+    srcs = ["java/com/agoessling/swingcapture/MonitorCandidateWait.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "monitor_candidate_wait_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/MonitorCandidateWaitTest.java"],
+    main_class = "com.agoessling.swingcapture.MonitorCandidateWaitTest",
+    use_testrunner = False,
+    deps = [":monitor_candidate_wait"],
+)
+
+java_library(
+    name = "continuous_audio_read_policy",
+    srcs = ["java/com/agoessling/swingcapture/ContinuousAudioReadPolicy.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "continuous_audio_read_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/ContinuousAudioReadPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.ContinuousAudioReadPolicyTest",
+    use_testrunner = False,
+    deps = [":continuous_audio_read_policy"],
+)
+
+java_library(
+    name = "session_bound_value",
+    srcs = ["java/com/agoessling/swingcapture/SessionBoundValue.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "session_bound_value_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/SessionBoundValueTest.java"],
+    main_class = "com.agoessling.swingcapture.SessionBoundValueTest",
+    use_testrunner = False,
+    deps = [":session_bound_value"],
+)
+
+java_library(
+    name = "peer_clock_synchronizer",
+    srcs = ["java/com/agoessling/swingcapture/PeerClockSynchronizer.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/coordination:coordination"],
+)
+
+java_test(
+    name = "peer_clock_synchronizer_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerClockSynchronizerTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerClockSynchronizerTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/coordination:coordination",
+        ":peer_clock_synchronizer",
+    ],
+)
+
+java_library(
+    name = "peer_clock_client",
+    srcs = ["java/com/agoessling/swingcapture/PeerClockClient.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/coordination:coordination",
+        ":peer_transport_security_policy",
+    ],
+)
+
+android_library(
+    name = "peer_clock_json_response_parser",
+    srcs = ["java/com/agoessling/swingcapture/PeerClockJsonResponseParser.java"],
+    visibility = ["//visibility:private"],
+    deps = [":peer_clock_client"],
+)
+
+java_test(
+    name = "peer_clock_client_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerClockClientTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerClockClientTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/coordination:coordination",
+        ":peer_clock_client",
+    ],
+)
+
+java_library(
     name = "pose_station_configuration_snapshot",
     srcs = ["java/com/agoessling/swingcapture/PoseStationConfigurationSnapshot.java"],
     visibility = ["//visibility:private"],
@@ -71,6 +340,7 @@ java_library(
         "//android/core/node:node_core",
         "//android/core/pose:pose_landmark_features",
         "//android/pose_inference:pose_inference_core",
+        ":peer_transport_security_policy",
         ":pose_node_mode",
     ],
 )
@@ -120,6 +390,35 @@ java_test(
     main_class = "com.agoessling.swingcapture.LatestFrameSlotTest",
     use_testrunner = False,
     deps = [":latest_frame_slot"],
+)
+
+java_library(
+    name = "setup_preview_provider",
+    srcs = ["java/com/agoessling/swingcapture/SetupPreviewProvider.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        ":latest_frame_slot",
+    ],
+)
+
+android_library(
+    name = "android_setup_preview_encoder",
+    srcs = ["java/com/agoessling/swingcapture/AndroidNv21SetupPreviewEncoder.java"],
+    visibility = ["//visibility:private"],
+    deps = [":setup_preview_provider"],
+)
+
+java_test(
+    name = "setup_preview_provider_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/SetupPreviewProviderTest.java"],
+    main_class = "com.agoessling.swingcapture.SetupPreviewProviderTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/diagnostics:diagnostics_core",
+        ":setup_preview_provider",
+    ],
 )
 
 java_library(
@@ -308,6 +607,7 @@ java_library(
     name = "node_setup_policy",
     srcs = ["java/com/agoessling/swingcapture/NodeSetupPolicy.java"],
     visibility = ["//visibility:private"],
+    deps = [":peer_transport_security_policy"],
 )
 
 java_test(
@@ -317,6 +617,99 @@ java_test(
     main_class = "com.agoessling.swingcapture.NodeSetupPolicyTest",
     use_testrunner = False,
     deps = [":node_setup_policy"],
+)
+
+java_library(
+    name = "control_credential_rotation_policy",
+    srcs = ["java/com/agoessling/swingcapture/ControlCredentialRotationPolicy.java"],
+    visibility = ["//visibility:private"],
+    deps = ["//android/core/node:node_core"],
+)
+
+java_test(
+    name = "control_credential_rotation_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/ControlCredentialRotationPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.ControlCredentialRotationPolicyTest",
+    use_testrunner = False,
+    deps = [
+        "//android/core/node:node_core",
+        ":control_credential_rotation_policy",
+    ],
+)
+
+java_library(
+    name = "peer_pairing_binding",
+    srcs = ["java/com/agoessling/swingcapture/PeerPairingBinding.java"],
+    visibility = ["//visibility:private"],
+    deps = [":peer_transport_security_policy"],
+)
+
+java_test(
+    name = "peer_pairing_binding_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerPairingBindingTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerPairingBindingTest",
+    use_testrunner = False,
+    deps = [":peer_pairing_binding"],
+)
+
+java_library(
+    name = "peer_credential_status_policy",
+    srcs = ["java/com/agoessling/swingcapture/PeerCredentialStatusPolicy.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "peer_credential_status_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PeerCredentialStatusPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.PeerCredentialStatusPolicyTest",
+    use_testrunner = False,
+    deps = [":peer_credential_status_policy"],
+)
+
+java_library(
+    name = "lan_node_discovery",
+    srcs = [
+        "java/com/agoessling/swingcapture/LanNodeDiscovery.java",
+        "java/com/agoessling/swingcapture/LanNodeDiscoveryRegistry.java",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "lan_node_discovery_registry_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/LanNodeDiscoveryRegistryTest.java"],
+    main_class = "com.agoessling.swingcapture.LanNodeDiscoveryRegistryTest",
+    use_testrunner = False,
+    deps = [":lan_node_discovery"],
+)
+
+java_library(
+    name = "lan_discovery_address",
+    srcs = ["java/com/agoessling/swingcapture/LanDiscoveryAddress.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "lan_discovery_address_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/LanDiscoveryAddressTest.java"],
+    main_class = "com.agoessling.swingcapture.LanDiscoveryAddressTest",
+    use_testrunner = False,
+    deps = [":lan_discovery_address"],
+)
+
+android_library(
+    name = "android_nsd_lan_node_discovery",
+    srcs = ["java/com/agoessling/swingcapture/AndroidNsdLanNodeDiscovery.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":lan_discovery_address",
+        ":lan_node_discovery",
+    ],
 )
 
 java_library(
@@ -368,6 +761,76 @@ java_test(
 )
 
 java_library(
+    name = "device_capability_policy",
+    srcs = ["java/com/agoessling/swingcapture/DeviceCapabilityPolicy.java"],
+    visibility = ["//visibility:private"],
+    deps = [":capture_profile"],
+)
+
+java_test(
+    name = "device_capability_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/DeviceCapabilityPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.DeviceCapabilityPolicyTest",
+    use_testrunner = False,
+    deps = [
+        ":capture_profile",
+        ":device_capability_policy",
+    ],
+)
+
+android_library(
+    name = "android_device_capability_probe",
+    srcs = ["java/com/agoessling/swingcapture/AndroidDeviceCapabilityProbe.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":camera_image_rotation",
+        ":capture_profile",
+        ":device_capability_policy",
+    ],
+)
+
+java_library(
+    name = "unattended_recovery_policy",
+    srcs = ["java/com/agoessling/swingcapture/UnattendedRecoveryPolicy.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_library(
+    name = "boot_recovery_marker",
+    srcs = ["java/com/agoessling/swingcapture/BootRecoveryMarker.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "boot_recovery_marker_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/BootRecoveryMarkerTest.java"],
+    main_class = "com.agoessling.swingcapture.BootRecoveryMarkerTest",
+    use_testrunner = False,
+    deps = [":boot_recovery_marker"],
+)
+
+java_test(
+    name = "unattended_recovery_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/UnattendedRecoveryPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.UnattendedRecoveryPolicyTest",
+    use_testrunner = False,
+    deps = [":unattended_recovery_policy"],
+)
+
+java_test(
+    name = "android_manifest_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/AndroidManifestPolicyTest.java"],
+    data = ["AndroidManifest.xml"],
+    main_class = "com.agoessling.swingcapture.AndroidManifestPolicyTest",
+    use_testrunner = False,
+    deps = [":unattended_recovery_policy"],
+)
+
+java_library(
     name = "capture_startup_timing",
     srcs = ["java/com/agoessling/swingcapture/CaptureStartupTiming.java"],
     visibility = ["//visibility:private"],
@@ -380,6 +843,25 @@ java_test(
     main_class = "com.agoessling.swingcapture.CaptureStartupTimingTest",
     use_testrunner = False,
     deps = [":capture_startup_timing"],
+)
+
+java_library(
+    name = "capture_startup_timing_manifest",
+    srcs = ["java/com/agoessling/swingcapture/CaptureStartupTimingManifest.java"],
+    visibility = ["//visibility:private"],
+    deps = [":capture_startup_timing"],
+)
+
+java_test(
+    name = "capture_startup_timing_manifest_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/CaptureStartupTimingManifestTest.java"],
+    main_class = "com.agoessling.swingcapture.CaptureStartupTimingManifestTest",
+    use_testrunner = False,
+    deps = [
+        ":capture_startup_timing",
+        ":capture_startup_timing_manifest",
+    ],
 )
 
 java_library(
@@ -505,6 +987,90 @@ java_library(
     ],
     visibility = ["//visibility:private"],
     deps = ["//android/core/audio:pcm16_evidence_ring"],
+)
+
+java_library(
+    name = "field_recording_contract",
+    srcs = [
+        "java/com/agoessling/swingcapture/FieldRecordingManifest.java",
+        "java/com/agoessling/swingcapture/StreamingPcm16WavFile.java",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [":warm_capture_transition_timing"],
+)
+
+java_test(
+    name = "field_recording_manifest_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/FieldRecordingManifestTest.java"],
+    main_class = "com.agoessling.swingcapture.FieldRecordingManifestTest",
+    use_testrunner = False,
+    deps = [":field_recording_contract"],
+)
+
+java_library(
+    name = "field_recording_start_fault",
+    srcs = ["java/com/agoessling/swingcapture/FieldRecordingStartFault.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "field_recording_start_fault_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/FieldRecordingStartFaultTest.java"],
+    main_class = "com.agoessling.swingcapture.FieldRecordingStartFaultTest",
+    use_testrunner = False,
+    deps = [":field_recording_start_fault"],
+)
+
+java_library(
+    name = "field_recording_stop_policy",
+    srcs = ["java/com/agoessling/swingcapture/FieldRecordingStopPolicy.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "field_recording_stop_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/FieldRecordingStopPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.FieldRecordingStopPolicyTest",
+    use_testrunner = False,
+    deps = [":field_recording_stop_policy"],
+)
+
+java_library(
+    name = "field_recording_publisher",
+    srcs = ["java/com/agoessling/swingcapture/FieldRecordingPublisher.java"],
+    visibility = ["//visibility:private"],
+    deps = [":field_recording_contract"],
+)
+
+java_test(
+    name = "field_recording_publisher_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/FieldRecordingPublisherTest.java"],
+    main_class = "com.agoessling.swingcapture.FieldRecordingPublisherTest",
+    use_testrunner = False,
+    deps = [
+        ":field_recording_contract",
+        ":field_recording_publisher",
+        ":session_staging_cleanup",
+    ],
+)
+
+java_test(
+    name = "streaming_pcm16_wav_file_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/StreamingPcm16WavFileTest.java"],
+    main_class = "com.agoessling.swingcapture.StreamingPcm16WavFileTest",
+    use_testrunner = False,
+    deps = [":field_recording_contract"],
+)
+
+android_library(
+    name = "android_directory_sync",
+    srcs = ["java/com/agoessling/swingcapture/AndroidDirectorySync.java"],
+    visibility = ["//visibility:private"],
 )
 
 java_library(
@@ -675,6 +1241,51 @@ java_test(
 )
 
 java_library(
+    name = "node_http_request_parser",
+    srcs = [
+        "java/com/agoessling/swingcapture/NodeHttpRequest.java",
+        "java/com/agoessling/swingcapture/NodeHttpRequestParser.java",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "node_http_request_parser_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/NodeHttpRequestParserTest.java"],
+    main_class = "com.agoessling.swingcapture.NodeHttpRequestParserTest",
+    use_testrunner = False,
+    deps = [":node_http_request_parser"],
+)
+
+java_library(
+    name = "node_http_protocol",
+    srcs = [
+        "java/com/agoessling/swingcapture/MediaAccessAuthorization.java",
+        "java/com/agoessling/swingcapture/NodeHttpProtocol.java",
+        "java/com/agoessling/swingcapture/NodeHttpResponseWriter.java",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//android/core/node:node_core",
+        ":http_byte_range",
+        ":node_http_request_parser",
+    ],
+)
+
+java_test(
+    name = "node_http_protocol_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/NodeHttpProtocolTest.java"],
+    main_class = "com.agoessling.swingcapture.NodeHttpProtocolTest",
+    use_testrunner = False,
+    deps = [
+        ":node_http_protocol",
+        ":node_http_request_parser",
+    ],
+)
+
+java_library(
     name = "static_web_asset_route",
     srcs = ["java/com/agoessling/swingcapture/StaticWebAssetRoute.java"],
     visibility = ["//visibility:private"],
@@ -756,6 +1367,27 @@ java_test(
     deps = [":avc_codec_descriptor"],
 )
 
+android_library(
+    name = "avc_media_format",
+    srcs = ["java/com/agoessling/swingcapture/AvcMediaFormat.java"],
+    visibility = ["//visibility:private"],
+    deps = [":avc_codec_descriptor"],
+)
+
+android_library(
+    name = "field_data_recorder",
+    srcs = ["java/com/agoessling/swingcapture/FieldDataRecorder.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":android_directory_sync",
+        ":avc_media_format",
+        ":field_recording_contract",
+        ":field_recording_publisher",
+        ":field_recording_stop_policy",
+        ":session_staging_cleanup",
+    ],
+)
+
 java_library(
     name = "single_view_manifest_timing",
     srcs = ["java/com/agoessling/swingcapture/SingleViewManifestTiming.java"],
@@ -789,6 +1421,32 @@ java_test(
         ":capture_configuration_snapshot",
         ":capture_profile",
         ":capture_role",
+    ],
+)
+
+android_library(
+    name = "high_speed_probe",
+    srcs = ["java/com/agoessling/swingcapture/HighSpeedProbe.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":avc_codec_descriptor",
+        ":avc_media_format",
+        ":camera_encoder_timestamp_alignment",
+        ":capture_configuration_snapshot",
+        ":probe_statistics",
+        ":single_view_manifest_timing",
+    ],
+)
+
+android_library(
+    name = "warm_high_speed_transition_probe",
+    srcs = ["java/com/agoessling/swingcapture/WarmHighSpeedTransitionProbe.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":capture_configuration_snapshot",
+        ":high_speed_probe",
+        ":low_rate_capture_schedule",
+        ":warm_capture_transition_timing",
     ],
 )
 
@@ -852,8 +1510,14 @@ java_test(
 java_library(
     name = "device_audio_detector_policy",
     srcs = ["java/com/agoessling/swingcapture/DeviceAudioDetectorPolicy.java"],
-    visibility = ["//visibility:private"],
+    visibility = ["//tools/field_evidence:__pkg__"],
     deps = ["//android/core/audio:impact_timing_core"],
+)
+
+filegroup(
+    name = "device_audio_detector_policy_source",
+    srcs = ["java/com/agoessling/swingcapture/DeviceAudioDetectorPolicy.java"],
+    visibility = ["//tools/field_evidence:__pkg__"],
 )
 
 java_test(
@@ -875,16 +1539,31 @@ android_library(
     srcs = glob(
         ["java/com/agoessling/swingcapture/*.java"],
         exclude = [
+            "java/com/agoessling/swingcapture/AndroidDirectorySync.java",
+            "java/com/agoessling/swingcapture/AndroidDeviceCapabilityProbe.java",
+            "java/com/agoessling/swingcapture/AndroidNsdLanNodeDiscovery.java",
+            "java/com/agoessling/swingcapture/AndroidNv21SetupPreviewEncoder.java",
+            "java/com/agoessling/swingcapture/AndroidManifestPolicyTest.java",
             "java/com/agoessling/swingcapture/ArmEvidenceFlush.java",
+            "java/com/agoessling/swingcapture/AutomaticTriggerReadinessGate.java",
+            "java/com/agoessling/swingcapture/AutomaticTriggerReadinessGateTest.java",
+            "java/com/agoessling/swingcapture/AutonomousPairPeerClient.java",
+            "java/com/agoessling/swingcapture/AutonomousPairPeerClientTest.java",
+            "java/com/agoessling/swingcapture/AutonomousPairDurableStoreTest.java",
             "java/com/agoessling/swingcapture/ArmEvidenceFlushTest.java",
             "java/com/agoessling/swingcapture/AvcCodecDescriptor.java",
             "java/com/agoessling/swingcapture/AvcCodecDescriptorTest.java",
+            "java/com/agoessling/swingcapture/AvcMediaFormat.java",
             "java/com/agoessling/swingcapture/AudioEvidencePolicy.java",
             "java/com/agoessling/swingcapture/AudioFrameMarker.java",
             "java/com/agoessling/swingcapture/AudioFrameMarkerTest.java",
+            "java/com/agoessling/swingcapture/BootRecoveryMarker.java",
+            "java/com/agoessling/swingcapture/BootRecoveryMarkerTest.java",
             "java/com/agoessling/swingcapture/CaptureRole.java",
             "java/com/agoessling/swingcapture/CaptureRoleTest.java",
             "java/com/agoessling/swingcapture/CaptureStartupTiming.java",
+            "java/com/agoessling/swingcapture/CaptureStartupTimingManifest.java",
+            "java/com/agoessling/swingcapture/CaptureStartupTimingManifestTest.java",
             "java/com/agoessling/swingcapture/CaptureStartupTimingTest.java",
             "java/com/agoessling/swingcapture/CaptureStartupContinuityPolicy.java",
             "java/com/agoessling/swingcapture/CaptureStartupContinuityPolicyTest.java",
@@ -892,6 +1571,8 @@ android_library(
             "java/com/agoessling/swingcapture/CaptureProfileTest.java",
             "java/com/agoessling/swingcapture/CameraEncoderTimestampAlignment.java",
             "java/com/agoessling/swingcapture/CameraEncoderTimestampAlignmentTest.java",
+            "java/com/agoessling/swingcapture/CameraImageRotation.java",
+            "java/com/agoessling/swingcapture/CameraImageRotationTest.java",
             "java/com/agoessling/swingcapture/CaptureConfigurationPolicy.java",
             "java/com/agoessling/swingcapture/CaptureConfigurationPolicyTest.java",
             "java/com/agoessling/swingcapture/CaptureConfigurationSnapshot.java",
@@ -903,8 +1584,14 @@ android_library(
             "java/com/agoessling/swingcapture/ContinuousCaptureContinuityDiagnostic.java",
             "java/com/agoessling/swingcapture/ContinuousCaptureContinuityDiagnosticTest.java",
             "java/com/agoessling/swingcapture/ContinuousCaptureContinuityException.java",
+            "java/com/agoessling/swingcapture/ControlCredentialRotationPolicy.java",
+            "java/com/agoessling/swingcapture/ControlCredentialRotationPolicyTest.java",
+            "java/com/agoessling/swingcapture/ContinuousAudioReadPolicy.java",
+            "java/com/agoessling/swingcapture/ContinuousAudioReadPolicyTest.java",
             "java/com/agoessling/swingcapture/DeviceAudioDetectorPolicy.java",
             "java/com/agoessling/swingcapture/DeviceAudioDetectorPolicyTest.java",
+            "java/com/agoessling/swingcapture/DeviceCapabilityPolicy.java",
+            "java/com/agoessling/swingcapture/DeviceCapabilityPolicyTest.java",
             "java/com/agoessling/swingcapture/DebugEvidenceCadence.java",
             "java/com/agoessling/swingcapture/DebugEvidenceCadenceTest.java",
             "java/com/agoessling/swingcapture/DiagnosticPcm16WavFile.java",
@@ -913,10 +1600,30 @@ android_library(
             "java/com/agoessling/swingcapture/DiagnosticExportWorkspaceManagerTest.java",
             "java/com/agoessling/swingcapture/DiagnosticAudioWindow.java",
             "java/com/agoessling/swingcapture/DiagnosticAudioWindowTest.java",
+            "java/com/agoessling/swingcapture/FieldDataRecorder.java",
+            "java/com/agoessling/swingcapture/FieldRecordingManifest.java",
+            "java/com/agoessling/swingcapture/FieldRecordingManifestTest.java",
+            "java/com/agoessling/swingcapture/FieldRecordingPublisher.java",
+            "java/com/agoessling/swingcapture/FieldRecordingPublisherTest.java",
+            "java/com/agoessling/swingcapture/FieldRecordingStartFault.java",
+            "java/com/agoessling/swingcapture/FieldRecordingStartFaultTest.java",
+            "java/com/agoessling/swingcapture/FieldRecordingStopPolicy.java",
+            "java/com/agoessling/swingcapture/FieldRecordingStopPolicyTest.java",
+            "java/com/agoessling/swingcapture/HighSpeedProbe.java",
             "java/com/agoessling/swingcapture/HttpByteRange.java",
             "java/com/agoessling/swingcapture/HttpByteRangeTest.java",
             "java/com/agoessling/swingcapture/LowRateCaptureSchedule.java",
             "java/com/agoessling/swingcapture/LowRateCaptureScheduleTest.java",
+            "java/com/agoessling/swingcapture/MediaAccessAuthorization.java",
+            "java/com/agoessling/swingcapture/LanDiscoveryAddress.java",
+            "java/com/agoessling/swingcapture/LanDiscoveryAddressTest.java",
+            "java/com/agoessling/swingcapture/LanNodeDiscovery.java",
+            "java/com/agoessling/swingcapture/LanNodeDiscoveryRegistry.java",
+            "java/com/agoessling/swingcapture/LanNodeDiscoveryRegistryTest.java",
+            "java/com/agoessling/swingcapture/MonitorCandidateWait.java",
+            "java/com/agoessling/swingcapture/MonitorCandidateWaitTest.java",
+            "java/com/agoessling/swingcapture/SessionBoundValue.java",
+            "java/com/agoessling/swingcapture/SessionBoundValueTest.java",
             "java/com/agoessling/swingcapture/LatestFrameSlot.java",
             "java/com/agoessling/swingcapture/LatestFrameSlotTest.java",
             "java/com/agoessling/swingcapture/ProbeStatistics.java",
@@ -927,12 +1634,32 @@ android_library(
             "java/com/agoessling/swingcapture/PoseHighSpeedNoImpactDeadlineTest.java",
             "java/com/agoessling/swingcapture/PoseHighSpeedTimeoutLifecycle.java",
             "java/com/agoessling/swingcapture/PoseHighSpeedTimeoutLifecycleTest.java",
+            "java/com/agoessling/swingcapture/PoseExperimentConfigurationTest.java",
+            "java/com/agoessling/swingcapture/PoseIntentPeerPolicy.java",
+            "java/com/agoessling/swingcapture/PoseIntentPeerPolicyTest.java",
             "java/com/agoessling/swingcapture/PoseHilEndpointAccess.java",
             "java/com/agoessling/swingcapture/PoseHilEndpointAccessTest.java",
             "java/com/agoessling/swingcapture/PoseExternalArmLifecycle.java",
             "java/com/agoessling/swingcapture/PoseExternalArmLifecycleTest.java",
             "java/com/agoessling/swingcapture/PeerArmStatusTracker.java",
             "java/com/agoessling/swingcapture/PeerArmStatusTrackerTest.java",
+            "java/com/agoessling/swingcapture/PeerAudioImpactSelection.java",
+            "java/com/agoessling/swingcapture/PeerAudioImpactSelectionTest.java",
+            "java/com/agoessling/swingcapture/PeerImpactMappingManifest.java",
+            "java/com/agoessling/swingcapture/PeerImpactMappingManifestTest.java",
+            "java/com/agoessling/swingcapture/PeerClockClient.java",
+            "java/com/agoessling/swingcapture/PeerClockClientTest.java",
+            "java/com/agoessling/swingcapture/PeerClockJsonResponseParser.java",
+            "java/com/agoessling/swingcapture/PeerClockSynchronizer.java",
+            "java/com/agoessling/swingcapture/PeerClockSynchronizerTest.java",
+            "java/com/agoessling/swingcapture/PeerPairingBinding.java",
+            "java/com/agoessling/swingcapture/PeerPairingBindingTest.java",
+            "java/com/agoessling/swingcapture/PeerCredentialStatusPolicy.java",
+            "java/com/agoessling/swingcapture/PeerCredentialStatusPolicyTest.java",
+            "java/com/agoessling/swingcapture/PeerSetupVerificationRetrier.java",
+            "java/com/agoessling/swingcapture/PeerSetupVerificationRetrierTest.java",
+            "java/com/agoessling/swingcapture/PeerTransportSecurityPolicy.java",
+            "java/com/agoessling/swingcapture/PeerTransportSecurityPolicyTest.java",
             "java/com/agoessling/swingcapture/PosePeerArmClient.java",
             "java/com/agoessling/swingcapture/PosePeerArmClientTest.java",
             "java/com/agoessling/swingcapture/PoseStandbyMetrics.java",
@@ -947,6 +1674,10 @@ android_library(
             "java/com/agoessling/swingcapture/Pcm16WavFileTest.java",
             "java/com/agoessling/swingcapture/StreamingTimestampCalibrator.java",
             "java/com/agoessling/swingcapture/StreamingTimestampCalibratorTest.java",
+            "java/com/agoessling/swingcapture/StreamingPcm16WavFile.java",
+            "java/com/agoessling/swingcapture/StreamingPcm16WavFileTest.java",
+            "java/com/agoessling/swingcapture/UnattendedRecoveryPolicy.java",
+            "java/com/agoessling/swingcapture/UnattendedRecoveryPolicyTest.java",
             "java/com/agoessling/swingcapture/StandbyDiagnosticSessionPublisher.java",
             "java/com/agoessling/swingcapture/StandbyDiagnosticSessionPublisherTest.java",
             "java/com/agoessling/swingcapture/StandbyDiagnosticSessionRegistry.java",
@@ -962,14 +1693,23 @@ android_library(
             "java/com/agoessling/swingcapture/SessionDiagnosticStoreTest.java",
             "java/com/agoessling/swingcapture/SessionStagingCleanup.java",
             "java/com/agoessling/swingcapture/SessionStagingCleanupTest.java",
+            "java/com/agoessling/swingcapture/SetupPreviewProvider.java",
+            "java/com/agoessling/swingcapture/SetupPreviewProviderTest.java",
             "java/com/agoessling/swingcapture/NodeConfigurationProcessLock.java",
             "java/com/agoessling/swingcapture/NodeConfigurationProcessLockTest.java",
+            "java/com/agoessling/swingcapture/NodeHttpRequest.java",
+            "java/com/agoessling/swingcapture/NodeHttpRequestParser.java",
+            "java/com/agoessling/swingcapture/NodeHttpRequestParserTest.java",
+            "java/com/agoessling/swingcapture/NodeHttpProtocol.java",
+            "java/com/agoessling/swingcapture/NodeHttpProtocolTest.java",
+            "java/com/agoessling/swingcapture/NodeHttpResponseWriter.java",
             "java/com/agoessling/swingcapture/NodeSetupPolicy.java",
             "java/com/agoessling/swingcapture/NodeSetupPolicyTest.java",
             "java/com/agoessling/swingcapture/StaticWebAssetRoute.java",
             "java/com/agoessling/swingcapture/StaticWebAssetRouteTest.java",
             "java/com/agoessling/swingcapture/WarmCaptureTransitionTiming.java",
             "java/com/agoessling/swingcapture/WarmCaptureTransitionTimingTest.java",
+            "java/com/agoessling/swingcapture/WarmHighSpeedTransitionProbe.java",
             "java/com/agoessling/swingcapture/Yuv420PlanePacker.java",
             "java/com/agoessling/swingcapture/Yuv420PlanePackerTest.java",
         ],
@@ -978,6 +1718,7 @@ android_library(
     deps = [
         "//android/core/audio:impact_timing_core",
         "//android/core/audio:pcm16_evidence_ring",
+        "//android/core/coordination:coordination",
         "//android/core/coordination:coordination_record_store",
         "//android/core/diagnostics:diagnostics_core",
         "//android/core/node:node_core",
@@ -987,33 +1728,62 @@ android_library(
         "//android/core/standby_diagnostics:standby_diagnostic_core",
         "//android/pose_inference:pose_inference_android",
         "//android/pose_inference:pose_inference_core",
+        ":android_directory_sync",
+        ":android_device_capability_probe",
+        ":android_nsd_lan_node_discovery",
+        ":android_setup_preview_encoder",
         ":arm_evidence_flush",
+        ":automatic_trigger_readiness_gate",
+        ":boot_recovery_marker",
+        ":autonomous_pair_durable_store",
+        ":autonomous_pair_peer_client",
         ":audio_frame_marker",
         ":avc_codec_descriptor",
+        ":avc_media_format",
         ":camera_encoder_timestamp_alignment",
+        ":camera_image_rotation",
         ":capture_configuration_policy",
         ":capture_configuration_snapshot",
         ":capture_profile",
         ":capture_role",
         ":capture_startup_continuity_policy",
+        ":capture_startup_timing_manifest",
         ":capture_startup_timing",
         ":coordination_file_text_store",
         ":coordination_http_endpoint",
         ":continuous_capture_continuity_diagnostic",
+        ":control_credential_rotation_policy",
+        ":continuous_audio_read_policy",
         ":device_audio_detector_policy",
+        ":device_capability_policy",
         ":debug_evidence_cadence",
         ":diagnostic_audio_window",
         ":diagnostic_export_workspace_manager",
         ":diagnostic_pcm16_wav_file",
+        ":field_data_recorder",
+        ":field_recording_contract",
+        ":field_recording_start_fault",
+        ":field_recording_stop_policy",
+        ":high_speed_probe",
         ":http_byte_range",
         ":low_rate_capture_schedule",
+        ":monitor_candidate_wait",
+        ":node_http_request_parser",
+        ":node_http_protocol",
+        ":session_bound_value",
         ":pcm16_wav_file",
         ":pose_diagnostic_files",
         ":pose_high_speed_no_impact_deadline",
         ":pose_high_speed_timeout_lifecycle",
         ":pose_hil_endpoint_access",
+        ":pose_intent_peer_policy",
         ":pose_external_arm_lifecycle",
         ":peer_arm_status_tracker",
+        ":peer_audio_impact_selection",
+        ":peer_impact_mapping_manifest",
+        ":peer_clock_client",
+        ":peer_clock_json_response_parser",
+        ":peer_clock_synchronizer",
         ":pose_peer_arm_client",
         ":latest_frame_slot",
         ":pose_standby_metrics",
@@ -1022,6 +1792,12 @@ android_library(
         ":pose_transition_precedence",
         ":node_configuration_process_lock",
         ":node_setup_policy",
+        ":lan_node_discovery",
+        ":lan_discovery_address",
+        ":peer_pairing_binding",
+        ":peer_credential_status_policy",
+        ":peer_setup_verification_retrier",
+        ":peer_transport_security_policy",
         ":probe_statistics",
         ":streaming_timestamp_calibrator",
         ":single_view_manifest_timing",
@@ -1032,8 +1808,11 @@ android_library(
         ":session_diagnostic_archive",
         ":session_diagnostic_store",
         ":session_staging_cleanup",
+        ":setup_preview_provider",
         ":static_web_asset_route",
         ":warm_capture_transition_timing",
+        ":warm_high_speed_transition_probe",
+        ":unattended_recovery_policy",
         ":yuv_420_plane_packer",
     ],
 )
@@ -1046,6 +1825,20 @@ android_binary(
         "//android/dual_hil:__pkg__",
         "//android/hil:__pkg__",
         "//android/pose_hil:__pkg__",
+        "//tools:__pkg__",
+        "//tools/field_preflight:__pkg__",
+        "//web:__pkg__",
     ],
     deps = [":app_lib"],
+)
+
+android_binary(
+    name = "swing_capture_pose_experiment",
+    manifest = "AndroidManifest.xml",
+    tags = ["manual"],
+    visibility = ["//android/pose_hil:__pkg__"],
+    deps = [
+        ":app_lib",
+        "//android/pose_inference:pose_inference_experiment_assets",
+    ],
 )

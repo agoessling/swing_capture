@@ -8,6 +8,10 @@ import java.util.Set;
 
 /** Pure retention policy. The Android storage layer performs the validated deletions. */
 public final class SessionRetentionPlanner {
+  private static final String STANDBY_DIAGNOSTIC_SESSION_KIND = "standby_diagnostic";
+  private static final String DETECTED_IMPACT_EVENT_KIND = "detected_impact";
+  private static final String OPERATOR_TAG_EVENT_KIND = "operator_tag";
+
   public enum RetentionClass {
     PRIMARY_CAPTURE,
     DIAGNOSTIC
@@ -58,6 +62,21 @@ public final class SessionRetentionPlanner {
   }
 
   private SessionRetentionPlanner() {}
+
+  /** Classifies manifest metadata without making the pure retention planner parse JSON. */
+  public static RetentionClass retentionClassForManifest(String sessionKind, String eventKind) {
+    if (!STANDBY_DIAGNOSTIC_SESSION_KIND.equals(sessionKind)) {
+      return RetentionClass.PRIMARY_CAPTURE;
+    }
+    if (OPERATOR_TAG_EVENT_KIND.equals(eventKind)) {
+      return RetentionClass.PRIMARY_CAPTURE;
+    }
+    if (DETECTED_IMPACT_EVENT_KIND.equals(eventKind)) {
+      return RetentionClass.DIAGNOSTIC;
+    }
+    // Unknown or legacy data is conservatively kept at primary-capture priority.
+    return RetentionClass.PRIMARY_CAPTURE;
+  }
 
   public static List<String> deletions(
       List<Entry> entries, int maximumSessions, long maximumBytes, Set<String> protectedIds) {

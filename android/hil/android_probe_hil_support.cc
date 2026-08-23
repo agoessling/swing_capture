@@ -213,6 +213,24 @@ bool DisplayDumpReportsOff(std::string_view display_dump) {
   return false;
 }
 
+bool DisplayDumpReportsOn(std::string_view display_dump) {
+  while (!display_dump.empty()) {
+    const std::size_t newline = display_dump.find('\n');
+    const std::string compact = CompactLowercase(display_dump.substr(0, newline));
+    if (compact == "mstate=on" || compact == "mscreenstate=on" || compact == "screenstate=on" ||
+        compact == "screenstate=2" ||
+        ((compact.contains("built-inscreen") || compact.contains("primarydisplay")) &&
+         compact.contains("state=on"))) {
+      return true;
+    }
+    if (newline == std::string_view::npos) {
+      break;
+    }
+    display_dump.remove_prefix(newline + 1U);
+  }
+  return false;
+}
+
 }  // namespace
 
 bool IsCaptureRole(std::string_view role) noexcept {
@@ -659,21 +677,32 @@ DisplayPowerStateInspection InspectDisplayPowerState(const DisplayPowerStateDump
   const bool has_explicit_wakefulness = explicitly_asleep || explicitly_dozing || explicitly_awake;
   const bool legacy_non_interactive =
       power.contains("minteractive=false") || power.contains("mawake=false");
+  const bool legacy_interactive =
+      power.contains("minteractive=true") || power.contains("mawake=true");
+  const bool interaction_state_known =
+      has_explicit_wakefulness || legacy_non_interactive || legacy_interactive;
   const bool non_interactive = explicitly_asleep || explicitly_dozing ||
                                (!has_explicit_wakefulness && legacy_non_interactive);
   const bool display_dump_off = DisplayDumpReportsOff(dumps.display);
+  const bool display_dump_on = DisplayDumpReportsOn(dumps.display);
   const bool power_dump_display_off =
       power.contains("displaypower:state=off") || power.contains("mscreenon=false");
+  const bool power_dump_display_on =
+      power.contains("displaypower:state=on") || power.contains("mscreenon=true");
   // Dozing can mean an ambient/always-on display. Require the independent display dump to say
   // OFF rather than inferring physical darkness from logical wakefulness or the power summary.
   const bool display_off =
       explicitly_dozing ? display_dump_off : power_dump_display_off || display_dump_off;
+  const bool display_state_known =
+      display_dump_off || display_dump_on || power_dump_display_off || power_dump_display_on;
 
   std::string diagnostic;
-  if (non_interactive && display_off) {
+  if (interaction_state_known && display_state_known && non_interactive && display_off) {
     diagnostic = "device is non-interactive and its display is off";
-  } else if (!non_interactive && !display_off) {
-    diagnostic = "device is still interactive and its display is not off";
+  } else if (interaction_state_known && display_state_known && !non_interactive && !display_off) {
+    diagnostic = "device is interactive and its display is on";
+  } else if (!interaction_state_known || !display_state_known) {
+    diagnostic = "device interaction or display state is not explicit";
   } else if (!non_interactive) {
     diagnostic = "display is off but device is still interactive";
   } else {
@@ -682,6 +711,8 @@ DisplayPowerStateInspection InspectDisplayPowerState(const DisplayPowerStateDump
   return {
       .non_interactive = non_interactive,
       .display_off = display_off,
+      .interaction_state_known = interaction_state_known,
+      .display_state_known = display_state_known,
       .diagnostic = std::move(diagnostic),
   };
 }

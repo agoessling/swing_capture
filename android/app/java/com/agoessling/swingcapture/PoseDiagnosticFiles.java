@@ -286,6 +286,7 @@ public final class PoseDiagnosticFiles {
         trace.append(",\"frame_byte_length\":").append(frame.byteLength());
       }
       appendString(trace, "model_id", evidence.modelId());
+      trace.append(",\"image_rotation_degrees\":").append(evidence.imageRotationDegrees());
       appendDecimalString(trace, "inference_duration_ns", evidence.inferenceDurationNanos());
       appendDouble(trace, "person_confidence", evidence.personConfidence());
       appendDouble(trace, "address_confidence", evidence.addressConfidence());

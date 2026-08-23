@@ -787,6 +787,19 @@
         }
       }
     },
+    "@@rules_android_ndk+//:extension.bzl%android_ndk_repository_extension": {
+      "general": {
+        "bzlTransitiveDigest": "j+NMXk5/a1vnDypModKL+ToEo/4o7DJeXSFhTfbJ7rI=",
+        "usagesDigest": "FmD8q73aabEj3LAYCEpYzF8qBTqsGEmSdm29Y7SIsm4=",
+        "recordedInputs": [],
+        "generatedRepoSpecs": {
+          "androidndk": {
+            "repoRuleId": "@@rules_android_ndk+//:rules.bzl%android_ndk_repository",
+            "attributes": {}
+          }
+        }
+      }
+    },
     "@@rules_buf+//buf:extensions.bzl%buf": {
       "general": {
         "bzlTransitiveDigest": "dSWqckK2ILN7aDIDHfv+Qrl1fb1hF7o7MDXY6T8C41s=",
@@ -961,7 +974,7 @@
     "@@rules_playwright+//playwright:extensions.bzl%playwright": {
       "general": {
         "bzlTransitiveDigest": "vEPXk7OZyBVVPZ//2zwNIy8J7iIcparE2YcunS4asMA=",
-        "usagesDigest": "2MygcbBjIrXmsyJCidoNs3tah0wbgCrTwJ3sqX83VJI=",
+        "usagesDigest": "G0G8jkcGylInrRADyT5H/MiyzW220TIlmxaBH0t3PbM=",
         "recordedInputs": [
           "REPO_MAPPING:rules_playwright+,bazel_tools bazel_tools",
           "FILE:@@rules_playwright+//tools/release/artifacts/cli-x86_64-unknown-linux-musl c478e5f07bc0a2b513ff7e7d9f33e9420e8f3bac4ec058c3e3bf332bff8362a1"
@@ -1169,6 +1182,227 @@
                 "https://playwright.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
                 "https://playwright-akamai.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip",
                 "https://playwright-verizon.azureedge.net/builds/chromium/1169/chromium-headless-shell-linux.zip"
+              ]
+            }
+          },
+          "playwright-webkit-debian11-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-debian-11-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-debian-11-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-debian-11-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-debian11-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-debian-11.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-debian-11.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-debian-11.zip"
+              ]
+            }
+          },
+          "playwright-webkit-debian12-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-debian-12-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-debian-12-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-debian-12-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-debian12-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-debian-12.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-debian-12.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-debian-12.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac10.14": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/deprecated-webkit-mac-10.14/2158/deprecated-webkit-mac-10.14.zip",
+                "https://playwright-akamai.azureedge.net/builds/deprecated-webkit-mac-10.14/2158/deprecated-webkit-mac-10.14.zip",
+                "https://playwright-verizon.azureedge.net/builds/deprecated-webkit-mac-10.14/2158/deprecated-webkit-mac-10.14.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac10.15": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/deprecated-webkit-mac-10.15/2158/deprecated-webkit-mac-10.15.zip",
+                "https://playwright-akamai.azureedge.net/builds/deprecated-webkit-mac-10.15/2158/deprecated-webkit-mac-10.15.zip",
+                "https://playwright-verizon.azureedge.net/builds/deprecated-webkit-mac-10.15/2158/deprecated-webkit-mac-10.15.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac11": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-11.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-11.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-11.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac11-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-11-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-11-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-11-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac12": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-12.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-12.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-12.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac12-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-12-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-12-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-12-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac13": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-13.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-13.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-13.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac13-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-13-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-13-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-13-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac14": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-14.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-14.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-14.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac14-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-14-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-14-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-14-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac15": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-15.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-15.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-15.zip"
+              ]
+            }
+          },
+          "playwright-webkit-mac15-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-mac-15-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-mac-15-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-mac-15-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-ubuntu20.04-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-ubuntu-20.04-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-ubuntu-20.04-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-ubuntu-20.04-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-ubuntu20.04-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-ubuntu-20.04.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-ubuntu-20.04.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-ubuntu-20.04.zip"
+              ]
+            }
+          },
+          "playwright-webkit-ubuntu22.04-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-ubuntu-22.04-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-ubuntu-22.04-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-ubuntu-22.04-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-ubuntu22.04-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-ubuntu-22.04.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-ubuntu-22.04.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-ubuntu-22.04.zip"
+              ]
+            }
+          },
+          "playwright-webkit-ubuntu24.04-arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-ubuntu-24.04-arm64.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-ubuntu-24.04-arm64.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-ubuntu-24.04-arm64.zip"
+              ]
+            }
+          },
+          "playwright-webkit-ubuntu24.04-x64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "integrity": "sha256-Z/bP5QlC2Qfy+HvZ0w/R6wQXNsQMFbxpbo30CmY/gX8=",
+              "urls": [
+                "https://playwright.azureedge.net/builds/webkit/2158/webkit-ubuntu-24.04.zip",
+                "https://playwright-akamai.azureedge.net/builds/webkit/2158/webkit-ubuntu-24.04.zip",
+                "https://playwright-verizon.azureedge.net/builds/webkit/2158/webkit-ubuntu-24.04.zip"
               ]
             }
           },

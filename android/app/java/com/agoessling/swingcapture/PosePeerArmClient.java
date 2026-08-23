@@ -10,11 +10,29 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 
 /** Bounded authenticated leader-to-peer pose arm request. */
 public final class PosePeerArmClient {
   private static final int TIMEOUT_MILLIS = 1_500;
   private static final int MAXIMUM_RESPONSE_BYTES = 16 * 1024;
+  static final String POSE_READY_HEADER = "X-Swing-Capture-Pose-Ready";
+
+  static final class ArmPollingCancelledException extends IOException {
+    ArmPollingCancelledException() {
+      super("peer arm readiness polling was cancelled");
+    }
+  }
+
+  static String sharedSessionIdForLocalTrigger(
+      NodeCoordinationState.TriggerReport report, String localSessionId) {
+    Objects.requireNonNull(report, "report");
+    if (!report.localSessionId().equals(localSessionId)) {
+      throw new IllegalArgumentException(
+          "the local trigger does not match the coordinated trigger report");
+    }
+    return report.sharedSessionId();
+  }
 
   public record Candidate(
       String sharedSessionId,
@@ -49,7 +67,143 @@ public final class PosePeerArmClient {
     }
   }
 
-  public record Response(int statusCode, String body) {
+  /** A terminal impact selected by the leader for an already-shared high-speed attempt. */
+  public record ImpactTrigger(
+      int schemaVersion,
+      String sharedSessionId,
+      String leaderNodeId,
+      long leaderTriggerElapsedRealtimeNanos,
+      String targetPeerNodeId,
+      long mappedPeerTriggerElapsedRealtimeNanos,
+      long mappingUncertaintyNanos,
+      long mappingAgeAtSendNanos,
+      long minimumRoundTripNanos,
+      long maximumRoundTripNanos,
+      int sampleCount) {
+    public ImpactTrigger(
+        String sharedSessionId, String leaderNodeId, long leaderTriggerElapsedRealtimeNanos) {
+      this(
+          1,
+          sharedSessionId,
+          leaderNodeId,
+          leaderTriggerElapsedRealtimeNanos,
+          "",
+          0,
+          -1,
+          -1,
+          -1,
+          -1,
+          0);
+    }
+
+    public ImpactTrigger {
+      NodeCoordinationState.validateSharedSessionId(sharedSessionId);
+      requireIdentifier(leaderNodeId, "leaderNodeId");
+      if (leaderTriggerElapsedRealtimeNanos <= 0) {
+        throw new IllegalArgumentException("leader trigger timestamp must be positive");
+      }
+      if (schemaVersion == 1) {
+        if (!targetPeerNodeId.isEmpty()
+            || mappedPeerTriggerElapsedRealtimeNanos != 0
+            || mappingUncertaintyNanos != -1
+            || mappingAgeAtSendNanos != -1
+            || minimumRoundTripNanos != -1
+            || maximumRoundTripNanos != -1
+            || sampleCount != 0) {
+          throw new IllegalArgumentException("schema 1 impact cannot contain clock mapping");
+        }
+      } else if (schemaVersion == 2) {
+        requireIdentifier(targetPeerNodeId, "targetPeerNodeId");
+        if (mappedPeerTriggerElapsedRealtimeNanos <= 0
+            || mappingUncertaintyNanos < 0
+            || mappingAgeAtSendNanos < 0
+            || minimumRoundTripNanos < 0
+            || maximumRoundTripNanos < minimumRoundTripNanos
+            || sampleCount < 3) {
+          throw new IllegalArgumentException("schema 2 impact clock mapping is invalid");
+        }
+      } else {
+        throw new IllegalArgumentException("unsupported impact schema version");
+      }
+    }
+
+    static ImpactTrigger mapped(
+        String sharedSessionId,
+        String leaderNodeId,
+        long leaderTriggerElapsedRealtimeNanos,
+        String targetPeerNodeId,
+        long mappedPeerTriggerElapsedRealtimeNanos,
+        long mappingUncertaintyNanos,
+        long mappingAgeAtSendNanos,
+        long minimumRoundTripNanos,
+        long maximumRoundTripNanos,
+        int sampleCount) {
+      return new ImpactTrigger(
+          2,
+          sharedSessionId,
+          leaderNodeId,
+          leaderTriggerElapsedRealtimeNanos,
+          targetPeerNodeId,
+          mappedPeerTriggerElapsedRealtimeNanos,
+          mappingUncertaintyNanos,
+          mappingAgeAtSendNanos,
+          minimumRoundTripNanos,
+          maximumRoundTripNanos,
+          sampleCount);
+    }
+
+    boolean hasClockMapping() {
+      return schemaVersion == 2;
+    }
+
+    ImpactTrigger withoutClockMapping() {
+      return new ImpactTrigger(sharedSessionId, leaderNodeId, leaderTriggerElapsedRealtimeNanos);
+    }
+
+    public byte[] requestBody() {
+      String json;
+      if (schemaVersion == 1) {
+        json =
+            "{\"schema_version\":1,\"shared_session_id\":\""
+                + escapeJson(sharedSessionId)
+                + "\",\"leader_node_id\":\""
+                + escapeJson(leaderNodeId)
+                + "\",\"leader_trigger_elapsed_realtime_ns\":\""
+                + leaderTriggerElapsedRealtimeNanos
+                + "\"}";
+      } else {
+        json =
+            "{\"schema_version\":2,\"shared_session_id\":\""
+                + escapeJson(sharedSessionId)
+                + "\",\"leader_node_id\":\""
+                + escapeJson(leaderNodeId)
+                + "\",\"leader_trigger_elapsed_realtime_ns\":\""
+                + leaderTriggerElapsedRealtimeNanos
+                + "\",\"target_peer_node_id\":\""
+                + escapeJson(targetPeerNodeId)
+                + "\",\"mapped_peer_trigger_elapsed_realtime_ns\":\""
+                + mappedPeerTriggerElapsedRealtimeNanos
+                + "\",\"mapping_uncertainty_ns\":\""
+                + mappingUncertaintyNanos
+                + "\",\"mapping_age_at_send_ns\":\""
+                + mappingAgeAtSendNanos
+                + "\",\"minimum_round_trip_ns\":\""
+                + minimumRoundTripNanos
+                + "\",\"maximum_round_trip_ns\":\""
+                + maximumRoundTripNanos
+                + "\",\"sample_count\":"
+                + sampleCount
+                + "}";
+      }
+      return json.getBytes(StandardCharsets.UTF_8);
+    }
+  }
+
+  public record Response(int statusCode, String body, boolean poseReady) {
+    public Response(int statusCode, String body) {
+      this(statusCode, body, false);
+    }
+
     public Response {
       if (statusCode < 100 || statusCode > 599) {
         throw new IllegalArgumentException("invalid HTTP status");
@@ -67,7 +221,8 @@ public final class PosePeerArmClient {
     Response post(URI endpoint, String authorization, byte[] body) throws IOException;
   }
 
-  private final URI endpoint;
+  private final URI armEndpoint;
+  private final URI impactEndpoint;
   private final String authorization;
   private final Transport transport;
 
@@ -76,7 +231,8 @@ public final class PosePeerArmClient {
   }
 
   PosePeerArmClient(String peerOrigin, String controlToken, Transport transport) {
-    endpoint = poseArmEndpoint(peerOrigin);
+    armEndpoint = endpoint(peerOrigin, "/api/v1/capture/pose-arm");
+    impactEndpoint = endpoint(peerOrigin, "/api/v1/capture/pose-impact");
     if (!BearerAuthorization.isValidToken(controlToken)) {
       throw new IllegalArgumentException("peer control token is invalid");
     }
@@ -86,32 +242,174 @@ public final class PosePeerArmClient {
 
   public Response arm(Candidate candidate) throws IOException {
     Objects.requireNonNull(candidate, "candidate");
-    return transport.post(endpoint, authorization, candidate.requestBody());
+    return transport.post(armEndpoint, authorization, candidate.requestBody());
+  }
+
+  /** Retries only transport and server failures while preserving terminal client rejections. */
+  public Response armWithRetries(Candidate candidate, int maximumAttempts, long retryDelayMillis)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(candidate, "candidate");
+    return withRetries(() -> arm(candidate), maximumAttempts, retryDelayMillis);
+  }
+
+  /**
+   * Repeats the idempotent arm request until the peer confirms that its encoded pre-roll is ready.
+   *
+   * <p>HTTP 202 admits the shared session but deliberately does not mean that the peer can accept
+   * an impact yet. Server and transport failures have their own small budget, while successful
+   * pending responses use the readiness-poll budget.
+   */
+  public Response armUntilReady(
+      Candidate candidate,
+      int maximumTransientAttempts,
+      int maximumPendingResponses,
+      long retryDelayMillis)
+      throws IOException, InterruptedException {
+    return armUntilReady(
+        candidate,
+        maximumTransientAttempts,
+        maximumPendingResponses,
+        retryDelayMillis,
+        () -> true);
+  }
+
+  Response armUntilReady(
+      Candidate candidate,
+      int maximumTransientAttempts,
+      int maximumPendingResponses,
+      long retryDelayMillis,
+      BooleanSupplier continuePolling)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(candidate, "candidate");
+    Objects.requireNonNull(continuePolling, "continuePolling");
+    if (maximumTransientAttempts <= 0) {
+      throw new IllegalArgumentException("maximumTransientAttempts must be positive");
+    }
+    if (maximumPendingResponses <= 0) {
+      throw new IllegalArgumentException("maximumPendingResponses must be positive");
+    }
+    if (retryDelayMillis < 0) {
+      throw new IllegalArgumentException("retryDelayMillis cannot be negative");
+    }
+    int transientAttempts = 0;
+    int pendingResponses = 0;
+    IOException lastTransportFailure = null;
+    Response lastResponse = null;
+    while (transientAttempts < maximumTransientAttempts
+        && pendingResponses < maximumPendingResponses) {
+      if (!continuePolling.getAsBoolean()) {
+        throw new ArmPollingCancelledException();
+      }
+      try {
+        lastResponse = arm(candidate);
+        if (!continuePolling.getAsBoolean()) {
+          throw new ArmPollingCancelledException();
+        }
+        if (lastResponse.accepted() && lastResponse.poseReady()) {
+          return lastResponse;
+        }
+        if (lastResponse.accepted()) {
+          ++pendingResponses;
+        } else if (lastResponse.statusCode() >= 500) {
+          ++transientAttempts;
+        } else {
+          return lastResponse;
+        }
+      } catch (ArmPollingCancelledException cancelled) {
+        throw cancelled;
+      } catch (IOException failure) {
+        lastTransportFailure = failure;
+        ++transientAttempts;
+      }
+      if (transientAttempts < maximumTransientAttempts
+          && pendingResponses < maximumPendingResponses
+          && retryDelayMillis > 0) {
+        if (!continuePolling.getAsBoolean()) {
+          throw new ArmPollingCancelledException();
+        }
+        Thread.sleep(retryDelayMillis);
+      }
+    }
+    if (lastResponse != null) {
+      return lastResponse;
+    }
+    throw Objects.requireNonNull(lastTransportFailure, "lastTransportFailure");
+  }
+
+  public Response triggerImpact(ImpactTrigger trigger) throws IOException {
+    Objects.requireNonNull(trigger, "trigger");
+    return transport.post(impactEndpoint, authorization, trigger.requestBody());
+  }
+
+  /** Retries transient peer-impact delivery while preserving non-retriable client failures. */
+  public Response triggerImpactWithRetries(
+      ImpactTrigger trigger, int maximumAttempts, long retryDelayMillis)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(trigger, "trigger");
+    return withRetries(() -> triggerImpact(trigger), maximumAttempts, retryDelayMillis);
+  }
+
+  @FunctionalInterface
+  private interface Request {
+    Response execute() throws IOException;
+  }
+
+  private static Response withRetries(
+      Request request, int maximumAttempts, long retryDelayMillis)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(request, "request");
+    if (maximumAttempts <= 0) {
+      throw new IllegalArgumentException("maximumAttempts must be positive");
+    }
+    if (retryDelayMillis < 0) {
+      throw new IllegalArgumentException("retryDelayMillis cannot be negative");
+    }
+    IOException lastTransportFailure = null;
+    Response lastResponse = null;
+    for (int attempt = 1; attempt <= maximumAttempts; ++attempt) {
+      try {
+        lastResponse = request.execute();
+        if (lastResponse.accepted() || lastResponse.statusCode() < 500) {
+          return lastResponse;
+        }
+      } catch (IOException failure) {
+        lastTransportFailure = failure;
+      }
+      if (attempt < maximumAttempts && retryDelayMillis > 0) {
+        Thread.sleep(retryDelayMillis);
+      }
+    }
+    if (lastResponse != null) {
+      return lastResponse;
+    }
+    throw Objects.requireNonNull(lastTransportFailure, "lastTransportFailure");
+  }
+
+  /** Falls back to schema 1 only when a peer rejects schema-2 mapping before accepting a trigger. */
+  public Response triggerImpactWithRetriesAndMappingFallback(
+      ImpactTrigger trigger, int maximumAttempts, long retryDelayMillis)
+      throws IOException, InterruptedException {
+    Response response = triggerImpactWithRetries(trigger, maximumAttempts, retryDelayMillis);
+    if (trigger.hasClockMapping() && response.statusCode() == 400) {
+      return triggerImpactWithRetries(
+          trigger.withoutClockMapping(), maximumAttempts, retryDelayMillis);
+    }
+    return response;
   }
 
   URI endpoint() {
-    return endpoint;
+    return armEndpoint;
   }
 
-  private static URI poseArmEndpoint(String peerOrigin) {
-    Objects.requireNonNull(peerOrigin, "peerOrigin");
-    URI origin;
-    try {
-      origin = URI.create(peerOrigin);
-    } catch (IllegalArgumentException invalid) {
-      throw new IllegalArgumentException("peer origin is not a valid URI", invalid);
-    }
-    if (!"http".equals(origin.getScheme())
-        || origin.getHost() == null
-        || origin.getUserInfo() != null
-        || origin.getQuery() != null
-        || origin.getFragment() != null
-        || !(origin.getPath().isEmpty() || origin.getPath().equals("/"))
-        || origin.getPort() <= 0
-        || origin.getPort() > 65_535) {
-      throw new IllegalArgumentException("peer origin must be http://host:port with no path");
-    }
-    return origin.resolve("/api/v1/capture/pose-arm");
+  URI impactEndpoint() {
+    return impactEndpoint;
+  }
+
+  private static URI endpoint(String peerOrigin, String path) {
+    return PeerTransportSecurityPolicy.validateOrigin(
+            peerOrigin, PeerTransportSecurityPolicy.Requirement.TRUSTED_LAN_DEMO_ALLOWED)
+        .uri()
+        .resolve(path);
   }
 
   private static Response postHttp(URI endpoint, String authorization, byte[] body)
@@ -142,7 +440,10 @@ public final class PosePeerArmClient {
           responseBody = new String(contents, StandardCharsets.UTF_8);
         }
       }
-      return new Response(status, responseBody);
+      return new Response(
+          status,
+          responseBody,
+          "true".equalsIgnoreCase(connection.getHeaderField(POSE_READY_HEADER)));
     } finally {
       connection.disconnect();
     }

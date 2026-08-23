@@ -47,16 +47,15 @@ public final class PoseStationConfigurationSnapshotTest {
                 "http://host:8088",
                 ""),
         "partial peer");
-    expectFailure(
-        () ->
-            new PoseStationConfigurationSnapshot(
-                PoseNodeMode.LEADER,
-                PoseInferenceDelegatePolicy.CPU_ONLY,
-                PoseStationConfigurationSnapshot.DEFAULT_HITTING_REGION,
-                true,
-                "https://host:8088",
-                token),
-        "https peer");
+    PoseStationConfigurationSnapshot protectedPeer =
+        new PoseStationConfigurationSnapshot(
+            PoseNodeMode.LEADER,
+            PoseInferenceDelegatePolicy.CPU_ONLY,
+            PoseStationConfigurationSnapshot.DEFAULT_HITTING_REGION,
+            true,
+            "https://host:8443",
+            token);
+    check(protectedPeer.peerOrigin().equals("https://host:8443"), "HTTPS peer origin");
     expectFailure(
         () -> PoseStationConfigurationSnapshot.parseDelegatePolicy("npu"),
         "unknown delegate");

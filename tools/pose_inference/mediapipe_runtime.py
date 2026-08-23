@@ -22,16 +22,12 @@ class _VideoCapture(Protocol):
 
     def get(self, property_id: int) -> float: ...
 
-    def set(self, property_id: int, value: float) -> bool: ...
-
     def read(self) -> tuple[bool, object]: ...
 
     def release(self) -> None: ...
 
 
 class _Cv2Module(Protocol):
-    CAP_PROP_FRAME_COUNT: int
-    CAP_PROP_FPS: int
     CAP_PROP_POS_MSEC: int
     COLOR_BGR2RGB: int
 
@@ -130,59 +126,151 @@ def load_runtime_modules(
 
 @final
 class OpenCvVideoReader:
-    """Seek constant-frame-rate prototype media through OpenCV."""
+    """Decode presentation-ordered frames and retain their source timestamps."""
 
     def __init__(self, cv2_module: _Cv2Module, input_path: Path) -> None:
-        """Open one video and derive a deterministic half-open duration."""
+        """Open one video and derive its duration from decoded timestamps."""
         self._cv2 = cv2_module
-        self._capture = cv2_module.VideoCapture(str(input_path))
-        if not self._capture.isOpened():
-            message = f"cannot open input video: {input_path}"
+        self._input_path = input_path
+        self._closed = False
+        self._duration_ms = self._scan_duration_ms()
+        self._capture = self._open_capture()
+        self._previous_raw_timestamp_ms: float | None = None
+        self._previous_timestamp_ms: int | None = None
+        self._previous_requested_timestamp_ms: int | None = None
+
+    def _open_capture(self) -> _VideoCapture:
+        capture = self._cv2.VideoCapture(str(self._input_path))
+        if not capture.isOpened():
+            capture.release()
+            message = f"cannot open input video: {self._input_path}"
             raise RuntimeError(message)
-        frame_count = float(self._capture.get(cv2_module.CAP_PROP_FRAME_COUNT))
-        frames_per_second = float(self._capture.get(cv2_module.CAP_PROP_FPS))
-        if not math.isfinite(frame_count) or frame_count < 1:
-            self.close()
-            message = "input video does not report a positive frame count"
+        return capture
+
+    def _decoded_timestamp(
+        self,
+        capture: _VideoCapture,
+        frame_index: int,
+        previous_raw_timestamp_ms: float | None,
+        previous_timestamp_ms: int | None,
+    ) -> tuple[float, int]:
+        raw_timestamp_ms = float(capture.get(self._cv2.CAP_PROP_POS_MSEC))
+        if not math.isfinite(raw_timestamp_ms) or raw_timestamp_ms < 0:
+            message = (
+                "OpenCV did not expose a finite nonnegative presentation timestamp "
+                f"for decoded frame {frame_index}"
+            )
             raise RuntimeError(message)
-        if not math.isfinite(frames_per_second) or frames_per_second <= 0:
-            self.close()
-            message = "input video does not report a positive frame rate"
+        timestamp_ms = round(raw_timestamp_ms)
+        if previous_raw_timestamp_ms is not None and raw_timestamp_ms <= previous_raw_timestamp_ms:
+            message = (
+                "decoded presentation timestamps must increase; "
+                f"frame {frame_index} reported {raw_timestamp_ms:g} ms after "
+                f"{previous_raw_timestamp_ms:g} ms"
+            )
             raise RuntimeError(message)
-        # Sampling asks for the frame at or immediately following a timestamp. The
-        # nominal container duration includes the final frame's display interval,
-        # where no following frame exists. Bound the half-open schedule one
-        # millisecond after the final CFR frame timestamp instead.
-        self._duration_ms = math.floor(1000.0 * (frame_count - 1.0) / frames_per_second) + 1
+        if previous_timestamp_ms is not None and timestamp_ms <= previous_timestamp_ms:
+            message = (
+                "decoded presentation timestamps collapse at millisecond resolution; "
+                f"frame {frame_index} rounded to {timestamp_ms} ms"
+            )
+            raise RuntimeError(message)
+        return raw_timestamp_ms, timestamp_ms
+
+    def _scan_duration_ms(self) -> int:
+        """Scan PTS once so a VFR clip has an evidence-backed half-open duration."""
+        capture = self._open_capture()
+        previous_raw_timestamp_ms: float | None = None
+        previous_timestamp_ms: int | None = None
+        frame_index = 0
+        try:
+            while True:
+                decoded, _pixels = capture.read()
+                if not decoded:
+                    break
+                previous_raw_timestamp_ms, previous_timestamp_ms = self._decoded_timestamp(
+                    capture,
+                    frame_index,
+                    previous_raw_timestamp_ms,
+                    previous_timestamp_ms,
+                )
+                frame_index += 1
+        finally:
+            capture.release()
+        if previous_raw_timestamp_ms is None:
+            message = "input video did not decode any timestamped frames"
+            raise RuntimeError(message)
+        return math.floor(previous_raw_timestamp_ms) + 1
+
+    def _rewind(self) -> None:
+        """Reopen instead of timestamp-seeking, whose landing semantics vary by backend."""
+        self._capture.release()
+        self._capture = self._open_capture()
+        self._previous_raw_timestamp_ms = None
+        self._previous_timestamp_ms = None
+        self._previous_requested_timestamp_ms = None
 
     @property
     def duration_ms(self) -> int:
-        """Return the duration derived from the container frame count and rate."""
+        """Return one millisecond past the final decoded presentation timestamp."""
         return self._duration_ms
 
     def read_at(self, timestamp_ms: int) -> contract.VideoFrame | None:
-        """Seek to and decode the sample nearest the requested media time."""
+        """Decode forward to the first source frame at or after the requested time."""
         if timestamp_ms < 0:
             message = "timestamp_ms must not be negative"
             raise ValueError(message)
-        if not self._capture.set(self._cv2.CAP_PROP_POS_MSEC, float(timestamp_ms)):
+        if self._closed:
+            message = "video reader is closed"
+            raise RuntimeError(message)
+        if timestamp_ms >= self._duration_ms:
             return None
-        decoded, bgr_pixels = self._capture.read()
-        if not decoded:
-            return None
-        rgb_pixels = self._cv2.cvtColor(bgr_pixels, self._cv2.COLOR_BGR2RGB)
-        height, width = rgb_pixels.shape[:2]
-        source_timestamp_ms = round(float(self._capture.get(self._cv2.CAP_PROP_POS_MSEC)))
-        return contract.VideoFrame(
-            pixels=rgb_pixels,
-            width=int(width),
-            height=int(height),
-            source_timestamp_ms=source_timestamp_ms,
-        )
+        if (
+            self._previous_requested_timestamp_ms is not None
+            and timestamp_ms <= self._previous_requested_timestamp_ms
+        ):
+            self._rewind()
+        elif (
+            self._previous_raw_timestamp_ms is not None
+            and timestamp_ms <= self._previous_raw_timestamp_ms
+        ):
+            message = (
+                "source cadence cannot provide distinct frames for consecutive sample "
+                f"deadlines; {self._previous_raw_timestamp_ms:g} ms also satisfies "
+                f"the {timestamp_ms} ms request"
+            )
+            raise RuntimeError(message)
+        frame_index = 0
+        while True:
+            decoded, bgr_pixels = self._capture.read()
+            if not decoded:
+                return None
+            raw_timestamp_ms, source_timestamp_ms = self._decoded_timestamp(
+                self._capture,
+                frame_index,
+                self._previous_raw_timestamp_ms,
+                self._previous_timestamp_ms,
+            )
+            self._previous_raw_timestamp_ms = raw_timestamp_ms
+            self._previous_timestamp_ms = source_timestamp_ms
+            frame_index += 1
+            if raw_timestamp_ms < timestamp_ms:
+                continue
+            rgb_pixels = self._cv2.cvtColor(bgr_pixels, self._cv2.COLOR_BGR2RGB)
+            height, width = rgb_pixels.shape[:2]
+            self._previous_requested_timestamp_ms = timestamp_ms
+            return contract.VideoFrame(
+                pixels=rgb_pixels,
+                width=int(width),
+                height=int(height),
+                source_timestamp_ms=source_timestamp_ms,
+            )
 
     def close(self) -> None:
         """Release the native decoder."""
-        self._capture.release()
+        if not self._closed:
+            self._capture.release()
+            self._closed = True
 
     def __enter__(self) -> Self:
         """Return the opened reader."""

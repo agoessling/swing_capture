@@ -71,6 +71,11 @@ int main() {
   assert(valid.arm_request_count == 0U);
   assert(valid.first_source_timestamp_ns == 0U);
 
+  auto npu = ValidReport();
+  npu["delegate_policy"] = "npu_required";
+  npu["actual_delegate"] = "npu";
+  assert(InspectPoseReplayReport(npu.dump()).valid);
+
   auto contradictory = ValidReport();
   contradictory["first_source_timestamp_ns"] = 1;
   const auto invalid_timestamp = InspectPoseReplayReport(contradictory.dump());

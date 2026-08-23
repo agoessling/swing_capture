@@ -14,6 +14,9 @@ import {
   DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
   type DiagnosticArchive,
   type DiagnosticFeedback,
+  type DualFieldRecordingStatus,
+  type FieldRecordingList,
+  type FieldRecordingState,
   HttpReviewApi,
   parseCaptureStatus,
   parseClipManifest,
@@ -47,6 +50,8 @@ async function main() {
   const rendered = render(<ReviewApp api={diagnosticsApi} pollIntervalMs={60_000} />);
   assert.ok(await screen.findByRole("heading", { name: "Swing review" }));
   assert.ok(await screen.findByText("Listening for an audio trigger"));
+  assert.ok(screen.getByText("Capture resources ready"));
+  assert.ok(screen.getByText(/light thermal load.*0\.18 thermal headroom.*20\.0 GiB free/));
   assert.equal(rendered.container.querySelectorAll("video").length, 2);
   assert.ok(screen.getByText("Frame 46 of 90"));
   assert.ok(screen.getAllByText("Audio-trigger estimate frame").length > 0);
@@ -74,8 +79,8 @@ async function main() {
   });
   fireEvent.click(screen.getByRole("button", { name: "Next frame" }));
   assert.ok(screen.getByText("Frame 47 of 90"));
-  assert.ok(Math.abs((videos[0]?.currentTime ?? 0) - 1.533318) < 0.000_001);
-  assert.ok(Math.abs((videos[1]?.currentTime ?? 0) - 1.533318) < 0.000_001);
+  assert.ok(Math.abs((videos[0]?.currentTime ?? 0) - 1.549984) < 0.000_001);
+  assert.ok(Math.abs((videos[1]?.currentTime ?? 0) - 1.549984) < 0.000_001);
 
   const timeline = screen.getByRole("slider", { name: "Review timeline" }) as HTMLInputElement;
   fireEvent.input(timeline, { target: { value: "10" } });
@@ -194,6 +199,175 @@ async function main() {
     [],
     "review fixture should have no automated accessibility violations",
   );
+  cleanup();
+
+  const delayedInterFrameManifest = structuredClone(FIXTURE_MANIFEST);
+  for (const track of delayedInterFrameManifest.views) {
+    track.media.all_frames_keyframes = false;
+  }
+  const delayedInterFrame = render(<ReviewPlayer manifest={delayedInterFrameManifest} />);
+  const delayedTimeline = screen.getByRole("slider", {
+    name: "Review timeline",
+  }) as HTMLInputElement;
+  fireEvent.input(delayedTimeline, { target: { value: "28" } });
+  assert.ok(screen.getByText("Frame 29 of 90"));
+  for (const video of delayedInterFrame.container.querySelectorAll("video")) {
+    fireEvent.loadedMetadata(video);
+    fireEvent.canPlay(video);
+  }
+  assert.ok(
+    screen.getByText("Frame 29 of 90"),
+    "late inter-frame decoder readiness must not restore the impact frame after an operator seek",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Next frame" }));
+  assert.ok(screen.getByText("Frame 30 of 90"));
+  cleanup();
+
+  const firefoxPresentation = installFirefoxPresentationFixture(dom.window);
+  try {
+    const firefoxManifest = structuredClone(FIXTURE_MANIFEST);
+    firefoxManifest.client_delivery_profile = {
+      manifest_fetch_duration_ms: 1,
+      manifest_response_received_performance_ms: performance.now(),
+      server_response_host_monotonic_ns: "458500000000",
+    };
+    const exactFirefoxView = render(<ReviewPlayer manifest={firefoxManifest} />);
+    const exactFirefoxVideos = Array.from(exactFirefoxView.container.querySelectorAll("video"));
+    for (const video of exactFirefoxVideos) {
+      fireEvent.loadedMetadata(video);
+      fireEvent.seeked(video);
+    }
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 230)));
+    assert.equal(firefoxPresentation.playCount, 2);
+    await act(async () => {
+      for (const video of exactFirefoxVideos) {
+        assert.equal(video.playbackRate, 0.25);
+        assert.equal(video.paused, false);
+        firefoxPresentation.present(video, 1.499_985);
+      }
+    });
+    await waitFor(() => {
+      const serialized = screen
+        .getByRole("region", { name: "Pipeline profile" })
+        .getAttribute("data-browser-timing");
+      assert.ok(serialized !== null);
+      assert.equal(
+        (JSON.parse(serialized) as Record<string, unknown>).presentation_method,
+        "requestVideoFrameCallback",
+      );
+    });
+    assert.equal(firefoxPresentation.pauseCount, 2);
+    for (const video of exactFirefoxVideos) {
+      assert.equal(video.playbackRate, 1);
+      assert.equal(video.paused, true);
+    }
+    cleanup();
+
+    const rapidSeekView = render(<ReviewPlayer manifest={firefoxManifest} />);
+    for (const video of rapidSeekView.container.querySelectorAll("video")) {
+      fireEvent.loadedMetadata(video);
+      fireEvent.seeked(video);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Next frame" }));
+    const playCountBeforeRapidSeekDeadline = firefoxPresentation.playCount;
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 230)));
+    assert.equal(
+      firefoxPresentation.playCount,
+      playCountBeforeRapidSeekDeadline,
+      "a rapid operator seek must cancel the pending impact-frame presentation nudge",
+    );
+    assert.ok(screen.getByText("Frame 47 of 90"));
+    cleanup();
+
+    const sessionReplacement = structuredClone(firefoxManifest);
+    sessionReplacement.session_id = "replacement-firefox-session";
+    const replacingView = render(<ReviewPlayer manifest={firefoxManifest} />);
+    const replacedVideos = Array.from(replacingView.container.querySelectorAll("video"));
+    for (const video of replacedVideos) {
+      fireEvent.loadedMetadata(video);
+      fireEvent.seeked(video);
+    }
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 230)));
+    assert.equal(firefoxPresentation.playCount, playCountBeforeRapidSeekDeadline + 2);
+    for (const video of replacedVideos) {
+      assert.equal(video.paused, false);
+      assert.equal(video.playbackRate, 0.25);
+    }
+    const pauseCountBeforeReplacement = firefoxPresentation.pauseCount;
+    replacingView.rerender(<ReviewPlayer manifest={sessionReplacement} />);
+    await waitFor(() => {
+      assert.equal(firefoxPresentation.pauseCount, pauseCountBeforeReplacement + 2);
+    });
+    for (const video of replacedVideos) {
+      assert.equal(video.paused, true);
+      assert.equal(video.playbackRate, 1);
+    }
+    const playCountAfterReplacement = firefoxPresentation.playCount;
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 230)));
+    assert.equal(
+      firefoxPresentation.playCount,
+      playCountAfterReplacement,
+      "session replacement must clear every pending Firefox presentation timer",
+    );
+    cleanup();
+  } finally {
+    firefoxPresentation.restore();
+  }
+
+  const switchingApi = new DeferredManifestReviewApi();
+  switchingApi.resolve("ready-session-a");
+  const switchingView = render(<ReviewApp api={switchingApi} pollIntervalMs={60_000} />);
+  assert.ok(await screen.findByText("Frame 46 of 90"));
+  const firstSessionVideo = switchingView.container.querySelector(
+    'video[aria-label="Down-the-line recorded swing"]',
+  );
+  assert.ok(firstSessionVideo);
+  fireEvent.change(screen.getByRole("combobox", { name: "Recorded session" }), {
+    target: { value: "ready-session-b" },
+  });
+  assert.equal(
+    screen.queryByLabelText("Synchronized clip player"),
+    null,
+    "a selected session must not temporarily render the previous session's player or feedback",
+  );
+  await act(async () => switchingApi.resolve("ready-session-b"));
+  await waitFor(() => {
+    const source = switchingView.container.querySelector(
+      'video[aria-label="Down-the-line recorded swing"] source',
+    ) as HTMLSourceElement | null;
+    assert.match(source?.src ?? "", /ready-session-b/);
+  });
+  const secondSessionVideo = switchingView.container.querySelector(
+    'video[aria-label="Down-the-line recorded swing"]',
+  );
+  assert.ok(secondSessionVideo);
+  assert.notEqual(
+    secondSessionVideo,
+    firstSessionVideo,
+    "ready-to-ready selection must remount media so the browser performs resource selection",
+  );
+  cleanup();
+
+  const staleFailureApi = new DeferredManifestReviewApi();
+  const staleFailureView = render(<ReviewApp api={staleFailureApi} pollIntervalMs={60_000} />);
+  const staleFailureSelector = await screen.findByRole("combobox", {
+    name: "Recorded session",
+  });
+  fireEvent.change(staleFailureSelector, { target: { value: "ready-session-b" } });
+  await act(async () => staleFailureApi.resolve("ready-session-b"));
+  await waitFor(() => {
+    const source = staleFailureView.container.querySelector(
+      'video[aria-label="Down-the-line recorded swing"] source',
+    ) as HTMLSourceElement | null;
+    assert.match(source?.src ?? "", /ready-session-b/);
+  });
+  await act(async () => staleFailureApi.reject("ready-session-a", "old session failed late"));
+  assert.equal(screen.queryByText("old session failed late"), null);
+  assert.equal(
+    (screen.getByRole("combobox", { name: "Recorded session" }) as HTMLSelectElement).value,
+    "ready-session-b",
+  );
+  assert.ok(screen.getByLabelText("Synchronized clip player"));
   cleanup();
 
   for (const [state, heading] of [
@@ -529,6 +703,81 @@ async function main() {
   assert.ok(screen.getByText("Optical calibration did not find the Feather LED"));
   cleanup();
 
+  const delayedHistoryApi = new DelayedHistoryFieldRecordingReviewApi();
+  render(<ReviewApp api={delayedHistoryApi} pollIntervalMs={5} />);
+  assert.ok(
+    await screen.findByText("Listening for an audio trigger"),
+    "live capture status must render before historical sessions finish loading",
+  );
+  const delayedHistoryStart = await screen.findByRole("button", {
+    name: "Start field recording",
+  });
+  const delayedHistoryPanel = delayedHistoryStart.closest("section");
+  assert.ok(delayedHistoryPanel);
+  assert.equal(delayedHistoryPanel.dataset.recordingCatalogState, "loading");
+  assert.equal(delayedHistoryStart.hasAttribute("disabled"), false);
+  assert.ok(screen.getByText("Down the line"));
+  assert.ok(screen.getByText("Face on"));
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+  assert.ok(
+    delayedHistoryApi.statusRequests > 1,
+    "live field status polling must continue while the historical catalog is pending",
+  );
+  assert.equal(
+    delayedHistoryApi.catalogRequests,
+    1,
+    "a pending historical catalog must not be requested on every live-status poll",
+  );
+  delayedHistoryApi.completed = true;
+  await act(async () => delayedHistoryApi.resolveHistory());
+  assert.equal(delayedHistoryPanel.dataset.recordingCatalogState, "ready");
+  fireEvent.click(await screen.findByText("Completed recordings"));
+  assert.equal(screen.getAllByRole("link", { name: "Video" }).length, 4);
+  cleanup();
+
+  const fieldRecordingApi = new FieldRecordingReviewApi();
+  const fieldRecordingView = render(<ReviewApp api={fieldRecordingApi} pollIntervalMs={60_000} />);
+  const fieldHeading = await screen.findByRole("heading", {
+    name: "Continuous test recording",
+  });
+  const fieldPanel = fieldHeading.closest("section");
+  assert.ok(fieldPanel);
+  assert.match(fieldPanel.textContent ?? "", /Down the line/);
+  assert.match(fieldPanel.textContent ?? "", /Face on/);
+  fireEvent.click(screen.getByRole("button", { name: "Start field recording" }));
+  assert.ok(await screen.findByRole("button", { name: "Stop both phones" }));
+  assert.equal(fieldRecordingApi.startRequests, 1);
+  assert.match(fieldPanel.textContent ?? "", /Recording/);
+  fireEvent.click(screen.getByRole("button", { name: "Stop both phones" }));
+  assert.ok(await screen.findByRole("button", { name: "Start field recording" }));
+  assert.equal(fieldRecordingApi.stopRequests, 1);
+  fireEvent.click(screen.getByText("Completed recordings"));
+  assert.equal(screen.getAllByRole("link", { name: "Video" }).length, 4);
+  assert.equal(screen.getAllByRole("link", { name: "Audio" }).length, 4);
+  assert.equal(screen.getAllByRole("link", { name: "Manifest" }).length, 4);
+  const fieldAccessibility = await axe.run(fieldRecordingView.container, {
+    rules: { "color-contrast": { enabled: false } },
+  });
+  assert.deepEqual(
+    fieldAccessibility.violations.map((violation) => violation.id),
+    [],
+    "field recording controls should have no automated accessibility violations",
+  );
+  cleanup();
+
+  const recoverableFieldRecordingApi = new FieldRecordingReviewApi();
+  recoverableFieldRecordingApi.failed = true;
+  render(<ReviewApp api={recoverableFieldRecordingApi} pollIntervalMs={60_000} />);
+  const retryFieldRecording = await screen.findByRole("button", {
+    name: "Start field recording",
+  });
+  assert.equal(retryFieldRecording.hasAttribute("disabled"), false);
+  assert.equal(screen.getAllByText("camera pipeline unavailable").length, 2);
+  fireEvent.click(retryFieldRecording);
+  assert.ok(await screen.findByRole("button", { name: "Stop both phones" }));
+  assert.equal(recoverableFieldRecordingApi.startRequests, 1);
+  cleanup();
+
   testRuntimeSchemaRejection();
   testReviewBootMode();
   await testHttpContract();
@@ -557,6 +806,19 @@ function testRuntimeSchemaRejection() {
     armed: false,
     active_session_id: FIXTURE_MANIFEST.session_id,
     error: "",
+    operational_health: {
+      ready_for_capture: false,
+      thermal: { status: 3, headroom: 0.95, ready: false, power_save_mode: true },
+      storage: {
+        usable_bytes: 1_073_741_824,
+        minimum_free_bytes: 2_147_483_648,
+        ready: false,
+      },
+      issues: [
+        "Let this phone cool below Android thermal status SEVERE before capture.",
+        "Free at least 2 GiB of app storage before capture.",
+      ],
+    },
     hil: {
       enabled: true,
       busy: false,
@@ -570,6 +832,17 @@ function testRuntimeSchemaRejection() {
     },
   } as const;
   assert.deepEqual(parseCaptureStatus(captureStatus), captureStatus);
+  assert.throws(
+    () =>
+      parseCaptureStatus({
+        ...captureStatus,
+        operational_health: {
+          ...captureStatus.operational_health,
+          ready_for_capture: true,
+        },
+      }),
+    /readiness disagrees/,
+  );
   for (const state of [
     "not_requested",
     "pending",
@@ -880,7 +1153,11 @@ async function testHttpContract() {
     }
     if (url.endsWith("/manifest")) {
       return Response.json(FIXTURE_MANIFEST, {
-        headers: { "X-Swing-Capture-Server-Monotonic-Ns": "458500000000" },
+        headers: {
+          "X-Swing-Capture-Server-Monotonic-Ns": "458500000000",
+          "X-Swing-Capture-Media-Access":
+            "media_access=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ",
+        },
       });
     }
     if (url.endsWith("/feedback")) {
@@ -905,10 +1182,9 @@ async function testHttpContract() {
     },
     "test-control-token",
   );
-  assert.equal(
-    api.subscribeToChanges(() => undefined),
-    undefined,
-  );
+  const unsubscribe = api.subscribeToChanges(() => undefined);
+  assert.ok(unsubscribe);
+  unsubscribe();
   assert.equal((await api.getCaptureStatus()).armed, true);
   await api.setArmed(false);
   assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { armed: false });
@@ -924,13 +1200,18 @@ async function testHttpContract() {
   const manifest = await api.getManifest(session.session_id);
   assert.equal(
     manifest.views[0]?.media.url,
-    `http://station.test/api/v1/sessions/${session.session_id}/down-the-line.webm`,
+    `http://station.test/api/v1/sessions/${session.session_id}/down-the-line.webm?media_access=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ`,
   );
   assert.deepEqual(manifest.client_delivery_profile, {
     manifest_fetch_duration_ms: 12.5,
     manifest_response_received_performance_ms: 112.5,
     server_response_host_monotonic_ns: "458500000000",
   });
+  assert.equal(
+    new Headers(calls[6]?.init?.headers).get("Authorization"),
+    "Bearer test-control-token",
+    "manifest metadata must be ready for read authorization",
+  );
   await assert.rejects(
     () =>
       api.submitDiagnosticFeedback(session.session_id, {
@@ -974,6 +1255,20 @@ async function testHttpContract() {
       `http://station.test/api/v1/sessions/${session.session_id}/diagnostics.zip`,
     ],
   );
+
+  const malformedCapabilityApi = new HttpReviewApi(
+    "http://station.test",
+    async () =>
+      Response.json(FIXTURE_MANIFEST, {
+        headers: { "X-Swing-Capture-Media-Access": "media_access=not-a-valid-capability" },
+      }),
+    () => 0,
+    "test-control-token",
+  );
+  await assert.rejects(
+    () => malformedCapabilityApi.getManifest(session.session_id),
+    /invalid scoped media capability/,
+  );
 }
 
 function installDomGlobals(window: DOMWindow) {
@@ -993,6 +1288,126 @@ function installDomGlobals(window: DOMWindow) {
   globals.Node = window.Node;
   globals.getComputedStyle = window.getComputedStyle.bind(window);
   globals.IS_REACT_ACT_ENVIRONMENT = true;
+}
+
+interface FirefoxPresentationFixture {
+  readonly playCount: number;
+  readonly pauseCount: number;
+  present(video: HTMLVideoElement, mediaTime: number): void;
+  restore(): void;
+}
+
+function installFirefoxPresentationFixture(window: DOMWindow): FirefoxPresentationFixture {
+  const mediaPrototype = window.HTMLMediaElement.prototype;
+  const videoPrototype = window.HTMLVideoElement.prototype;
+  const originalPlay = Object.getOwnPropertyDescriptor(mediaPrototype, "play");
+  const originalPause = Object.getOwnPropertyDescriptor(mediaPrototype, "pause");
+  const originalPaused = Object.getOwnPropertyDescriptor(mediaPrototype, "paused");
+  const originalRequest = Object.getOwnPropertyDescriptor(
+    videoPrototype,
+    "requestVideoFrameCallback",
+  );
+  const originalCancel = Object.getOwnPropertyDescriptor(
+    videoPrototype,
+    "cancelVideoFrameCallback",
+  );
+  const originalUserAgent = Object.getOwnPropertyDescriptor(window.navigator, "userAgent");
+  const playing = new WeakSet<HTMLMediaElement>();
+  const callbacks = new WeakMap<HTMLVideoElement, Map<number, VideoFrameRequestCallback>>();
+  let nextCallbackId = 1;
+  let playCount = 0;
+  let pauseCount = 0;
+
+  Object.defineProperty(window.navigator, "userAgent", {
+    configurable: true,
+    value: "Mozilla/5.0 Firefox/153.0",
+  });
+  Object.defineProperty(mediaPrototype, "paused", {
+    configurable: true,
+    get(this: HTMLMediaElement) {
+      return !playing.has(this);
+    },
+  });
+  Object.defineProperty(mediaPrototype, "play", {
+    configurable: true,
+    value(this: HTMLMediaElement) {
+      playCount += 1;
+      playing.add(this);
+      this.dispatchEvent(new window.Event("play"));
+      return Promise.resolve();
+    },
+  });
+  Object.defineProperty(mediaPrototype, "pause", {
+    configurable: true,
+    value(this: HTMLMediaElement) {
+      pauseCount += 1;
+      playing.delete(this);
+      this.dispatchEvent(new window.Event("pause"));
+    },
+  });
+  Object.defineProperty(videoPrototype, "requestVideoFrameCallback", {
+    configurable: true,
+    value(this: HTMLVideoElement, callback: VideoFrameRequestCallback) {
+      const callbackId = nextCallbackId;
+      nextCallbackId += 1;
+      const pending = callbacks.get(this) ?? new Map<number, VideoFrameRequestCallback>();
+      pending.set(callbackId, callback);
+      callbacks.set(this, pending);
+      return callbackId;
+    },
+  });
+  Object.defineProperty(videoPrototype, "cancelVideoFrameCallback", {
+    configurable: true,
+    value(this: HTMLVideoElement, callbackId: number) {
+      callbacks.get(this)?.delete(callbackId);
+    },
+  });
+
+  const restoreDescriptor = (
+    owner: object,
+    name: string,
+    descriptor: PropertyDescriptor | undefined,
+  ) => {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(owner, name);
+    } else {
+      Object.defineProperty(owner, name, descriptor);
+    }
+  };
+  return {
+    get playCount() {
+      return playCount;
+    },
+    get pauseCount() {
+      return pauseCount;
+    },
+    present(video, mediaTime) {
+      const pending = callbacks.get(video);
+      assert.ok(pending !== undefined, "video has no pending presentation callback");
+      const next = pending.entries().next();
+      assert.ok(!next.done, "video has no pending presentation callback");
+      const [callbackId, callback] = next.value;
+      pending.delete(callbackId);
+      const now = performance.now();
+      callback(now, {
+        expectedDisplayTime: now,
+        height: 180,
+        mediaTime,
+        presentationTime: now,
+        presentedFrames: 1,
+        processingDuration: 0,
+        width: 320,
+      });
+    },
+    restore() {
+      restoreDescriptor(mediaPrototype, "play", originalPlay);
+      restoreDescriptor(mediaPrototype, "pause", originalPause);
+      restoreDescriptor(mediaPrototype, "paused", originalPaused);
+      restoreDescriptor(videoPrototype, "requestVideoFrameCallback", originalRequest);
+      restoreDescriptor(videoPrototype, "cancelVideoFrameCallback", originalCancel);
+      restoreDescriptor(window.navigator, "userAgent", originalUserAgent);
+    },
+  };
 }
 
 function installMediaFixture(window: DOMWindow) {
@@ -1049,6 +1464,172 @@ class RecordingReviewApi extends FakeReviewApi {
         data: new Blob(["diagnostics"], { type: "application/zip" }),
       },
     ];
+  }
+}
+
+class DeferredManifestReviewApi extends FakeReviewApi {
+  readonly #sessions: SessionSummary[] = [
+    {
+      session_id: "ready-session-a",
+      state: "ready",
+      created_at_utc: "2026-08-22T20:01:00Z",
+      error: "",
+    },
+    {
+      session_id: "ready-session-b",
+      state: "ready",
+      created_at_utc: "2026-08-22T20:00:00Z",
+      error: "",
+    },
+  ];
+  readonly #manifests = new Map(
+    this.#sessions.map((session) => [session.session_id, new DeferredValue<ClipManifest>()]),
+  );
+
+  override getSessions(): Promise<SessionList> {
+    return Promise.resolve({ schema_version: 1, sessions: structuredClone(this.#sessions) });
+  }
+
+  override getManifest(sessionId: string): Promise<ClipManifest> {
+    const deferred = this.#manifests.get(sessionId);
+    if (deferred === undefined) {
+      return Promise.reject(new Error(`Unknown deferred session ${sessionId}`));
+    }
+    return deferred.promise;
+  }
+
+  resolve(sessionId: string): void {
+    const deferred = this.#manifests.get(sessionId);
+    assert.ok(deferred);
+    const session = this.#sessions.find((candidate) => candidate.session_id === sessionId);
+    assert.ok(session);
+    const manifest = structuredClone(FIXTURE_MANIFEST);
+    manifest.session_id = sessionId;
+    manifest.created_at_utc = session.created_at_utc;
+    for (const view of manifest.views) {
+      view.media.path = `${sessionId}-${view.role}.webm`;
+      delete view.media.url;
+    }
+    deferred.resolve(manifest);
+  }
+
+  reject(sessionId: string, message: string): void {
+    const deferred = this.#manifests.get(sessionId);
+    assert.ok(deferred);
+    deferred.reject(new Error(message));
+  }
+}
+
+class DeferredValue<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason: unknown) => void;
+
+  constructor() {
+    let resolveValue: ((value: T) => void) | undefined;
+    let rejectValue: ((reason: unknown) => void) | undefined;
+    this.promise = new Promise<T>((resolve, reject) => {
+      resolveValue = resolve;
+      rejectValue = reject;
+    });
+    this.resolve = (value) => resolveValue?.(value);
+    this.reject = (reason) => rejectValue?.(reason);
+  }
+}
+
+class FieldRecordingReviewApi extends FakeReviewApi {
+  startRequests = 0;
+  stopRequests = 0;
+  recording = false;
+  completed = false;
+  failed = false;
+
+  getFieldRecordingStatus(): Promise<DualFieldRecordingStatus> {
+    return Promise.resolve(this.#status());
+  }
+
+  startFieldRecording(): Promise<DualFieldRecordingStatus> {
+    this.startRequests += 1;
+    this.failed = false;
+    this.recording = true;
+    return Promise.resolve(this.#status());
+  }
+
+  stopFieldRecording(): Promise<DualFieldRecordingStatus> {
+    this.stopRequests += 1;
+    this.recording = false;
+    this.completed = true;
+    return Promise.resolve(this.#status("ready"));
+  }
+
+  getFieldRecordings(): Promise<FieldRecordingList> {
+    return Promise.resolve({
+      recordings: this.completed
+        ? (["down_the_line", "face_on", "down_the_line", "face_on"] as const).map(
+            (role, index) => ({
+              recording_id: `field-${role}-${String(index)}`,
+              shared_recording_id: "field-shared",
+              created_at_utc: `2026-08-22T18:00:0${String(index)}Z`,
+              role,
+              origin: role === "down_the_line" ? "http://dtl.test" : "http://face.test",
+              duration_us: "12000000",
+              video_bytes: "1200000",
+              audio_frames: "576000",
+              video_url: `http://${role}.test/${String(index)}/video.mp4`,
+              audio_url: `http://${role}.test/${String(index)}/audio.wav`,
+              manifest_url: `http://${role}.test/${String(index)}/manifest`,
+            }),
+          )
+        : [],
+    });
+  }
+
+  #status(
+    state: FieldRecordingState = this.failed ? "error" : this.recording ? "recording" : "idle",
+  ): DualFieldRecordingStatus {
+    return {
+      nodes: (["down_the_line", "face_on"] as const).map((role) => ({
+        schema_version: 1,
+        role,
+        origin: role === "down_the_line" ? "http://dtl.test" : "http://face.test",
+        state,
+        active_recording_id: this.recording ? `field-${role}` : null,
+        shared_recording_id: this.recording ? "field-shared" : null,
+        started_at_utc: this.recording ? "2026-08-22T18:00:00Z" : null,
+        started_elapsed_realtime_ns: this.recording ? "123456789" : null,
+        elapsed_ms: this.recording ? 12_000 : 0,
+        video_bytes: this.recording ? "1200000" : "0",
+        audio_frames: this.recording ? "576000" : "0",
+        max_duration_seconds: 600,
+        error: this.failed ? "camera pipeline unavailable" : "",
+      })),
+    };
+  }
+}
+
+class DelayedHistoryFieldRecordingReviewApi extends FieldRecordingReviewApi {
+  readonly #sessions = new DeferredValue<SessionList>();
+  readonly #catalog = new DeferredValue<FieldRecordingList>();
+  statusRequests = 0;
+  catalogRequests = 0;
+
+  override getSessions(): Promise<SessionList> {
+    return this.#sessions.promise;
+  }
+
+  override getFieldRecordingStatus(): Promise<DualFieldRecordingStatus> {
+    this.statusRequests += 1;
+    return super.getFieldRecordingStatus();
+  }
+
+  override getFieldRecordings(): Promise<FieldRecordingList> {
+    this.catalogRequests += 1;
+    return this.#catalog.promise;
+  }
+
+  async resolveHistory(): Promise<void> {
+    this.#sessions.resolve({ schema_version: 1, sessions: [] });
+    this.#catalog.resolve(await super.getFieldRecordings());
   }
 }
 

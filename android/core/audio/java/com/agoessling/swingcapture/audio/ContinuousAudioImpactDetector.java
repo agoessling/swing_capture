@@ -1,10 +1,13 @@
 package com.agoessling.swingcapture.audio;
 
+import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.Optional;
 
 /** Android-independent facade intended to be owned by one continuous AudioRecord read loop. */
 public final class ContinuousAudioImpactDetector {
+  private static final int MAXIMUM_PENDING_IMPACTS = 4;
+
   /** A confirmed detector event together with the best currently validated BOOTTIME estimates. */
   public record TimedImpact(
       ImpactDetector.Impact impact,
@@ -28,6 +31,7 @@ public final class ContinuousAudioImpactDetector {
 
   private final ImpactDetector detector;
   private final AudioTimestampMapper timestampMapper;
+  private final ArrayDeque<ImpactDetector.Impact> pendingImpacts = new ArrayDeque<>();
 
   public ContinuousAudioImpactDetector() {
     this(ImpactDetector.Config.defaults(), AudioTimestampMapper.Config.defaults());
@@ -58,17 +62,26 @@ public final class ContinuousAudioImpactDetector {
       long firstFramePosition,
       ImpactSink sink) {
     Objects.requireNonNull(sink, "sink");
+    flushPendingImpacts(sink);
     return detector.processBlock(
         pcm,
         offset,
         frameCount,
         firstFramePosition,
-        impact ->
-            sink.onImpact(
-                new TimedImpact(
-                    impact,
-                    timestampMapper.estimateBoottime(impact.strikeFramePosition()),
-                    timestampMapper.estimateBoottime(impact.confirmationFramePosition()))));
+        impact -> {
+          pendingImpacts.addLast(impact);
+          if (pendingImpacts.size() > MAXIMUM_PENDING_IMPACTS) {
+            // Prefer the most recent still-recoverable window after a prolonged timestamp outage.
+            // Events retained in the deque and all events delivered to the sink remain ordered.
+            pendingImpacts.removeFirst();
+          }
+          flushPendingImpacts(sink);
+        });
+  }
+
+  /** Number of detected impacts waiting for a validated BOOTTIME mapping. */
+  public int pendingImpactCount() {
+    return pendingImpacts.size();
   }
 
   public ImpactDetector detector() {
@@ -82,5 +95,21 @@ public final class ContinuousAudioImpactDetector {
   public void reset() {
     detector.reset();
     timestampMapper.reset();
+    pendingImpacts.clear();
+  }
+
+  private void flushPendingImpacts(ImpactSink sink) {
+    while (!pendingImpacts.isEmpty()) {
+      ImpactDetector.Impact impact = pendingImpacts.getFirst();
+      Optional<AudioTimestampMapper.Estimate> strikeTime =
+          timestampMapper.estimateBoottime(impact.strikeFramePosition());
+      Optional<AudioTimestampMapper.Estimate> confirmationTime =
+          timestampMapper.estimateBoottime(impact.confirmationFramePosition());
+      if (strikeTime.isEmpty() || confirmationTime.isEmpty()) {
+        return;
+      }
+      pendingImpacts.removeFirst();
+      sink.onImpact(new TimedImpact(impact, strikeTime, confirmationTime));
+    }
   }
 }

@@ -16,9 +16,15 @@ FAKE_POSITION_PROPERTY_ID = 3
 
 @final
 class _FakeReader:
-    def __init__(self, duration_ms: int, missing_at: int | None = None) -> None:
+    def __init__(
+        self,
+        duration_ms: int,
+        missing_at: int | None = None,
+        source_timestamps: dict[int, int] | None = None,
+    ) -> None:
         self._duration_ms = duration_ms
         self._missing_at = missing_at
+        self._source_timestamps = source_timestamps or {}
         self.requested: list[int] = []
 
     @property
@@ -29,11 +35,12 @@ class _FakeReader:
         self.requested.append(timestamp_ms)
         if timestamp_ms == self._missing_at:
             return None
+        source_timestamp_ms = self._source_timestamps.get(timestamp_ms, timestamp_ms + 7)
         return contract.VideoFrame(
-            pixels=f"rgb-{timestamp_ms}",
+            pixels=f"rgb-{source_timestamp_ms}",
             width=640,
             height=360,
-            source_timestamp_ms=timestamp_ms + 7,
+            source_timestamp_ms=source_timestamp_ms,
         )
 
 
@@ -178,28 +185,33 @@ class _FakePixels:
 
 @final
 class _FakeCapture:
-    def __init__(self, frame_count: float = 30.0, frames_per_second: float = 30.0) -> None:
-        self.position_ms = 0.0
+    def __init__(self, timestamps_ms: list[float]) -> None:
+        self.timestamps_ms = timestamps_ms
+        self.position_ms = float("nan")
+        self.frame_index = 0
         self.released = False
-        self.frame_count = frame_count
-        self.frames_per_second = frames_per_second
 
     @staticmethod
     def isOpened() -> bool:  # noqa: N802
         return True
 
     def get(self, property_id: int) -> float:
-        values = {1: self.frame_count, 2: self.frames_per_second, 3: self.position_ms}
-        return values[property_id]
+        if property_id != FAKE_POSITION_PROPERTY_ID:
+            message = f"unexpected fake capture property: {property_id}"
+            raise AssertionError(message)
+        return self.position_ms
 
     def set(self, property_id: int, value: float) -> bool:
-        if property_id != FAKE_POSITION_PROPERTY_ID:
-            return False
-        self.position_ms = value
-        return True
+        message = (
+            f"timestamp-preserving decoder unexpectedly sought property {property_id} to {value}"
+        )
+        raise AssertionError(message)
 
-    @staticmethod
-    def read() -> tuple[bool, _FakePixels]:
+    def read(self) -> tuple[bool, _FakePixels | None]:
+        if self.frame_index >= len(self.timestamps_ms):
+            return False, None
+        self.position_ms = self.timestamps_ms[self.frame_index]
+        self.frame_index += 1
         return True, _FakePixels()
 
     def release(self) -> None:
@@ -208,16 +220,20 @@ class _FakeCapture:
 
 @final
 class _FakeCv2:
-    CAP_PROP_FRAME_COUNT = 1
-    CAP_PROP_FPS = 2
     CAP_PROP_POS_MSEC = FAKE_POSITION_PROPERTY_ID
     COLOR_BGR2RGB = 4
 
-    def __init__(self, frame_count: float = 30.0, frames_per_second: float = 30.0) -> None:
-        self.capture = _FakeCapture(frame_count, frames_per_second)
+    def __init__(self, timestamps_by_open: list[list[float]] | None = None) -> None:
+        self.timestamps_by_open = timestamps_by_open or [
+            [index * 1_000.0 / 30.0 for index in range(30)]
+        ]
+        self.captures: list[_FakeCapture] = []
 
     def VideoCapture(self, _path: str) -> _FakeCapture:  # noqa: N802
-        return self.capture
+        index = min(len(self.captures), len(self.timestamps_by_open) - 1)
+        capture = _FakeCapture(self.timestamps_by_open[index])
+        self.captures.append(capture)
+        return capture
 
     @staticmethod
     def cvtColor(pixels: _FakePixels, conversion: int) -> _FakePixels:  # noqa: N802
@@ -255,11 +271,12 @@ class PoseInferenceContractTest(unittest.TestCase):
 
         self.assertEqual(4, count)
         self.assertEqual([0, 200, 400, 600], reader.requested)
-        self.assertEqual(reader.requested, landmarker.timestamps)
+        self.assertEqual([7, 207, 407, 607], landmarker.timestamps)
         records = [
             cast("dict[str, object]", json.loads(line)) for line in output.getvalue().splitlines()
         ]
         self.assertEqual([0, 1, 2, 3], [value["sample_index"] for value in records])
+        self.assertEqual([0, 200, 400, 600], [value["timestamp_ms"] for value in records])
         self.assertEqual([7, 207, 407, 607], [value["source_timestamp_ms"] for value in records])
         self.assertEqual({"height": 360, "width": 640}, records[0]["image"])
         self.assertEqual(1, records[0]["schema_version"])
@@ -273,6 +290,22 @@ class PoseInferenceContractTest(unittest.TestCase):
             contract.run_inference(
                 _FakeReader(600, missing_at=400), _FakeLandmarker(), io.StringIO()
             )
+
+    def test_coordinator_rejects_unfaithful_source_timestamps(self) -> None:
+        """Prevent a decoder from relabeling preceding or repeated frames as samples."""
+        cases = (
+            (_FakeReader(1, source_timestamps={0: -1}), "before requested"),
+            (
+                _FakeReader(201, source_timestamps={0: 200, 200: 200}),
+                "non-increasing",
+            ),
+        )
+        for reader, expected in cases:
+            with (
+                self.subTest(expected=expected),
+                self.assertRaisesRegex(RuntimeError, expected),
+            ):
+                contract.run_inference(reader, _FakeLandmarker(), io.StringIO())
 
     def test_mediapipe_adapter_uses_video_mode_and_maps_both_coordinate_spaces(self) -> None:
         """Configure tracking mode and retain normalized and world landmarks."""
@@ -311,8 +344,8 @@ class PoseInferenceContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "mismatched"):
             adapter.detect_for_video("rgb", 0)
 
-    def test_opencv_adapter_seeks_and_reports_cfr_geometry(self) -> None:
-        """Derive duration and decode the requested constant-rate media time."""
+    def test_opencv_adapter_decodes_forward_and_reports_cfr_geometry(self) -> None:
+        """Derive duration and decode requested CFR media without timestamp seeking."""
         cv2_module = _FakeCv2()
         reader = mediapipe_runtime.OpenCvVideoReader(
             cast("mediapipe_runtime.Cv2Module", cast("object", cv2_module)),
@@ -326,17 +359,106 @@ class PoseInferenceContractTest(unittest.TestCase):
         self.assertEqual(360, frame.height)
         self.assertEqual(200, frame.source_timestamp_ms)
         reader.close()
-        self.assertTrue(cv2_module.capture.released)
+        self.assertEqual(2, len(cv2_module.captures))
+        self.assertTrue(all(capture.released for capture in cv2_module.captures))
 
     def test_opencv_duration_excludes_ntsc_display_tail_without_a_frame(self) -> None:
-        """Do not schedule a 24.000s read after the last frame of a 720-frame clip."""
-        cv2_module = _FakeCv2(frame_count=720.0, frames_per_second=30_000.0 / 1_001.0)
+        """Do not schedule a 24.000s read after the last decoded NTSC frame."""
+        timestamps = [index * 1_001.0 / 30.0 for index in range(720)]
+        cv2_module = _FakeCv2([timestamps])
         reader = mediapipe_runtime.OpenCvVideoReader(
             cast("mediapipe_runtime.Cv2Module", cast("object", cv2_module)),
             Path("clip.mp4"),
         )
         self.assertEqual(23_991, reader.duration_ms)
         self.assertEqual(23_800, contract.sample_timestamps(reader.duration_ms)[-1])
+        reader.close()
+
+    def test_opencv_adapter_preserves_variable_frame_timestamps(self) -> None:
+        """Select first-at-or-after VFR frames and retain their decoded PTS."""
+        timestamps = [0.0, 41.0, 83.0, 150.0, 207.0, 390.0, 401.0, 799.0, 1_005.0]
+        cv2_module = _FakeCv2([timestamps])
+        reader = mediapipe_runtime.OpenCvVideoReader(
+            cast("mediapipe_runtime.Cv2Module", cast("object", cv2_module)),
+            Path("variable.mp4"),
+        )
+
+        self.assertEqual(1_006, reader.duration_ms)
+        frames = [reader.read_at(timestamp) for timestamp in (0, 200, 400, 800)]
+        self.assertTrue(all(frame is not None for frame in frames))
+        self.assertEqual(
+            [0, 207, 401, 1_005],
+            [frame.source_timestamp_ms for frame in frames if frame is not None],
+        )
+        reader.close()
+
+    def test_opencv_adapter_reopens_for_backward_reads(self) -> None:
+        """Preserve the timestamp-addressable API without backend time seeking."""
+        timestamps = [0.0, 150.0, 401.0, 799.0]
+        cv2_module = _FakeCv2([timestamps])
+        reader = mediapipe_runtime.OpenCvVideoReader(
+            cast("mediapipe_runtime.Cv2Module", cast("object", cv2_module)),
+            Path("variable.mp4"),
+        )
+
+        later = reader.read_at(400)
+        earlier = reader.read_at(100)
+        self.assertEqual(401, later.source_timestamp_ms if later is not None else None)
+        self.assertEqual(150, earlier.source_timestamp_ms if earlier is not None else None)
+        self.assertEqual(3, len(cv2_module.captures))
+        reader.close()
+
+    def test_opencv_adapter_rejects_one_frame_for_two_sample_deadlines(self) -> None:
+        """Do not conceal a source cadence too sparse for the requested replay rate."""
+        timestamps = [0.0, 300.0, 600.0]
+        reader = mediapipe_runtime.OpenCvVideoReader(
+            cast(
+                "mediapipe_runtime.Cv2Module",
+                cast("object", _FakeCv2([timestamps])),
+            ),
+            Path("sparse.mp4"),
+        )
+        first = reader.read_at(200)
+        self.assertEqual(300, first.source_timestamp_ms if first is not None else None)
+        with self.assertRaisesRegex(RuntimeError, "distinct frames"):
+            reader.read_at(250)
+        reader.close()
+
+    def test_opencv_adapter_rejects_untrustworthy_decoded_timestamps(self) -> None:
+        """Fail closed instead of silently treating a broken timebase as CFR."""
+        cases = (
+            ([0.0, float("nan")], "finite nonnegative"),
+            ([0.0, 0.0], "must increase"),
+            ([0.0, 0.4], "millisecond resolution"),
+        )
+        for timestamps, expected in cases:
+            with (
+                self.subTest(timestamps=timestamps),
+                self.assertRaisesRegex(RuntimeError, expected),
+            ):
+                mediapipe_runtime.OpenCvVideoReader(
+                    cast(
+                        "mediapipe_runtime.Cv2Module",
+                        cast("object", _FakeCv2([timestamps])),
+                    ),
+                    Path("invalid.mp4"),
+                )
+
+    def test_opencv_adapter_revalidates_timestamps_during_replay(self) -> None:
+        """Detect decode-order regressions even when the initial scan was sound."""
+        cv2_module = _FakeCv2(
+            [
+                [0.0, 100.0, 150.0, 200.0],
+                [0.0, 100.0, 50.0, 200.0],
+            ]
+        )
+        reader = mediapipe_runtime.OpenCvVideoReader(
+            cast("mediapipe_runtime.Cv2Module", cast("object", cv2_module)),
+            Path("unstable.mp4"),
+        )
+        self.assertIsNotNone(reader.read_at(0))
+        with self.assertRaisesRegex(RuntimeError, "must increase"):
+            reader.read_at(150)
         reader.close()
 
     def test_runtime_dependency_error_is_actionable(self) -> None:

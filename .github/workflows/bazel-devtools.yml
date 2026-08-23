@@ -26,4 +26,4 @@ jobs:
           repository-cache: true
           cache-save: ${{ github.event_name != 'pull_request' }}
       - name: Test and check Bazel targets
-        run: bazel test //... --test_output=errors
+        run: bazel test --config=precommit //... --test_output=errors

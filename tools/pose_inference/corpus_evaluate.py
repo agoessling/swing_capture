@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import enum
 import json
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from python.runfiles import runfiles
 
@@ -20,6 +21,39 @@ if TYPE_CHECKING:
 NANOS_PER_MILLISECOND = 1_000_000
 
 
+class RunfilesResolver(Protocol):
+    """Typed subset of Bazel's dynamically typed runfiles resolver."""
+
+    def Rlocation(self, logical_path: str) -> str | None:  # noqa: N802
+        """Resolve one logical runfile path."""
+        ...
+
+
+class ModelVariant(enum.StrEnum):
+    """Closed set of official MediaPipe Pose Landmarker model variants."""
+
+    LITE = "lite"
+    FULL = "full"
+    HEAVY = "heavy"
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelAssets:
+    """Runfile-resolved official Pose Landmarker model assets."""
+
+    lite: Path
+    full: Path
+    heavy: Path
+
+    def select(self, variant: ModelVariant) -> Path:
+        """Return the pinned asset for a validated model variant."""
+        return {
+            ModelVariant.LITE: self.lite,
+            ModelVariant.FULL: self.full,
+            ModelVariant.HEAVY: self.heavy,
+        }[variant]
+
+
 @dataclasses.dataclass(frozen=True)
 class Executables:
     """Runfile-resolved Bazel stage binaries."""
@@ -29,6 +63,7 @@ class Executables:
     observation_adapter: Path
     replay: Path
     annotator: Path
+    models: ModelAssets
 
     @classmethod
     def from_runfiles(cls) -> Executables:
@@ -38,8 +73,21 @@ class Executables:
             message = "Bazel runfiles are unavailable"
             raise RuntimeError(message)
 
+        return cls.from_resolver(cast("RunfilesResolver", cast("object", resolver)))
+
+    @classmethod
+    def from_resolver(cls, resolver: RunfilesResolver) -> Executables:
+        """Resolve every stage through an injected, typed runfiles resolver."""
+
         def resolve(logical_path: str) -> Path:
             resolved = resolver.Rlocation(f"_main/{logical_path}")
+            if not resolved:
+                message = f"missing Bazel runfile: {logical_path}"
+                raise RuntimeError(message)
+            return Path(resolved)
+
+        def resolve_external(logical_path: str) -> Path:
+            resolved = resolver.Rlocation(logical_path)
             if not resolved:
                 message = f"missing Bazel runfile: {logical_path}"
                 raise RuntimeError(message)
@@ -51,6 +99,13 @@ class Executables:
             observation_adapter=resolve("android/core/pose/pose_landmarks_to_observations"),
             replay=resolve("android/core/pose/pose_trigger_replay"),
             annotator=resolve("tools/pose_inference/annotate_pose_trigger"),
+            models=ModelAssets(
+                lite=resolve_external("pose_landmarker_lite_task/file/pose_landmarker_lite.task"),
+                full=resolve_external("pose_landmarker_full_task/file/pose_landmarker_full.task"),
+                heavy=resolve_external(
+                    "pose_landmarker_heavy_task/file/pose_landmarker_heavy.task"
+                ),
+            ),
         )
 
 
@@ -71,9 +126,6 @@ def build_jobs(
     for clip in manifest.clips:
         if clip.disposition not in corpus.POSITIVE_DISPOSITIONS:
             continue
-        if clip.hitting_region is None:
-            message = f"positive clip {clip.clip_id} has no hitting region"
-            raise ValueError(message)
         jobs.append(
             EvaluationJob(
                 clip=clip,
@@ -120,6 +172,27 @@ def _replay_arguments(job: EvaluationJob, executable: Path, startup_budget_ms: i
         )
         arguments.append(f"--must-not-arm-ms={intervals}")
     return arguments
+
+
+def landmarker_arguments(job: EvaluationJob, executable: Path, model_asset: Path) -> list[str]:
+    """Build the inference command with an explicit Bazel-owned model asset."""
+    return [
+        str(executable),
+        f"--input={job.media_path}",
+        f"--model={model_asset}",
+        f"--output={job.output_directory / 'landmarks.ndjson'}",
+    ]
+
+
+def observation_adapter_arguments(job: EvaluationJob, executable: Path) -> list[str]:
+    """Build ROI-free feature extraction arguments for one corpus clip."""
+    return [
+        str(executable),
+        f"--landmarks={job.output_directory / 'landmarks.csv'}",
+        f"--observations={job.output_directory / 'observations.csv'}",
+        f"--hitting-region={corpus.FULL_FRAME_HITTING_REGION.encoded()}",
+        f"--projection={job.clip.view}",
+    ]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -309,14 +382,14 @@ def _arm_milliseconds(result: dict[str, object], fallback_ms: int) -> int:
 
 
 def evaluate_job(
-    job: EvaluationJob, executables: Executables, startup_budget_ms: int
+    job: EvaluationJob,
+    executables: Executables,
+    startup_budget_ms: int,
+    model_variant: ModelVariant = ModelVariant.LITE,
 ) -> dict[str, object]:
     """Execute all stages for one clip and return its aggregate evidence."""
     clip = job.clip
-    region = clip.hitting_region
-    if region is None:
-        message = f"positive clip {clip.clip_id} has no hitting region"
-        raise ValueError(message)
+    region = corpus.FULL_FRAME_HITTING_REGION
     job.output_directory.mkdir()
     landmarks_ndjson = job.output_directory / "landmarks.ndjson"
     landmarks_csv = job.output_directory / "landmarks.csv"
@@ -324,11 +397,7 @@ def evaluate_job(
     annotated_video = job.output_directory / "annotated.mp4"
 
     _run(
-        [
-            str(executables.landmarker),
-            f"--input={job.media_path}",
-            f"--output={landmarks_ndjson}",
-        ]
+        landmarker_arguments(job, executables.landmarker, executables.models.select(model_variant))
     )
     _run(
         [
@@ -337,15 +406,7 @@ def evaluate_job(
             f"--output={landmarks_csv}",
         ]
     )
-    _run(
-        [
-            str(executables.observation_adapter),
-            f"--landmarks={landmarks_csv}",
-            f"--observations={observations_csv}",
-            f"--hitting-region={region.encoded()}",
-            f"--projection={clip.view}",
-        ]
-    )
+    _run(observation_adapter_arguments(job, executables.observation_adapter))
     replay = parse_replay_result(
         _run(_replay_arguments(job, executables.replay, startup_budget_ms), capture_output=True),
         clip.clip_id,
@@ -372,6 +433,9 @@ def evaluate_job(
         "disposition": clip.disposition,
         "view": clip.view,
         "hitting_region": dataclasses.astuple(region),
+        "legacy_manifest_hitting_region": (
+            None if clip.hitting_region is None else dataclasses.astuple(clip.hitting_region)
+        ),
         "human_safe_arm_start_ms": clip.labels.safe_arm_start_ms,
         "human_preferred_arm_ms": clip.labels.preferred_arm_ms,
         "human_takeaway_ms": clip.labels.takeaway_ms,
@@ -386,7 +450,10 @@ def evaluate_job(
 
 
 def aggregate(
-    manifest: corpus.Corpus, results: Sequence[dict[str, object]], startup_budget_ms: int
+    manifest: corpus.Corpus,
+    results: Sequence[dict[str, object]],
+    startup_budget_ms: int,
+    model_variant: ModelVariant = ModelVariant.LITE,
 ) -> dict[str, object]:
     """Build one stable report without hiding challenge failures."""
     passed = sum(
@@ -407,6 +474,9 @@ def aggregate(
         "schema_version": 1,
         "sample_period_ms": manifest.sample_period_ms,
         "startup_budget_ms": startup_budget_ms,
+        "startup_budget_source": "required_command_line",
+        "model_variant": model_variant.value,
+        "spatial_evaluation_policy": "full_frame",
         "evaluated_clip_count": len(results),
         "passed_clip_count": passed,
         "failed_clip_count": len(results) - passed,
@@ -429,12 +499,27 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--manifest", type=_absolute_path, required=True)
     parser.add_argument("--media-root", type=_absolute_path, required=True)
     parser.add_argument("--output-root", type=_absolute_path, required=True)
-    parser.add_argument("--startup-budget-ms", type=int, default=800)
+    parser.add_argument(
+        "--startup-budget-ms",
+        type=int,
+        required=True,
+        help=(
+            "measured arm-command-to-usable-frame budget; required so an "
+            "evaluation cannot silently inherit a stale device assumption"
+        ),
+    )
+    parser.add_argument(
+        "--model-variant",
+        choices=tuple(variant.value for variant in ModelVariant),
+        default=ModelVariant.LITE.value,
+        help="official Bazel-pinned Pose Landmarker model variant (default: lite)",
+    )
     options = parser.parse_args(arguments)
     manifest_path = cast("Path", options.manifest)
     media_root = cast("Path", options.media_root)
     output_root = cast("Path", options.output_root)
     startup_budget_ms = cast("int", options.startup_budget_ms)
+    model_variant = ModelVariant(cast("str", options.model_variant))
     if startup_budget_ms < 0:
         parser.error("startup-budget-ms cannot be negative")
     parsed = corpus.parse_manifest(manifest_path.read_text(encoding="utf-8"))
@@ -442,8 +527,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     output_root.mkdir(parents=True)
     jobs = build_jobs(parsed, media_root, output_root)
     executables = Executables.from_runfiles()
-    results = [evaluate_job(job, executables, startup_budget_ms) for job in jobs]
-    report = aggregate(parsed, results, startup_budget_ms)
+    results = [evaluate_job(job, executables, startup_budget_ms, model_variant) for job in jobs]
+    report = aggregate(parsed, results, startup_budget_ms, model_variant)
     report_path = output_root / "report.json"
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))

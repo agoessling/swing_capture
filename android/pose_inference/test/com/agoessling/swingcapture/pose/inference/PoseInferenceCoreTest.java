@@ -15,6 +15,7 @@ public final class PoseInferenceCoreTest {
     keepsOnlyLatestPendingFrame();
     defersOwnedInferenceCloseUntilActiveWorkFinishes();
     boundsAndSerializesTrace();
+    validatesClosedModelAssetNames();
   }
 
   private static void convertsI420Deterministically() {
@@ -215,6 +216,22 @@ public final class PoseInferenceCoreTest {
             "{\"frame_timestamp_ns\":4,\"started_ns\":5,\"finished_ns\":6,"
                 + "\"delegate\":\"gpu\",\"outcome\":\"ok\",\"pose_count\":1}\n"),
         "trace serialization");
+  }
+
+  private static void validatesClosedModelAssetNames() {
+    check(PoseModelVariant.productionDefault() == PoseModelVariant.LITE, "production model");
+    check(PoseModelVariant.parse(" FULL ") == PoseModelVariant.FULL, "full model parsed");
+    check(
+        PoseModelVariant.LITE.assetPath().equals("pose_landmarker_lite.task"),
+        "lite asset path");
+    check(
+        PoseModelVariant.FULL.assetPath().equals("pose_landmarker_full.task"),
+        "full asset path");
+    check(
+        PoseModelVariant.HEAVY.assetPath().equals("pose_landmarker_heavy.task"),
+        "heavy asset path");
+    expectThrows(IllegalArgumentException.class, () -> PoseModelVariant.parse(null));
+    expectThrows(IllegalArgumentException.class, () -> PoseModelVariant.parse("custom/path.task"));
   }
 
   private static RgbFrame frame(long timestampNs) {

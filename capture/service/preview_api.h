@@ -42,6 +42,20 @@ struct PreviewPerformanceStatus {
   double resize_milliseconds = 0.0;
   double encode_milliseconds = 0.0;
   double total_milliseconds = 0.0;
+  // These request-time snapshots partition an old visible preview into an
+  // acquisition stall, a latest-frame sampling stall, or renderer backlog.
+  // Sequence zero means that the corresponding stage has not published yet.
+  std::uint64_t latest_capture_frame_id = 0;
+  double latest_capture_age_milliseconds = 0.0;
+  std::uint64_t latest_sink_frame_id = 0;
+  double latest_sink_completion_age_milliseconds = 0.0;
+  std::uint64_t latest_sampler_frame_id = 0;
+  double latest_sampler_completion_age_milliseconds = 0.0;
+  std::uint64_t sampled_sequence = 0;
+  double sampled_age_milliseconds = 0.0;
+  double render_queue_milliseconds = 0.0;
+  std::string renderer_stage = "idle";
+  bool render_pending = false;
 };
 
 struct CameraStatus {
@@ -71,6 +85,7 @@ struct PreviewImage {
   std::uint32_t height = 0;
   std::string media_type;
   std::string bytes;
+  PreviewPerformanceStatus performance;
 };
 
 struct CaptureTriggerStatus {

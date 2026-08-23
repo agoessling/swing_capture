@@ -13,7 +13,7 @@ public final class StandbyDiagnosticCoordinatorTest {
   public static void main(String[] arguments) {
     defaultsAreFixedSixtySecondAudioAndTenTwoWindow();
     detectedImpactWaitsForPostRollAndFreezesExactEvidence();
-    untimedImpactIsRetainedWithExplicitClockStatus();
+    detectedImpactWaitsForValidatedClockAndThenFreezes();
     operatorTagUsesLatestReceiptFrameWithoutGuessingImpact();
     livePreviewSupplierRunsOnlyForConfirmedImpact();
     pendingEventsAreBoundedAtFour();
@@ -79,21 +79,30 @@ public final class StandbyDiagnosticCoordinatorTest {
     check(coordinator.pendingEventCount() == 0, "completed event removed");
   }
 
-  private static void untimedImpactIsRetainedWithExplicitClockStatus() {
+  private static void detectedImpactWaitsForValidatedClockAndThenFreezes() {
     StandbyDiagnosticCoordinator coordinator = coordinator(2, 2, 4);
     short[] pcm = new short[8];
     pcm[3] = pcm(0.9f);
 
-    StandbyDiagnosticCoordinator.AppendResult result =
+    StandbyDiagnosticCoordinator.AppendResult detected =
         coordinator.appendPcm16(pcm, 0, pcm.length, 50, previewSnapshot(10));
 
-    check(result.registeredEvents().size() == 1, "untimed event retained");
-    StandbyDiagnosticCoordinator.EventMarker event = result.registeredEvents().get(0);
-    check(event.markerTime().isEmpty(), "untimed marker estimate absent");
+    check(detected.detectorMetrics().eventsDetected() == 1, "untimed detector event observed");
+    check(detected.registeredEvents().isEmpty(), "untimed event is withheld from consumers");
+    check(detected.frozenEvidence().isEmpty(), "untimed event cannot freeze evidence early");
+
+    coordinator.observeAudioTimestamp(0, 1_000_000_000L, 1_000);
+    coordinator.observeAudioTimestamp(48_000, 2_000_000_000L, 1_000);
+    StandbyDiagnosticCoordinator.AppendResult recovered =
+        coordinator.appendPcm16(new short[1], 0, 1, 58, previewSnapshot(20));
+
+    check(recovered.registeredEvents().size() == 1, "timed event registered after recovery");
+    StandbyDiagnosticCoordinator.EventMarker event = recovered.registeredEvents().get(0);
+    check(event.markerTime().isPresent(), "recovered marker estimate present");
     check(
-        event.audioClockStatus() == StandbyDiagnosticCoordinator.AudioClockStatus.UNVALIDATED,
-        "untimed explicit status");
-    check(result.frozenEvidence().size() == 1, "untimed evidence still freezes");
+        event.audioClockStatus() == StandbyDiagnosticCoordinator.AudioClockStatus.VALIDATED,
+        "recovered explicit clock status");
+    check(recovered.frozenEvidence().size() == 1, "recovered evidence freezes after validation");
   }
 
   private static void operatorTagUsesLatestReceiptFrameWithoutGuessingImpact() {
@@ -148,6 +157,8 @@ public final class StandbyDiagnosticCoordinatorTest {
 
   private static void livePreviewSupplierRunsOnlyForConfirmedImpact() {
     StandbyDiagnosticCoordinator coordinator = coordinator(2, 2, 4);
+    coordinator.observeAudioTimestamp(0, 1_000_000_000L, 1_000);
+    coordinator.observeAudioTimestamp(48_000, 2_000_000_000L, 1_000);
     AtomicInteger snapshots = new AtomicInteger();
     coordinator.appendPcm16(
         new short[4],

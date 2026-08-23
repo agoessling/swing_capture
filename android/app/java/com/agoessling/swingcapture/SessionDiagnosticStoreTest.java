@@ -18,6 +18,7 @@ public final class SessionDiagnosticStoreTest {
     localTimingBoundsAreInclusiveAndWinnerPreserving();
     malformedStoredUtf8IsRejected();
     missedShotHasExplicitInitialClassification();
+    peerAudioTriggersAreSuccessfulCaptures();
   }
 
   private static void initializesAndUpdatesCanonicalIncident() throws Exception {
@@ -160,6 +161,23 @@ public final class SessionDiagnosticStoreTest {
         noImpact.classification()
             == DiagnosticIncident.IncidentClassification.POSE_ARMED_NO_IMPACT,
         "pose no-impact classification");
+  }
+
+  private static void peerAudioTriggersAreSuccessfulCaptures() throws Exception {
+    String[] sources = {
+      "peer_audio_arrival", "peer_audio_local_candidate", "peer_audio_clock_candidate"
+    };
+    for (int index = 0; index < sources.length; ++index) {
+      String sessionId = "peer-" + index;
+      File session = sessionDirectory("peer-audio-" + index, sessionId);
+      DiagnosticIncident incident =
+          new SessionDiagnosticStore(ignored -> {})
+              .initialize(session, sessionId, "shadow-node", sources[index], 4_000 + index);
+      check(
+          incident.classification()
+              == DiagnosticIncident.IncidentClassification.SUCCESSFUL_CAPTURE,
+          "peer audio capture classification");
+    }
   }
 
   private static File sessionDirectory(String test, String sessionId) throws Exception {

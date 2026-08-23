@@ -62,6 +62,16 @@ public final class HttpByteRange {
     return end - start + 1;
   }
 
+  /** Returns at most {@code maximumLength} bytes from the beginning of this range. */
+  public HttpByteRange limitLength(long maximumLength) {
+    if (maximumLength <= 0) {
+      throw new IllegalArgumentException("Maximum range length must be positive");
+    }
+    return maximumLength >= length()
+        ? this
+        : new HttpByteRange(start, start + maximumLength - 1);
+  }
+
   private static void requireNonempty(long length) {
     if (length <= 0) {
       throw new IllegalArgumentException("A byte range requires a nonempty file");

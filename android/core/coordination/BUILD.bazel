@@ -7,6 +7,7 @@ java_library(
         "java/com/agoessling/swingcapture/core/coordination/AssociatedSwing.java",
         "java/com/agoessling/swingcapture/core/coordination/AssociationResult.java",
         "java/com/agoessling/swingcapture/core/coordination/AssociationStatus.java",
+        "java/com/agoessling/swingcapture/core/coordination/AutonomousPairLifecycle.java",
         "java/com/agoessling/swingcapture/core/coordination/CaptureRole.java",
         "java/com/agoessling/swingcapture/core/coordination/ClockExchangeEstimateResult.java",
         "java/com/agoessling/swingcapture/core/coordination/ClockExchangeEstimateStatus.java",
@@ -20,6 +21,15 @@ java_library(
         "java/com/agoessling/swingcapture/core/coordination/SubmissionStatus.java",
     ],
     visibility = ["//visibility:public"],
+)
+
+java_test(
+    name = "autonomous_pair_lifecycle_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/core/coordination/AutonomousPairLifecycleTest.java"],
+    main_class = "com.agoessling.swingcapture.core.coordination.AutonomousPairLifecycleTest",
+    use_testrunner = False,
+    deps = [":coordination"],
 )
 
 java_library(

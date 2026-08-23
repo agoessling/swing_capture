@@ -11,7 +11,7 @@ which the review application can obtain status and completed media.
 The repository now contains the production-shaped vertical slice: a continuous
 foreground-service capture engine, local audio triggering, bounded encoded
 retention, atomic session publication, a single-node HTTP/browser path, and a
-browser-owned dual-node coordinator with durable coordination evidence. Short
+phone-leader-owned dual-node lifecycle with durable coordination evidence. Short
 single-device, sequential two-device, screen-off, concurrent one-event, and
 live paired-browser HIL milestones have passed. The paired pose-standby gate
 also passed with real 5 Hz inference on both phones, production peer arming,
@@ -31,11 +31,11 @@ dual-view timing evidence, thermal stability, media publication, and browser
 workflow. Sharing a repository does not require the two hardware paths to share
 their lowest-level camera implementation.
 
-The Pixel 6 is the reference Android device and is initially assigned the
-`down_the_line` role on the development station. The Pixel 5a is initially
-assigned `face_on` (also called across-the-line). These are machine-local
-defaults, not model-to-role rules. The application must let a user inspect each
-preview and assign either connected phone to either role.
+The Pixel 6 is the reference Android device and the first field station assigns
+it the `face_on` (also called across-the-line) leader role. The Pixel 5a is the
+`down_the_line` shadow. These are evidence-backed machine-local defaults, not
+model-to-role rules. The application lets a user inspect each preview and
+assign either connected phone to either role.
 
 ## Device support policy
 
@@ -160,8 +160,18 @@ path with independent profiles:
   access units. Triggered snapshots lease pool entries so encoding can continue
   while an earlier swing is muxed;
 - local 48 kHz mono `AudioRecord` processing uses an adaptive detector and
-  validated BOOTTIME frame-position mapping. It freezes 1.4 seconds before and
-  500 ms after impact, extending the start to the preceding IDR;
+  validated BOOTTIME frame-position mapping. During paired pose capture only
+  the configured leader makes the terminal impact decision; its authenticated
+  impact request freezes the shadow ring. The shadow continuously records a
+  bounded ring of validated local candidates. The leader measures the shadow's
+  BOOTTIME offset using repeated four-timestamp exchanges, maps its strike into
+  the shadow clock, and carries that bounded mapping in the authenticated
+  schema-2 request. It waits at
+  most 75 ms for late detector evidence, then chooses the closest candidate
+  within 80 ms plus measured clock and audio uncertainty. This prevents an
+  unrelated Pixel 5a transient from ending one side of the pair early while
+  preserving a local strike timestamp on both clips. Clips retain 1.4 seconds
+  before and 500 ms after impact, extending the start to the preceding IDR;
 - `MediaMuxer` writes real-time AVC/MP4 and per-frame metadata into an
   application-private sibling directory, then atomically publishes the pair;
 - audio HIL retains its exact two-second canonical PCM contract for timing
@@ -184,10 +194,10 @@ path with independent profiles:
 
 Role and profile are user configuration, not model inference. New installations
 default to 720p240 at 12 Mbit/s on both nodes; 1080p240 remains selectable.
-The development assignments use Pixel 6 as `down_the_line` and Pixel 5a as
-`face_on`, but either phone may be assigned either role. The service snapshots
-node identity, role, and profile when arming so a later UI change cannot relabel
-an in-flight capture.
+The first field station uses Pixel 6 as `face_on` and Pixel 5a as
+`down_the_line`, but either phone may be assigned either role. The service
+snapshots node identity, role, and profile when arming so a later UI change
+cannot relabel an in-flight capture.
 
 Every encoded frame has a Camera2 REALTIME timestamp derived from a streaming
 ordinal calibration. Audio trigger uncertainty, source, sample rate, detector
@@ -202,12 +212,48 @@ a selectable single-node review URL containing the local control credential;
 the capture phone's display may then remain off while a PC, tablet, or another
 phone reviews the clips. Both capture phones ship the same assets. The browser
 Phone setup flow configures one phone or two explicit phone origins through
-authenticated, revision-checked setup endpoints. Network discovery, live setup
-preview, and a user-friendly production pairing exchange remain future work.
+authenticated, revision-checked setup endpoints. Its identity-binding ceremony shows the stable
+node ID, role, current origin, and a human-readable label obtained through each authenticated setup
+connection. Android NSD/mDNS advertises and resolves `_swing-capture._tcp`; its expiring TXT metadata
+is displayed only as an untrusted address hint. Selecting a hint requires the peer's write-only
+control token, and both the browser and leader authenticate the peer identity before the leader
+commits the address. The leader durably owns the non-secret identity binding and credential
+generation in app-private preferences. Clearing it records a revocation tombstone, and forgetting
+revoked metadata requires typing the full peer node ID. Address recovery accepts a changed origin
+only when the authenticated stable identity and expected role are unchanged. Live setup preview
+reuses the pose standby stream without owning a Camera2 object: at most one detached 640x360 input
+per second is encoded when debug evidence is disabled, while the debug path reuses its existing
+JPEG. The provider retains one active plus one latest pending frame, rejects callbacks from an old
+camera generation, and reports stale or unavailable data while 240 fps owns the camera. The browser
+fetches each JPEG with the current Bearer credential, never places credentials in the URL, corrects
+portrait sensor rotation, and revokes superseded Blob URLs.
 For pose capture, a ready two-phone station has distinct camera roles, exactly
 one leader, and one shadow; the leader must resolve its stored peer origin and
 verify that peer's distinct node ID, opposite role, and shadow mode. Setup
-readiness and updates reject any other pose topology.
+readiness and updates reject any other pose topology. Only the leader's local
+audio detector terminates a paired attempt. The shadow records local detector
+candidates for timing but freezes its ring after the authenticated leader
+impact request. Transient impact delivery is attempted up to three times; a
+separate 1 Hz exchange refreshes a three-sample peer clock estimate. The shadow
+keeps 32 audio candidates and selects the event closest to the mapped leader
+strike after a bounded 150 ms wait. Estimates older than 10 seconds or wider
+than 25 ms are not trusted. The 25 ms value is a provisional, fail-closed implementation bound,
+not a calibrated product threshold. Six same-pair/same-network direct-LAN successes retained
+9.625--22.628 ms composed mapping uncertainty, while one historical high-jitter batch reached
+117.789 ms and was rejected. The exact report-by-report audit and remaining field evidence gap are
+recorded in `docs/pair_clock_evidence_20260822.md`. The current bound covers the measured 43 ms best
+screen-off phone-to-phone Wi-Fi HTTP round trip while remaining well inside
+the separate 80 ms candidate window. With a valid estimate but no candidate in the
+80 ms-plus-uncertainty window, peer-arrival time is used instead of an
+unrelated transient. If no usable estimate exists, the prior conservative
+latest-candidate-within-250-ms policy remains as a fallback before arrival
+time. Peer clock age, round-trip bounds, and uncertainty are exposed in pose
+status for field diagnosis. Mapping uncertainty composes the clock-offset and
+leader audio-timestamp uncertainty with overflow checks; candidate selection
+also includes the shadow candidate's local audio uncertainty. The shadow
+validates that the mapped target names its own node before use and retains the
+accepted mapping, policy decision, selected source, and fallback semantics in
+status. Schema-1 requests remain a staged-upgrade fallback.
 
 A dual-node review bookmark has this shape (URL-encode the two origin values in
 a real bookmark):
@@ -216,14 +262,40 @@ a real bookmark):
 http://<leader-phone>:8088/?dtl_node=http://<dtl-phone>:8088&dtl_token=<dtl-token>&face_node=http://<face-phone>:8088&face_token=<face-token>#review
 ```
 
-The foreground service exposes a bounded HTTP/1.1 API on port 8088. Mutating
-requests require a per-installation 192-bit Bearer credential displayed only
-on the phone. Request headers/bodies, client concurrency, paths, storage, and
-media ranges are bounded. Read-only metadata and media remain unauthenticated
-and cleartext on the trusted LAN so browser `<video>` range requests work;
-diagnostic ZIP export is credentialed because it includes microphone evidence.
-Production pairing, encrypted transport, and general read authorization remain
-open.
+The foreground service exposes a bounded HTTP/1.1 API on port 8088. Mutations and every
+operational, setup, pairing, capture, session, diagnostic, and coordination metadata read require a
+per-installation 192-bit Bearer credential displayed only on the phone. New API reads fail closed.
+Only `/api/v1/clock` remains public as an explicitly untrusted, non-cacheable time hint that never
+returns control-token material. Its `node_id` is also only a hint: clock consumers must match it to
+the identity previously learned from the Bearer-authenticated pairing endpoint before admitting a
+sample. `/api/v1/node` identity requires the destination Bearer credential.
+Request headers/bodies, client concurrency, paths, storage, and media ranges are bounded. Because
+browser `<video>` range requests cannot attach an Authorization header, an authenticated
+manifest/catalog grants an HMAC-SHA256 capability scoped to exactly one immutable session or field
+recording; another session, an appended query, or control-credential rotation invalidates it.
+Capability-bearing manifests and catalogs use `Cache-Control: private, no-store`. Peer and preflight
+clients reject HTTP redirects before sending Bearer credentials to a different origin. Peer requests
+can use Bearer directly. Peer configuration and all native peer clients share one exact-origin
+security policy: `http://host:port` is classified as `cleartext_trusted_lan_demo`, while
+`https://host:port` is classified as `protected_https` and uses the platform HTTPS certificate
+validation path. Setup and pairing responses expose that classification. The policy also provides
+a fail-closed protected-only boundary, and an active HTTPS identity binding cannot silently move to
+HTTP during authenticated address recovery; the operator must revoke and explicitly re-pair.
+
+The current embedded phone server and browser bootstrap still use HTTP, so credentials, hints,
+metadata, capabilities, and media bytes remain observable on the trusted demo LAN. Moving the
+product to the protected-only boundary will use the station-local CA, per-installation Android
+Keystore identity, and attended bootstrap specified in the dependency-ordered closure plan below.
+Phone TLS termination, peer and browser migration, rotation/recovery, and the final cleartext-off
+cutover remain unimplemented. No permissive trust manager or self-signed-certificate bypass is
+present.
+
+`POST /api/v1/control-credential/rotate` is the only network response that returns a local control
+token. The request must use the current Bearer token and supply the current setup revision plus the
+full local node ID as explicit confirmation. Capture must be stopped. Its one-time response returns
+the new 192-bit token and generation so the initiating browser can continue; every prior token is
+invalid immediately. Other browsers and any leader that controls this phone must enter the new
+token and explicitly re-pair.
 
 The field-diagnostic routes are:
 
@@ -247,18 +319,15 @@ A live Pixel 6 check passed monotonic clock exchange, 401 unauthorized control,
 400 malformed authenticated JSON, session/manifest retrieval, and MP4 byte
 ranges.
 
-The browser now implements the end-to-end dual-node coordinator. It provisions
-one `shared_session_id` to both nodes before arm, collects repeated
-four-timestamp samples from `GET /api/v1/clock`, and reads each
-role/node/local-trigger/uncertainty report from
-`GET /api/v1/capture/trigger-report`. It intersects clock-offset bounds and
-explicitly rejects missing, late, replayed, duplicate-role, same-node,
-unrelated, ambiguous, or excessive-uncertainty pairs. An accepted alignment is
-stored through authenticated `GET`/`POST`
-`/api/v1/coordination/{shared_session_id}` as an immutable record on both
-phones. The browser recovers that record after reload and refuses conflicting
-replicas. Discovery, production pairing/security, live setup preview,
-long-duration lifecycle, and thermal qualification remain open.
+The configured phone leader now owns the end-to-end dual-node lifecycle: it creates the shared
+session ID, dispatches arm and impact, collects bounded clock/evidence samples, admits the pair,
+stores the immutable coordination record locally, and replicates it to the shadow. The browser is
+a setup and review client. It can still fetch and validate the same trigger reports and immutable
+records after reload, but capture correctness does not depend on an open browser. Pair admission
+explicitly rejects missing, late, replayed, duplicate-role, same-node, unrelated, ambiguous, or
+excessive-uncertainty evidence. Protected transport and read authorization, long-duration
+lifecycle, and thermal qualification remain open. The two-phone discovery,
+credential-rotation, and re-pair ceremony has passed its bounded physical gate.
 
 ## Validated physical milestones
 
@@ -379,7 +448,8 @@ Camera2 constrained high-speed session -- camera timestamps -- encoded rolling r
                                                                |
 AudioRecord -- local timestamps -- impact detector -------------+-- frozen clip + evidence
                                                                |
-role/configuration + HTTP service -------------------------------+-- station browser/coordinator
+role/configuration + HTTP service -------------------------------+-- phone leader lifecycle
+                                                               +-- browser setup/review
 ```
 
 The camera, microphone, encoder, and retention loop must continue without a
@@ -387,13 +457,13 @@ browser connection. A transient Wi-Fi delay must not cause a missed swing.
 Network messages associate the two completed views with one session; they
 should not be the mechanism that starts high-speed capture after impact.
 
-The implementation evaluates local impact detection on both phones. Each node
-has the best local relationship between its microphone and camera timestamps
-and retains enough pre- and post-impact data without waiting for the peer. The
-coordinator reconciles the two trigger reports and rejects a pair whose timing
-evidence does not agree. A single designated trigger phone remains an option,
-but only after measured network and acoustic latency show that it improves the
-result.
+The leader's local audio detector is authoritative for capture termination. The shadow keeps its
+own detector active only to select a bounded clock-mapped local acoustic candidate; if none is
+available, it records the mapped peer-arrival fallback explicitly. Each phone still retains enough
+pre- and post-impact data to tolerate transport delay. Pair admission reconciles both reports and
+rejects timing evidence that does not agree. The `field_readiness_v2` holdout remains necessary
+before this policy is treated as production-final: at least two fully reviewed phone/view-swapped
+sessions must repeat every required category across two sessions.
 
 Raw 1080p frames are too expensive for a long 240 fps ring, so the implemented
 node uses continuous hardware encoding with bounded encoded retention and an
@@ -433,6 +503,111 @@ device-administrator/device-owner privileges; this project deliberately avoids
 that security-sensitive provisioning and does not mislabel zero brightness as
 screen-off.
 
+The reboot boundary is now an explicit product policy rather than an implied
+`START_STICKY` guarantee. The application and camera/microphone service remain
+outside direct boot. One narrowly scoped direct-boot-aware receiver observes
+locked-boot, completed-boot, and first-unlock broadcasts and writes only a
+non-secret marker to device-protected storage. It never starts the service,
+camera, microphone, networking, or capture. After an OS reboot the operator
+must unlock the phone once and open Swing Capture in the foreground; the
+activity then starts the camera/microphone foreground service using the already
+implemented permission ceremony. `START_STICKY` remains best-effort
+process-recreation behavior only. A zero-touch reboot mode would be a separate
+device-owner/kiosk architecture and is not silently enabled by this APK.
+
+Both `/api/v1/setup` and `/api/v1/status` expose `reboot_recovery`, including
+the selected `operator_launch_after_first_unlock` mode, the latest durable boot
+observation, current unlock/service readiness, and any remaining operator
+action. This reporting and its pure policy/manifest tests are software-complete;
+a physical reboot, first-unlock, launch, peer-recovery, and rearm ceremony has
+not been qualified for this revision.
+
+The explicit physical gate for closing that evidence gap is
+`//android/dual_hil:dual_phone_os_reboot_ceremony_hil_test`. This target really reboots both
+phones; it is not part of the normal HIL loop and must be run only with the phones locally
+accessible to an operator. Use two USB ADB connections, because a wireless-debugging endpoint may
+not survive an OS reboot. Before running it, leave the configured production pair stopped in
+`READY`, verify the LAN origins, and keep both screens accessible:
+
+```bash
+bazel test //android/dual_hil:dual_phone_os_reboot_ceremony_hil_test \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=22181FDF6005QH \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=1A011JEG501717 \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN=http://10.168.168.111:8088 \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN=http://10.168.168.241:8088 \
+  --test_env=SWING_CAPTURE_APPROVE_OS_REBOOT_CEREMONY=I_UNDERSTAND_THIS_REBOOTS_BOTH_PHONES_AND_REQUIRES_LOCAL_UNLOCK \
+  --test_output=streamed --nocache_test_results
+```
+
+The gate first refuses any node that is armed, not complementary and authentically paired, or not
+running the byte-exact Bazel APK. The APK check is read-only: a mismatch fails rather than
+installing. It then asks the operator not to launch the app, issues the two reboot commands, and
+allows at most 120 seconds for Android boot plus first unlock. After unlock it requires both the
+capture service and direct-LAN API to remain absent, then prompts the operator to open Swing
+Capture on both phones. The runner never sends an activity-start command. A second 120-second
+watchdog bounds this human stage; all subsequent API, rearm, peer-clock, and cleanup stages retain
+the ordinary 15-second bound.
+
+A passing `report.json` requires changed Linux boot IDs, advancing device-protected boot-marker
+counts, foreground activity on both phones, exact durable node/configuration/pairing fields across
+reboot, the recovered leader binding, real 5 Hz monitoring on both nodes, and successful terminal
+disarm. The recovered leader clock must identify the durable shadow node, contain at least one
+sample, be no older than 10 seconds, and have uncertainty no greater than 25 ms. Missing,
+malformed, stale, wider, or wrong-peer clock evidence fails the software validator. The report
+retains pre/post/cleanup setup and status documents under the Bazel
+undeclared test outputs. No APK is installed, no configuration endpoint is called, no private file
+is removed, and cleanup proves both phones finish `READY` and unarmed. Static compilation or the
+software validator does not qualify the physical ceremony; only a reviewed passing artifact from
+this explicitly run target can close the TODO.
+
+## Minimum Android device floor
+
+The APK and runtime admission check now use one explicit minimum floor:
+
+- Android API 34 or newer;
+- granted camera and microphone runtime permissions;
+- a rear camera with `REALTIME` timestamps, supported sensor orientation, a
+  16:9 YUV standby size of at least 640x360, and a fixed 240 fps range for the
+  selected 720p or 1080p profile;
+- a hardware H.264 encoder that advertises the selected size at 240 fps;
+- a valid 48 kHz mono PCM16 `AudioRecord` buffer configuration; and
+- OpenGL ES 3.1 or newer for the production pose GPU platform.
+
+Arming now fails before changing coordination or camera state when the local
+phone does not meet that floor. The setup and status APIs expose a structured
+`device_admission` result, and the operator capability inventory retains the
+full `product_floor_assessment`. The inference contract is Lite at 640x360 and
+5 Hz, with delegate selection scoped to one node. The capability policy does
+not receive a manufacturer or model string, so an eventual Pixel 5a fallback
+cannot mutate the Pixel 6 assessment or select a lower pair-wide path. Passing
+this static admission is necessary but not thermal, inference-latency, or
+long-duration physical qualification.
+
+After launching the exact APK, retain and validate both fresh inventories with the Bazel-provided
+ADB tool:
+
+```bash
+bazel run //tools:android_capability_report -- \
+  --serial 22181FDF6005QH --serial 1A011JEG501717 \
+  --output-dir artifacts/android_product_floor_current
+```
+
+The collector is read-only, overlaps the independent pulls, refuses to overwrite existing
+evidence, and emits a credential-redacted pair report. Its Bazel target supplies the current APK;
+the collector pulls and host-hashes each installed monolithic `base.apk` and requires both digests
+to match that Bazel artifact. Pixel 6/API 36 and Pixel 5a/API 34 pass the capability floor,
+screen-off and per-node pose-policy isolation, and the installed/Bazel identity checks at
+`artifacts/android_product_floor_exact_apk_pass_20260823T072145Z/report.json`. The expected APK and
+both installed APKs have SHA-256
+`328203380f02db24ec7d7707476cab361d3164476d5c9187549897aa64cad39a`. Re-run the collector for any
+new phone or materially changed APK; do not interpret this static admission as a thermal soak.
+
+The camera, codec, audio-format, API, and OpenGL portions are probed once when
+the node service starts. Camera and microphone grants are overlaid from the
+current Android permission state before every arm decision and every setup or
+status response. This keeps those common checks cheap while preventing a
+service-lifetime permission snapshot from contradicting current readiness.
+
 ## Roles and station configuration
 
 The canonical roles remain `down_the_line` and `face_on`. User-facing text may
@@ -445,13 +620,59 @@ impact first. The current Phone setup UI allows either canonical role and
 supported profile; it rejects changing capture identity while a capture is
 starting, armed, retaining post-roll, or publishing. It manually associates
 explicit phone origins and tokens and validates the configured peer descriptor.
-Future discovery and production pairing should:
+The browser pairing foundation now:
 
-1. discover or pair both application installations;
-2. show a live preview and stable installation identity for each node;
-3. let the user assign each distinct node to one role;
-4. reject missing or duplicate roles; and
-5. persist and include the verified mapping in every session manifest.
+1. models expiring NSD/mDNS observations without trusting advertised identity as authentication;
+2. verifies stable installation identity, role, and current origin through an authenticated setup
+   connection before user confirmation;
+3. lets the user assign each distinct node to one role and rejects duplicate identities or roles;
+4. retains only non-secret binding metadata with a human-readable label and credential generation;
+5. requires explicit credential rotation, address recovery, re-pair, revocation, and full-node-ID
+   reset transitions.
+
+The Android NSD/mDNS adapter feeds this abstraction, while the verified binding is stored in the
+leader's credential-encrypted app-private preferences and mirrored without secrets in browser-local
+UX metadata. The Phone setup UI also supports deliberate rotation of the local installation's
+global Bearer credential. Rotation is accepted only with the currently valid credential, the
+current setup revision, a capture-safe runtime state, and exact confirmation of the full local node
+ID. It atomically advances the credential generation and setup revision, returns the new token only
+from that explicit action, and immediately rejects the old token. Ordinary GET, status, identity,
+discovery, and diagnostic artifacts expose only non-secret generation or health metadata. A leader
+whose peer rejects a stored token reports `re_pair_required` and requires the operator to enter the
+peer's current token; transient network loss reports `unavailable` without silently revoking or
+verifying it. A discovery advertisement alone can never update a binding.
+
+The bounded two-phone qualification is explicit and excluded from the default suite:
+
+```bash
+bazel test //android/dual_hil:dual_phone_discovery_pairing_hil_test \
+  --test_output=streamed --nocache_test_results
+```
+
+It uses the two serials and LAN origins from the station environment, installs and starts the final
+APK on both phones, snapshots and restores each complete private node configuration, and bounds the
+mutual-discovery/authenticated-pairing stage to 15 seconds. Its undeclared `report.json` and redacted
+JSON artifacts prove that NSD observations remained untrusted, the leader had no active binding
+before the setup mutation, the authenticated peer became the durable binding afterward, and a bad
+peer credential was rejected without advancing the setup revision. The target also rotates the
+shadow's own credential, requires its old token and the leader's stale binding to fail, then enters
+the new token through an explicit authenticated re-pair and requires healthy redacted setup again.
+The bounded physical run passed on 2026-08-22. Its retained
+`artifacts/android_discovery_pairing_pass_20260822T180317/report.json` proves mutual untrusted
+discovery, authenticated mutation-only binding, bad-credential rejection, own-credential rotation,
+immediate old-token rejection, stale-leader `re_pair_required`, explicit re-pair with the new token,
+artifact redaction, and exact restoration of both private configuration generations.
+
+Every dual-phone physical target now creates `cleanup.json` before its first phone mutation and
+merges the finalized evidence into the aggregate `report.json`. The cleanup report registers each
+required package stop, ADB forward/reverse removal, app-private temporary-file removal, complete
+node-configuration restore, and temporary Wi-Fi re-enable. It retains every attempt as `restored`
+or `failed`, including a failed checked attempt followed by a successful unwind retry, while its
+obligation summary reports the final restored and unresolved counts. A cleanup failure turns an
+otherwise successful physical result red. When the physical stage and cleanup both fail,
+`primary_outcome` and the aggregate diagnostic preserve the physical failure and exit code while
+the independent `cleanup` object carries the restoration failure; cleanup can no longer replace
+the evidence needed to diagnose the original fault.
 
 ADB serials are useful development identities but are not an appropriate
 production API. Each app installation should create a stable random node ID,
@@ -459,8 +680,8 @@ present a human-readable device label, and support deliberate re-pairing or
 identity reset. The current development mapping is:
 
 ```text
-down_the_line = Pixel 6, ADB serial 22181FDF6005QH
-face_on       = Pixel 5a, ADB serial 1A011JEG501717
+down_the_line = Pixel 5a, ADB serial 1A011JEG501717
+face_on       = Pixel 6, ADB serial 22181FDF6005QH
 ```
 
 ## Timing and synchronization
@@ -513,7 +734,7 @@ shared session ID, clock samples, trigger reports, and immutable app-private
 coordination records. The browser supports both current paths:
 
 ```text
-http://<web-app-address>/?node=http://<phone-address>:8088
+http://<web-app-address>/?node=http://<phone-address>:8088&node_token=<credential-shown-on-phone>
 http://<web-app-address>/?dtl_node=http://<dtl-address>:8088&dtl_token=<dtl-token>&face_node=http://<face-address>:8088&face_token=<face-token>
 ```
 
@@ -522,14 +743,140 @@ requires exactly one endpoint for each role, arms both with one shared ID,
 performs repeated clock exchange, admits the trigger pair, composes the
 platform-neutral two-view manifest, and writes the accepted coordination
 record to both phones. Authenticated coordination `POST` is create-only: an
-identical retry is idempotent and conflicting content is rejected. It still
-needs:
+identical retry is idempotent and conflicting content is rejected. Setup and capture status also
+publish an additive `operational_health` object with Android thermal status/headroom, power-save
+mode, usable storage, the 2 GiB retention reserve, per-domain readiness, and combined readiness.
+Severe thermal status and sub-reserve storage enter the existing setup readiness issue list.
+Capture status also publishes a per-server stream ID, strictly increasing revision, and monotonic
+generation timestamp with `Cache-Control: no-store`. The browser probes each phone independently
+with the current Bearer credential, rejects stale revisions, and reconnects with bounded
+exponential backoff. A disconnected or stale phone disables live capture actions without
+discarding an already-loaded review. Before use outside the trusted prototype LAN it still needs:
 
-- an authenticated pairing step and credential rotation/revocation;
-- TLS or another protected transport plus authorization for read-only media;
-- readiness, thermal, and storage detail beyond the current capture counters;
-- reconnectable status updates over WebSocket or server-sent events;
-- discovery and setup preview.
+- provisioned TLS identities (or another authenticated protected transport), phone-side
+  termination, enforcement of the existing protected-only policy boundary, and a user-friendly
+  production pairing exchange;
+
+### Protected transport closure plan
+
+This TODO is not closed by accepting an `https://` string or by adding a permissive trust manager.
+The current boundary spans five components: `NodeHttpServer` accepts raw `ServerSocket` connections,
+Android NSD constructs `http://` origins, peer clients use `HttpURLConnection`, the embedded browser
+bootstraps Bearer credentials from an HTTP URL, and the APK declares
+`android:usesCleartextTraffic="true"`. All five must migrate together. Until the final enforcement
+step, cleartext remains an explicitly labeled `cleartext_trusted_lan_demo` mode and must never be an
+automatic fallback from a failed protected connection.
+
+The selected identity model is a station-local certificate authority, not a self-signed leaf on
+each phone. The station CA private key belongs to an operator-controlled provisioning tool and is
+never installed in the APK. Each app installation generates a non-exportable server private key in
+Android Keystore and submits a certificate-signing request containing its durable node ID. The
+issued leaf certificate must contain:
+
+- a station-controlled, stable DNS SAN used by browsers and peer clients, with a reserved IP SAN
+  only when the station deliberately operates by fixed address;
+- a Swing Capture node-ID SAN URI so the authenticated certificate identity can be compared with
+  the API's durable node ID;
+- `serverAuth` extended-key usage, the station CA identifier, serial number, validity interval, and
+  a SHA-256 SPKI fingerprint recorded in the provisioning manifest; and
+- a bounded lifetime selected with a renewal window long enough to complete an attended station
+  rotation before expiry.
+
+The station DNS or address reservation is part of provisioning. NSD remains an untrusted discovery
+hint and cannot define a certificate identity. The station CA public certificate is installed
+explicitly in the selected Chrome host's operating-system trust store and as an app-private trust
+anchor on each capture phone. Installing or replacing that anchor requires an out-of-band operator
+check of its SHA-256 fingerprint. A browser certificate warning, an all-trusting `TrustManager`, a
+custom hostname verifier that returns true, and trusting a root learned from NSD or the candidate
+peer are all prohibited.
+
+Implement the migration in this dependency order:
+
+1. **Freeze the provisioned identity and evidence schemas.** Add versioned, strict parsers for the
+   CA identity, node certificate chain, node-ID binding, DNS/IP SANs, SPKI fingerprint, validity,
+   and current/next pin generations. Reject unknown critical fields, weak keys/signatures,
+   mismatched node IDs, expired or not-yet-valid certificates, and arithmetic overflow in validity
+   calculations. Keep private-key operations behind an Android Keystore adapter and make the
+   policy testable with a synthetic clock and checked-in test certificates whose private keys are
+   test-only.
+2. **Add phone-side TLS termination without changing the HTTP application protocol.** Put socket
+   creation behind a small listener factory, build the production `SSLContext` from the
+   Keystore-backed leaf and provisioned chain, and run the existing bounded parser and twelve-client
+   executor only after a successful TLS handshake. Bound handshake time and input before assigning
+   a normal request worker. Initially expose this on a separate, explicitly configured HTTPS port
+   so the trusted-LAN demo listener remains diagnosable; never redirect credential-bearing HTTP to
+   HTTPS. Preserve all current body, header, Range, concurrency, storage, and shutdown bounds.
+3. **Centralize protected peer connections.** Replace direct connection creation in
+   `PosePeerArmClient`, `AutonomousPairPeerClient`, the authenticated setup probe, and
+   `PeerClockClient` with one connection factory. It must perform ordinary chain and hostname
+   validation against the provisioned station CA, then require the paired node-ID/SPKI binding.
+   Redirects stay disabled. No Bearer header or body may be transmitted until the TLS peer is
+   accepted; certificate, hostname, node-ID, pin, or expiry failure is terminal rather than
+   retryable over HTTP. The public clock response remains an untrusted hint and is admitted only
+   after the existing authenticated node-identity comparison.
+4. **Bind discovery and pairing to the protected identity.** Advertise the transport kind, stable
+   protected origin, CA identifier, and leaf SPKI fingerprint in NSD as hints. Extend the durable
+   pairing binding with the authenticated CA ID, certificate node ID, current pin, optional next
+   pin, pin generation, and certificate expiry. Address recovery may change an IP hint only after
+   TLS proves the same certificate identity. A changed certificate identity cannot be adopted from
+   discovery or from a Bearer-authenticated response alone.
+5. **Replace URL-token bootstrap in the browser.** First install and verify the station CA on the
+   selected Chrome host. The phone then displays a QR code or short attended setup payload
+   containing the HTTPS origin, node ID, CA fingerprint, leaf SPKI fingerprint, and a single-use,
+   short-lived bootstrap code—not the long-lived control credential. After normal browser TLS
+   validation, an HTTPS bootstrap exchange consumes that code once and installs the existing
+   origin-keyed tab credential without placing it in the URL, history, referrer, logs, or an NSD
+   record. The dual-node setup performs this ceremony independently at both origins. Native video
+   Range requests continue to use collection-scoped capabilities, but the manifest, capability,
+   query, and media bytes are then protected by TLS.
+6. **Implement renewal, pin rotation, and recovery before enforcing protected-only mode.** A
+   same-key certificate renewal keeps the SPKI pin and advances certificate metadata only after the
+   old authenticated channel validates the new chain. A key rotation stages exactly one
+   CA-validated next pin, proves possession on the old authenticated channel, and allows a bounded
+   current/next overlap before atomically committing the new generation. CA rotation similarly
+   requires an explicitly provisioned dual-root overlap; no network response may introduce a new
+   root. Expiry, Keystore loss, lost old-key possession, or a node-ID reset fails closed and requires
+   local re-provisioning plus explicit peer/browser re-pairing. That recovery also rotates the
+   control credential and retains a non-secret revocation tombstone so stale certificates, pins,
+   tokens, and address hints cannot restore trust.
+7. **Make the release cutover fail closed.** Once phone, peer, browser, rotation, and recovery gates
+   pass, remove the HTTP listener from the production configuration, require
+   `PeerTransportSecurityPolicy.Requirement.PROTECTED_ONLY` at every persisted/configured peer
+   boundary, advertise only HTTPS, and set the release manifest to
+   `android:usesCleartextTraffic="false"` with no broad network-security exception. A separately
+   named developer/demo target may retain trusted-LAN HTTP, but its package/artifact identity and
+   UI must make it ineligible for product-floor or release evidence.
+
+The deterministic evidence must be complete before any physical qualification:
+
+- pure tests cover strict certificate/provisioning parsing, hostname and node-ID matching, expiry,
+  current/next pin transitions, CA rotation, revocation, rollback, generation exhaustion, and every
+  protected-to-cleartext downgrade path;
+- a loopback TLS integration target uses a test CA and real TLS sockets to prove accepted traffic,
+  wrong CA, wrong hostname, wrong node ID, stale pin, expired certificate, handshake timeout,
+  oversized pre-handshake/application input, redirect rejection, and absence of an HTTP fallback;
+- the existing Node HTTP contract is replayed through TLS, including Bearer mutations, public clock
+  semantics, CORS, bounded manifests, capability-scoped HEAD/Range media, credential rotation,
+  concurrency, and clean listener shutdown;
+- browser interaction tests start from HTTPS fixtures and prove one-time bootstrap consumption,
+  two-origin setup, reload behavior, URL/history/referrer redaction, stale bootstrap/token failure,
+  certificate failure, and exact Range playback without a cleartext request; and
+- the manifest policy test requires cleartext disabled in the release APK, while Bazel dependency
+  queries ensure the demo listener/configuration cannot enter that artifact.
+
+The physical closure gate must use the exact candidate APK on both supported phones and the
+selected installed Chrome. It must retain certificate chains/fingerprints without private keys;
+provision both nodes; pair by the attended bootstrap; exercise discovery, setup, arm, peer impact,
+publication, coordination, authenticated HEAD/Range retrieval, and playback over direct LAN HTTPS;
+then rotate one leaf/pin and prove continued operation. Negative stages must show that an unknown
+CA, wrong hostname/node ID, stale pin, expired leaf, replayed bootstrap, and forced HTTP origin all
+fail without disclosing a credential or mutating configuration. Separate recovery stages must cover
+an IP-address change with stable identity and attended recovery after simulated Keystore identity
+loss in a disposable qualification identity slot. A packet capture on the isolated qualification
+LAN must show that Bearer credentials, capabilities, metadata, and media payloads are not present in
+cleartext; ordinary IP/TLS traffic metadata is not claimed confidential. Only a reviewed report
+containing those positive, negative, rotation, recovery, cleanup, and exact-APK results closes the
+protected-transport TODO.
 
 The existing browser review UI consumes platform-neutral session metadata and
 encoded media; it does not depend on Camera2 objects or Android lifecycle
@@ -637,8 +984,8 @@ The strict two-phone sequential gate is:
 
 ```bash
 bazel test //android/dual_hil:dual_phone_sequential_hil_test \
-  --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=22181FDF6005QH \
-  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=1A011JEG501717 \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=1A011JEG501717 \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=22181FDF6005QH \
   --test_output=streamed --nocache_test_results
 ```
 
@@ -663,16 +1010,123 @@ passed that complete contract, including durable create/read-back on both
 nodes.
 
 `//android/dual_hil:dual_phone_paired_pose_arm_hil_test` extends that contract
-through the low-rate standby path. The latest passing evidence is preserved at
-[`artifacts/android_pose_field_readiness_20260821/dual_paired_passed_000604/report.json`](../artifacts/android_pose_field_readiness_20260821/dual_paired_passed_000604/report.json).
+through the low-rate standby path. The latest direct-LAN passing evidence is
+preserved at
+[`artifacts/android_pcm_paired_s06_lan_pass_20260822T164310/report.json`](../artifacts/android_pcm_paired_s06_lan_pass_20260822T164310/report.json).
 Both phones ran real 5 Hz on-device inference; an explicitly HIL-gated Pixel 6
 leader candidate exercised the production authenticated peer client and the
 Pixel 5a recorded the inbound arm. Both cameras then transitioned concurrently
-to 720p240 and captured one Feather event. Pixel 6 retained 588 frames at
-238.876 fps and Pixel 5a retained 582 at 239.353 fps. Both decoded exactly,
-passed commanded-tone and optical checks, and retained AprilTag 0 across the
-impact. The durable coordination record passed on both nodes with 10.890 ms
-maximum mapped trigger separation and 7.359 ms combined pair uncertainty.
+to 720p240 and captured one full-scale S06 recorded-impact replay. Pixel 6
+retained 561 frames at 239.043 fps and Pixel 5a retained 568 at 239.248 fps.
+Both decoded exactly, retained AprilTag 0 across the impact, and passed their
+optical/audio bounds at 18.486 and 21.325 ms. The gate assigned Pixel 6
+`face_on` leader and Pixel 5a `down_the_line` shadow; their final sources were
+`local_audio` and `peer_audio_clock_candidate`. The schema-2 mapped impact was
+bound to the current shared session and target node, and the durable
+coordination record passed on both nodes with 12.206 ms maximum mapped trigger
+separation and 9.177 ms combined pair uncertainty. It used direct Wi-Fi peer
+transport with no ADB reverse, and proved that 20 ms high-speed audio reads
+avoid the prior phase-dependent `peer_audio_arrival` fallback.
+
+The revised gate uploads a byte-exact native 48 kHz PCM16 window from the field
+recording, then replays its gain-scaled samples rather than substituting a
+synthetic tone. This preserves digital source identity without claiming
+acoustic equivalence through the fixture speaker, room, and phone microphones.
+The checked-in `field_pcm_replay_cases.json` identifies each window by source
+frame, sample count, marker frame, gain, and expected CRC32; the private source
+WAV remains under ignored `artifacts/` storage. Run one physical case at a time:
+
+```bash
+bazel test //android/dual_hil:dual_phone_paired_pose_arm_hil_test \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=22181FDF6005QH \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=1A011JEG501717 \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_MANIFEST="$PWD/android/dual_hil/field_pcm_replay_cases.json" \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_WAV="$PWD/artifacts/<field-session>/face_on_pixel6_audio.wav" \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_CASE=S06-representative \
+  --test_output=streamed --nocache_test_results
+```
+
+Required-positive cases are `S11-quiet`, `S06-representative`, and `S03-loud`.
+`practice-hard-negative` and `low-transient-negative` are diagnostic cases: a
+false acceptance makes matrix qualification fail. An observed no-trigger is
+recorded as the expected diagnostic outcome, followed by an explicit disarm
+and configuration restore; that path does not fabricate a PNG requirement.
+If a diagnostic case does trigger, the runner waits for both sessions and
+pulls their manifests, WAVs, and MP4s before publishing a self-identifying
+failed report.
+The runner uploads and CRC-verifies the selected window, calibrates the fixture,
+arms both phones, refreshes calibration after high-speed readiness, and then
+requires the playback receipt to say `prepare_source=calibration`. Each
+transition, replay/capture, salvage, pull, and analysis stage remains bounded to
+15 seconds. If playback does not automatically trigger the Pixel 6, the gate
+stays failed, snapshots both nodes' high-speed audio peak/noise/threshold, and
+uses a `missed_shot` trigger only to retain both rings for diagnosis. Those
+salvage clips are explicitly ineligible for qualification.
+
+The upload receipt CRC identifies the unchanged source window. The playback
+receipt separately carries the expected and observed CRC32 of the gain-scaled
+mono PCM16LE samples; the host requires those scaled values to match.
+The production detector's point timestamp must remain within 20 ms of the
+labeled optical strike. Because a 240 fps frame only localizes the LED onset to
+an exposure interval, the recorded-PCM gate separately allows a 25 ms maximum
+conservative bound after composing camera phase, media-timestamp residual, and
+audio-timestamp uncertainty. Both the point offset and expanded interval are
+retained in `evidence.json`; this does not move the source marker to the later
+microphone peak.
+The high-speed `AudioRecord` retains a 200 ms-class internal safety buffer but
+processes it through 20 ms blocking reads. This bounds detector delivery across
+independent phone read phases; the shadow waits at most 150 ms for its own
+clock-matched acoustic candidate before using the explicitly audited
+`peer_audio_arrival` fallback.
+Confirmed impacts which precede a valid startup clock mapping are held in a
+four-event FIFO rather than discarded. Detection accounting and cooldown happen
+at confirmation time; delivery waits until both strike and confirmation frames
+map through a validated `AudioTimestamp`. This specifically covers devices
+whose first timestamp is rejected for clock-rate, uncertainty, or frame-position
+consistency without weakening the requirement for mapped trigger time.
+
+`//android/dual_hil:pcm_replay_extract` reproduces a case's exact little-endian
+PCM bytes and prints its identity. `//android/dual_hil:pcm_replay_score` consumes
+the case manifest plus a schema-2 observations JSON and emits the confusion
+matrix and per-row source ID, CRC32, gain, pair outcome, and per-role production
+trigger sources. Missing
+required positives count as misses. Diagnostic observations are optional, but
+any observed diagnostic false trigger keeps the aggregate gate red.
+
+For field-readiness validation over the production phone-to-phone network path,
+use the LAN-specific target. ADB forwarding remains only for host orchestration;
+the target creates no ADB reverse and configures the leader with the Pixel 5a's
+actual Wi-Fi origin:
+
+```bash
+bazel test //android/dual_hil:dual_phone_paired_pose_arm_lan_hil_test \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=22181FDF6005QH \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=1A011JEG501717 \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN=http://10.168.168.111:8088 \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN=http://10.168.168.241:8088 \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_MANIFEST="$PWD/android/dual_hil/field_pcm_replay_cases.json" \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_WAV="$PWD/artifacts/<field-session>/face_on_pixel6_audio.wav" \
+  --test_env=SWING_CAPTURE_PCM_REPLAY_CASE=S06-representative \
+  --test_output=streamed --nocache_test_results
+```
+
+Before arming cameras, it probes both Wi-Fi app origins directly and retains
+identity, role, device model, advertised origin, descriptor/status/clock schema
+versions, unauthenticated setup rejection, and authenticated setup success.
+After both phones enter real 5 Hz monitoring, it also requires each actual Android route to reject
+an unauthenticated setup-preview request, serve a fresh bounded JPEG with no-store/nosniff headers
+under that phone's Bearer credential, and publish rotation/age/generation metadata. Once 240 fps
+owns Camera2, both routes must return 503 with `high_speed_capture` rather than leaking a stale
+preview. The JPEGs and high-speed metadata are retained per role and are part of the aggregate
+report contract.
+The subsequent usable leader-held peer clock, accepted peer arm, schema-2
+mapped impact for the current shared session, and exact final trigger sources
+prove that peer traffic used the configured LAN origin. ADB reverse is reported
+as false, credentials are not retained, and complete private configuration is
+restored. The current-revision checkpoint at
+`artifacts/android_pcm_current_apk_paired_pass_20260823T002901` passed this exact
+target, including direct authenticated setup and clock traffic to both phone origins, paired
+automatic trigger in 621 ms, exact retained-media decode, and complete cleanup.
 
 After the foreground service has been launched, a development browser can
 review its latest sessions at `http://<phone-address>:8088`. Serve the
@@ -682,9 +1136,16 @@ checked-in web app and point it at that node with a query parameter:
 http://<web-app-address>/?node=http://<phone-address>:8088
 ```
 
-Add `&node_token=<credential-shown-on-phone>` only when exercising mutating
-controls. Treat browser history containing that development credential as
-sensitive.
+The credential is required for node identity, setup, status, preview, session, and control routes.
+The bootstrap code consumes the token before application startup,
+removes it from the current URL and history entry with `history.replaceState`, and retains it only
+in origin-keyed tab `sessionStorage` so same-tab reload and rotation continue without recreating a
+credentialed URL. `Referrer-Policy: no-referrer` blocks ordinary referrer disclosure. This reduces
+routine history/bookmark leakage; it does not protect the initial cleartext HTTP request, process
+arguments, or network observers. Native-video media is now authorized by a collection-scoped
+capability obtained only from authenticated metadata, but a cleartext observer can replay that
+capability until the control credential rotates. The trusted hitting-area network remains a
+prototype boundary.
 
 For the dual-node coordinator, use both role-specific endpoint and credential
 pairs shown in the Network and browser service section. Supplying only one of
@@ -743,8 +1204,10 @@ implemented. The short screen-off HIL passed on Pixel 6. The non-screen-off
 15-minute Pixel 6 1080p240 run maintained continuity but failed thermal
 acceptance; the controlled 720p240 run passed without exceeding `MODERATE`.
 The publication-heavy precursor lost Camera2/encoder ordinal alignment after
-5 minutes 27 seconds. Screen-off thermal qualification, 720p publication-heavy
-qualification, reboot recovery, and fault recovery remain.
+5 minutes 27 seconds. Current-workload screen-off thermal and publication-heavy
+qualification remain. Process-restart and paired peer-disturbance recovery pass. The selected
+OS-reboot policy requires first unlock and an operator foreground launch; that physical ceremony
+has not been qualified for this revision.
 
 ### 3. Dual-node sessions
 
@@ -760,9 +1223,9 @@ strict sequential physical gate passed both local pipelines and cross-node
 identity contracts, and the one-event concurrent physical gate passed both
 captures, bounded timing, and durable coordination. The paired pose-standby
 gate additionally passed real low-rate inference, production peer arming, both
-warm transitions, and one-event capture. The live browser HIL also passed
-paired H.264 review. Automatic discovery and a production pairing ceremony
-remain.
+warm transitions, and one-event capture. The live browser HIL also passed paired H.264 review. The
+authenticated browser ceremony, Android NSD/mDNS integration, stable binding, credential rotation,
+stale-token rejection, and explicit re-pair have all passed the bounded two-phone physical gate.
 
 ### 4. Qualification
 
@@ -773,21 +1236,49 @@ remain.
 - Decide whether the Pixel 5a remains supported before its workarounds become a
   permanent architectural constraint.
 
+## Prototype browser release boundary
+
+Desktop Google Chrome is the selected prototype browser, and
+`//web:prototype_browser_release_gate` combines the real one-second Android AVC
+decode/Range/nonblack/RVFC/seek/step gate with the exact-APK, direct-LAN two-phone hosted-UI HIL.
+The physical half also requires installed Google Chrome to decode both MP4s newly published during
+that invocation, present a nonblack frame, advance playback, and retain complementary
+role/origin/shared-recording evidence.
+Installed Firefox 153.0.4 and checksum-pinned WebKit 18.4 revision 2158 remain passing
+compatibility candidates through their individual gates and the candidate matrix, but do not block
+a prototype release. Two consecutive exact-APK Chrome passes at
+`artifacts/android_field_recording_browser_hil_relay_range_pass1_20260823T071927Z` and
+`artifacts/android_field_recording_browser_hil_relay_range_pass2_20260823T072013Z` satisfy the final
+fresh-decode/cancellation schema and validate media-worker cleanup across decoder release. They are
+explicitly non-qualifying because Pixel 6 used a temporary relayed face-on origin. The direct-LAN
+failure at `artifacts/android_browser_hil_direct_lan_preflight_failure_20260823T072340Z` records DTL
+HTTP-ready at 951 ms while the Pixel 6 face-on origin had five 500 ms transport timeouts through
+2.901 seconds. Playwright never launched; exact-APK verification and both screen-sleep cleanup
+actions still passed. Restore Pixel 6-to-host Wi-Fi reachability and run the combined gate over both
+direct-LAN origins. The current and every later proposed release needs its own reviewed passing
+invocation; it cannot be inferred from the relay or an earlier checkpoint.
+
 ## Open decisions
 
 - Whether field and longer thermal evidence for the Pixel 5a justify retaining
-  its provisional 720p240 profile; its paired pose-to-impact gate now passes.
+  its provisional 720p240 profile; its paired pose-to-impact gate now passes,
+  but one complete-path sample took 2.118 s from arm to first usable encoded
+  frame versus 1.279 s on Pixel 6. Repeated contention evidence and reviewed
+  address-to-takeaway timing must decide whether that slower startup is viable.
+- Whether to admit an IDR-backed, explicitly truncated startup pre-roll before
+  the normal 1.4-second history is available. The fixed-memory prototype and
+  deterministic boundary tests exist, but production remains fail-closed on
+  the full window because truncation cannot recover motion before Camera2's
+  first usable encoded frame.
 - Whether the passing Pixel 6 720p240 isolation remains at or below `MODERATE`
   with production trigger/publication load and with the screen explicitly off;
   the corresponding 1080p240 isolation reached `SEVERE`.
-- Whether the current one-second AVC GOP and IDR-extended pre-roll provide
-  sufficiently exact browser frame access on all target browsers.
-- Whether both phones continue detecting impact or one node becomes the
-  authoritative trigger after further latency tests; the validated current
-  implementation detects locally on both.
+- Whether the current leader-authoritative impact policy remains acceptable after the version-2
+  phone/view-swapped holdout: at least two fully reviewed sessions with required category
+  repetition across both. The shadow detector is retained only for bounded local timestamp
+  selection and falls back explicitly to mapped peer arrival.
 - The measured uncertainty threshold for accepting a physical dual-view
   session; the interval-based clock model is implemented.
-- Whether the browser-owned coordinator remains the product architecture or
-  pairing/session ownership moves to one phone.
-- The minimum supported Android/API/device capability set after the Pixel 6
-  prototype is qualified.
+- Whether representative physical evidence admits the provisional Pixel 5a
+  under the selected local 720p240 floor; the API/camera/encoder/audio/GLES
+  software admission contract itself is no longer open.

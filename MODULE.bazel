@@ -104,6 +104,7 @@ playwright.repo(
     browsers_json = "//web:playwright-browsers.json",
     integrity_path_map = {
         "builds/chromium/1169/chromium-headless-shell-linux.zip": "sha256-kuxxKkmkUet0toKa5Lx+4vNkINKEnCRdu7NxCLQd6SA=",
+        "builds/webkit/2158/webkit-ubuntu-24.04.zip": "sha256-Z/bP5QlC2Qfy+HvZ0w/R6wQXNsQMFbxpbo30CmY/gX8=",
     },
 )
 use_repo(playwright, "playwright")
@@ -147,6 +148,87 @@ http_file(
     urls = [
         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
     ],
+)
+http_file(
+    name = "pose_landmarker_full_task",
+    downloaded_file_path = "pose_landmarker_full.task",
+    integrity = "sha256-UTSjqtJ6WLk9oAiNQx82baNitE48z740YrOCeoOQEbE=",
+    urls = [
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+    ],
+)
+http_file(
+    name = "pose_landmarker_heavy_task",
+    downloaded_file_path = "pose_landmarker_heavy.task",
+    integrity = "sha256-ZEN6+DimXRjlunoNObRlVABpvIqugwjePjGKrTH8vHs=",
+    urls = [
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
+    ],
+)
+
+# Playwright 1.52's checksum-pinned WebKit was built on Ubuntu 24.04. Keep the
+# small ABI compatibility closure checksum-pinned and isolated from the Ubuntu
+# 26 host; the manual WebKit gate extracts these packages into TEST_TMPDIR and
+# never installs them system-wide.
+http_file(
+    name = "webkit_ubuntu24_libicu74",
+    downloaded_file_path = "libicu74_74.2-1ubuntu3.1_amd64.deb",
+    integrity = "sha256-yacJiWeGYO7ZoekEx0+gQ9qL7I4gNoVvwW4xztebBPg=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_libxml2",
+    downloaded_file_path = "libxml2_2.9.14+dfsg-1.3ubuntu3.8_amd64.deb",
+    integrity = "sha256-v9B8Adblqz4yfzylgZQJsZFLv7PxoBbVPk2r1flhQ7s=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3.8_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_libwoff1",
+    downloaded_file_path = "libwoff1_1.0.2-2build1_amd64.deb",
+    integrity = "sha256-4jpih/9hH/YKWlmN4h+PYPYja2rZRDN2MY5sx5FCGcE=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/w/woff2/libwoff1_1.0.2-2build1_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_libvpx9",
+    downloaded_file_path = "libvpx9_1.14.0-1ubuntu2.3_amd64.deb",
+    integrity = "sha256-qFVZRMAfcwjzQ2tvEJMo6+aAlp5yBm6rCh9MgqleF0A=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/libv/libvpx/libvpx9_1.14.0-1ubuntu2.3_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_libevent",
+    downloaded_file_path = "libevent-2.1-7t64_2.1.12-stable-9ubuntu2_amd64.deb",
+    integrity = "sha256-+V7d/J6QKFZ6IbgWKhy4qulrL7Fo8UnApbAdcr/UJHE=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/libe/libevent/libevent-2.1-7t64_2.1.12-stable-9ubuntu2_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_libavif16",
+    downloaded_file_path = "libavif16_1.0.4-1ubuntu3_amd64.deb",
+    integrity = "sha256-spWplUpLdWrwX/OB2YCPPAxYKhEbfkx2eM/hPemuiBg=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/universe/liba/libavif/libavif16_1.0.4-1ubuntu3_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_libgav1",
+    downloaded_file_path = "libgav1-1_0.18.0-1build3_amd64.deb",
+    integrity = "sha256-Qo81P0SeaxXNz1gjIVQW42rc+6df6fD+3BzRMtaOaz8=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/universe/libg/libgav1/libgav1-1_0.18.0-1build3_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_librav1e0",
+    downloaded_file_path = "librav1e0_0.7.1-2_amd64.deb",
+    integrity = "sha256-vhDX4twCjZ13kZl6hxC3qaMUcVFhN1Dw8Ilj++msmTw=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/universe/r/rust-rav1e/librav1e0_0.7.1-2_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_libsvtav1",
+    downloaded_file_path = "libsvtav1enc1d1_1.7.0+dfsg-2build1_amd64.deb",
+    integrity = "sha256-usX3aL/5KOhc7LOdqONydqV5Y574hGkrCJ7S3mwc0q0=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/universe/s/svt-av1/libsvtav1enc1d1_1.7.0+dfsg-2build1_amd64.deb"],
+)
+http_file(
+    name = "webkit_ubuntu24_libabsl",
+    downloaded_file_path = "libabsl20220623t64_20220623.1-3.1ubuntu3.2_amd64.deb",
+    integrity = "sha256-3sl2h7w7xO29HCa8kYL3WE4/8cNqm7fOgCEZUeWliT0=",
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/a/abseil/libabsl20220623t64_20220623.1-3.1ubuntu3.2_amd64.deb"],
 )
 
 register_toolchains(

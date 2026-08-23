@@ -4,7 +4,7 @@ This package is intentionally independent of the capture service. It provides:
 
 - a pull-based `PoseFrameSource` and a MediaCodec app-private clip replay source;
 - a deterministic five-Hz, latest-frame-wins inference pipeline;
-- bounded metrics and NDJSON traces for later diagnostic-archive integration;
+- bounded metrics and NDJSON traces integrated into standby diagnostic archives;
 - MediaPipe Pose Landmarker Lite with explicit CPU/GPU policy; and
 - a synchronous Camera2 input boundary that converts YUV into one reusable direct RGB buffer.
 
@@ -27,10 +27,15 @@ retains ownership of the Camera2 `Image`; the transient `MPImage` does not own o
 frames are owned by the source and their pixel arrays are read-only to consumers.
 
 Pixel 5a and Pixel 6 use this same arm64 model, stride-aware YUV-to-RGB direct-buffer path, five-Hz
-scheduler, and trigger controller. There is deliberately no device-model compatibility branch. The default
-`GPU_PREFERRED` policy probes the GPU independently on each phone and records the delegate that was
-actually selected; a Pixel 5a fallback therefore cannot force the Pixel 6 onto the CPU. Operators
-can require the GPU when qualification evidence shows that silent fallback is unacceptable.
+scheduler, and trigger controller. There is deliberately no device-model compatibility branch. The
+default `GPU_PREFERRED` policy probes the GPU independently on each phone and records the delegate
+that was actually selected; a Pixel 5a fallback therefore cannot force the Pixel 6 onto the CPU.
+Operators can require the GPU when qualification evidence shows that silent fallback is
+unacceptable. MediaPipe 0.10.35 also exposes its experimental NPU delegate, so `NPU_PREFERRED` and
+`NPU_REQUIRED` are available for per-device qualification. NPU-preferred falls back to GPU and then
+CPU on that phone only. The Lite float16 model and 640x360 camera input remain the lowest-cost
+production configuration; delegate comparison therefore does not silently change model accuracy or
+the Pixel 6 input path.
 
 ## Pinned upstream components
 
@@ -38,16 +43,23 @@ can require the GPU when qualification evidence shows that silent fallback is un
 | --- | --- | --- | --- |
 | MediaPipe Tasks Vision/Core for Android | 0.10.35 | Apache-2.0 | Google Maven |
 | Pose Landmarker Lite float16 model bundle | 1 | Apache-2.0 | Google MediaPipe model storage |
+| Pose Landmarker Full float16 model bundle | 1 | Apache-2.0 | Google MediaPipe model storage |
+| Pose Landmarker Heavy float16 model bundle | 1 | Apache-2.0 | Google MediaPipe model storage |
 | rules_jvm_external | 7.1 | Apache-2.0 | Bazel Central Registry |
 | Android NDK toolchain | r25c (API 34) | Android SDK License | Hermetic Android toolchains |
 
 `//third_party/mediapipe:artifacts.lock.json` records every transitive Maven coordinate, exact
 version, URL, and SHA-256 checksum. The only direct Maven coordinate is
 `com.google.mediapipe:tasks-vision:0.10.35`; all other entries are its published transitive graph.
-The model has a separate SHA-256-integrity-pinned `http_file` declaration in `MODULE.bazel`.
+Each model bundle has a separate SHA-256-integrity-pinned `http_file` declaration in
+`MODULE.bazel`.
 
 The manual `//android/pose_inference:pose_inference_packaging_fixture` APK exists only to verify
-that the AAR's resources/native libraries and `pose_landmarker_lite.task` survive Bazel packaging.
+that the AAR's resources/native libraries and all three closed pose-model asset names survive
+Bazel packaging. The ordinary `//android/app:swing_capture` APK contains only Lite. Full and Heavy
+are isolated in `//android/app:swing_capture_pose_experiment`, which is installed only by the
+manual pose-standby experiment target; model comparison therefore adds no production APK size,
+install-time, storage, or runtime cost.
 The repository's default build configuration selects
 `//android/pose_inference:android_arm64`; without an explicit Android platform, rules_android would
 select the host CPU's AAR native library.

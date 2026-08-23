@@ -149,6 +149,12 @@ double Milliseconds(std::chrono::steady_clock::duration duration) {
 }  // namespace
 
 struct CameraWorker::Impl {
+  enum class RendererStage {
+    kIdle,
+    kRoutine,
+    kFullResolution,
+  };
+
   struct SettingsCommand {
     CameraSettingsUpdate settings;
     std::promise<CameraStatus> completion;
@@ -157,13 +163,14 @@ struct CameraWorker::Impl {
   Impl(CameraRole camera_role, std::unique_ptr<PreviewCameraDevice> camera_device,
        daheng::DahengConfiguration initial_configuration,
        std::unique_ptr<preview::PreviewFrameProcessor> preview_frame_processor,
-       CapturedFrameSink frame_sink)
+       CapturedFrameSink frame_sink, PreviewSamplingHook sampling_hook)
       : role(camera_role),
         camera(std::move(camera_device)),
         configuration(initial_configuration),
         frame_processor(preview_frame_processor == nullptr ? preview::MakeSoftwarePreviewProcessor()
                                                            : std::move(preview_frame_processor)),
         captured_frame_sink(std::move(frame_sink)),
+        preview_sampling_hook(std::move(sampling_hook)),
         sampler(
             {.minimum_interval = kPreviewInterval, .maximum_payload_bytes = kMaximumBayerPayload}) {
     if (camera == nullptr) {
@@ -361,8 +368,25 @@ struct CameraWorker::Impl {
   }
 
   void PublishFrame(const FrameView &frame) {
+    const auto callback_received_at = std::chrono::steady_clock::now();
+    {
+      // Record the SDK callback boundary before any host-side capture-ring or
+      // preview work. Otherwise a blocked sink or sampler looks like a camera
+      // acquisition stall even though the frame was already dequeued.
+      const std::scoped_lock lock(state_mutex);
+      latest_capture_frame_id = frame.metadata.frame_id;
+      latest_capture_received_at = callback_received_at;
+    }
     if (captured_frame_sink) {
       captured_frame_sink(frame);
+    }
+    {
+      const std::scoped_lock lock(state_mutex);
+      latest_sink_frame_id = frame.metadata.frame_id;
+      latest_sink_completed_at = std::chrono::steady_clock::now();
+    }
+    if (preview_sampling_hook) {
+      preview_sampling_hook();
     }
     const preview::PreviewFramePublishResult result = sampler.TryPublish(frame);
     if (result != preview::PreviewFramePublishResult::kPublished &&
@@ -374,6 +398,8 @@ struct CameraWorker::Impl {
     }
 
     const std::scoped_lock lock(state_mutex);
+    latest_sampler_frame_id = frame.metadata.frame_id;
+    latest_sampler_completed_at = std::chrono::steady_clock::now();
     ++frames_in_rate_window;
     const auto elapsed = frame.metadata.host_received_at - rate_started_at;
     if (elapsed >= std::chrono::seconds(1)) {
@@ -423,6 +449,7 @@ struct CameraWorker::Impl {
         }
         render_routine = std::exchange(render_requested, false);
         render_full_resolution = std::exchange(full_resolution_render_requested, false);
+        renderer_stage = render_routine ? RendererStage::kRoutine : RendererStage::kFullResolution;
       }
 
       try {
@@ -430,9 +457,21 @@ struct CameraWorker::Impl {
           RenderLatestRoutine();
         }
         if (render_full_resolution) {
+          {
+            const std::scoped_lock lock(render_wait_mutex);
+            renderer_stage = RendererStage::kFullResolution;
+          }
           RenderLatestFullResolution();
         }
+        {
+          const std::scoped_lock lock(render_wait_mutex);
+          renderer_stage = RendererStage::kIdle;
+        }
       } catch (...) {
+        {
+          const std::scoped_lock lock(render_wait_mutex);
+          renderer_stage = RendererStage::kIdle;
+        }
         const std::exception_ptr error = std::current_exception();
         renderer_failed.store(true, std::memory_order_release);
         CloseCommandAcceptance(error);
@@ -536,27 +575,96 @@ struct CameraWorker::Impl {
       const std::scoped_lock lock(render_mutex);
       current_preview = rendered_routine;
     }
+    status.preview_performance = BuildPreviewPerformance(current_preview);
     if (current_preview != nullptr) {
       status.preview_sequence = current_preview->preview_sequence;
       status.preview_width = current_preview->dimensions.width;
       status.preview_height = current_preview->dimensions.height;
       status.image_quality = QualityStatus(current_preview->source_quality);
-      const auto now = std::chrono::steady_clock::now();
-      status.preview_performance = {
-          .media_type = current_preview->media_type,
-          .encoded_bytes = current_preview->encoded_bytes.size(),
-          .source_age_milliseconds =
-              std::max(0.0, Milliseconds(now - current_preview->source_metadata.host_received_at)),
-          .rendered_age_milliseconds =
-              std::max(0.0, Milliseconds(now - current_preview->render_completed_at)),
-          .quality_analysis_milliseconds = Milliseconds(current_preview->timings.quality_analysis),
-          .bayer_transform_milliseconds = Milliseconds(current_preview->timings.bayer_transform),
-          .resize_milliseconds = Milliseconds(current_preview->timings.resize),
-          .encode_milliseconds = Milliseconds(current_preview->timings.encode),
-          .total_milliseconds = Milliseconds(current_preview->timings.total),
-      };
     }
     return status;
+  }
+
+  PreviewPerformanceStatus BuildPreviewPerformance(
+      const std::shared_ptr<const preview::RenderedPreviewImage> &current_preview) {
+    const auto now = std::chrono::steady_clock::now();
+    std::uint64_t current_capture_frame_id = 0;
+    std::chrono::steady_clock::time_point current_capture_received_at;
+    std::uint64_t current_sink_frame_id = 0;
+    std::chrono::steady_clock::time_point current_sink_completed_at;
+    std::uint64_t current_sampler_frame_id = 0;
+    std::chrono::steady_clock::time_point current_sampler_completed_at;
+    {
+      const std::scoped_lock lock(state_mutex);
+      current_capture_frame_id = latest_capture_frame_id;
+      current_capture_received_at = latest_capture_received_at;
+      current_sink_frame_id = latest_sink_frame_id;
+      current_sink_completed_at = latest_sink_completed_at;
+      current_sampler_frame_id = latest_sampler_frame_id;
+      current_sampler_completed_at = latest_sampler_completed_at;
+    }
+    const std::shared_ptr<const preview::SampledPreviewFrame> current_sampled = sampler.Latest();
+    RendererStage current_renderer_stage = RendererStage::kIdle;
+    bool current_render_pending = false;
+    {
+      const std::scoped_lock lock(render_wait_mutex);
+      current_renderer_stage = renderer_stage;
+      current_render_pending = render_requested || full_resolution_render_requested;
+    }
+    const auto renderer_stage_name = [current_renderer_stage] {
+      switch (current_renderer_stage) {
+        case RendererStage::kIdle:
+          return "idle";
+        case RendererStage::kRoutine:
+          return "routine";
+        case RendererStage::kFullResolution:
+          return "full_resolution";
+      }
+      return "unknown";
+    };
+
+    PreviewPerformanceStatus performance;
+    performance.latest_capture_frame_id = current_capture_frame_id;
+    performance.latest_capture_age_milliseconds =
+        current_capture_frame_id == 0
+            ? 0.0
+            : std::max(0.0, Milliseconds(now - current_capture_received_at));
+    performance.latest_sink_frame_id = current_sink_frame_id;
+    performance.latest_sink_completion_age_milliseconds =
+        current_sink_frame_id == 0 ? 0.0
+                                   : std::max(0.0, Milliseconds(now - current_sink_completed_at));
+    performance.latest_sampler_frame_id = current_sampler_frame_id;
+    performance.latest_sampler_completion_age_milliseconds =
+        current_sampler_frame_id == 0
+            ? 0.0
+            : std::max(0.0, Milliseconds(now - current_sampler_completed_at));
+    performance.sampled_sequence =
+        current_sampled == nullptr ? 0 : current_sampled->preview_sequence;
+    performance.sampled_age_milliseconds =
+        current_sampled == nullptr
+            ? 0.0
+            : std::max(0.0, Milliseconds(now - current_sampled->metadata.host_received_at));
+    performance.renderer_stage = renderer_stage_name();
+    performance.render_pending = current_render_pending;
+    if (current_preview != nullptr) {
+      performance.media_type = current_preview->media_type;
+      performance.encoded_bytes = current_preview->encoded_bytes.size();
+      performance.source_age_milliseconds =
+          std::max(0.0, Milliseconds(now - current_preview->source_metadata.host_received_at));
+      performance.rendered_age_milliseconds =
+          std::max(0.0, Milliseconds(now - current_preview->render_completed_at));
+      performance.quality_analysis_milliseconds =
+          Milliseconds(current_preview->timings.quality_analysis);
+      performance.bayer_transform_milliseconds =
+          Milliseconds(current_preview->timings.bayer_transform);
+      performance.resize_milliseconds = Milliseconds(current_preview->timings.resize);
+      performance.encode_milliseconds = Milliseconds(current_preview->timings.encode);
+      performance.total_milliseconds = Milliseconds(current_preview->timings.total);
+      performance.render_queue_milliseconds =
+          std::max(0.0, Milliseconds(current_preview->render_started_at -
+                                     current_preview->source_metadata.host_received_at));
+    }
+    return performance;
   }
 
   std::uint64_t TimestampTicksPerSecond() {
@@ -610,6 +718,7 @@ struct CameraWorker::Impl {
         .height = current->dimensions.height,
         .media_type = current->media_type,
         .bytes = current->encoded_bytes,
+        .performance = BuildPreviewPerformance(current),
     };
   }
 
@@ -644,6 +753,12 @@ struct CameraWorker::Impl {
       rate_started_at = {};
       frames_in_rate_window = 0;
       observed_frames_per_second = 0.0;
+      latest_capture_frame_id = 0;
+      latest_capture_received_at = {};
+      latest_sink_frame_id = 0;
+      latest_sink_completed_at = {};
+      latest_sampler_frame_id = 0;
+      latest_sampler_completed_at = {};
     }
     const std::scoped_lock lock(command_mutex);
     accepting_commands = false;
@@ -727,6 +842,7 @@ struct CameraWorker::Impl {
   daheng::DahengConfiguration configuration;
   std::unique_ptr<preview::PreviewFrameProcessor> frame_processor;
   CapturedFrameSink captured_frame_sink;
+  PreviewSamplingHook preview_sampling_hook;
   preview::LatestFrameSampler sampler;
 
   std::mutex state_mutex;
@@ -736,6 +852,12 @@ struct CameraWorker::Impl {
   std::chrono::steady_clock::time_point rate_started_at;
   std::uint64_t frames_in_rate_window = 0;
   double observed_frames_per_second = 0.0;
+  std::uint64_t latest_capture_frame_id = 0;
+  std::chrono::steady_clock::time_point latest_capture_received_at;
+  std::uint64_t latest_sink_frame_id = 0;
+  std::chrono::steady_clock::time_point latest_sink_completed_at;
+  std::uint64_t latest_sampler_frame_id = 0;
+  std::chrono::steady_clock::time_point latest_sampler_completed_at;
 
   std::mutex render_mutex;
   std::shared_ptr<const preview::RenderedPreviewImage> rendered_routine;
@@ -748,6 +870,7 @@ struct CameraWorker::Impl {
   bool full_resolution_render_requested = false;
   bool has_requested_routine_render = false;
   std::chrono::steady_clock::time_point last_routine_render_requested_at;
+  RendererStage renderer_stage = RendererStage::kIdle;
   std::atomic<bool> renderer_failed = false;
 
   std::mutex command_mutex;
@@ -762,9 +885,11 @@ struct CameraWorker::Impl {
 CameraWorker::CameraWorker(CameraRole role, std::unique_ptr<PreviewCameraDevice> camera,
                            daheng::DahengConfiguration configuration,
                            std::unique_ptr<preview::PreviewFrameProcessor> frame_processor,
-                           CapturedFrameSink captured_frame_sink)
+                           CapturedFrameSink captured_frame_sink,
+                           PreviewSamplingHook preview_sampling_hook)
     : impl_(std::make_unique<Impl>(role, std::move(camera), configuration,
-                                   std::move(frame_processor), std::move(captured_frame_sink))) {}
+                                   std::move(frame_processor), std::move(captured_frame_sink),
+                                   std::move(preview_sampling_hook))) {}
 
 CameraWorker::~CameraWorker() { Stop(); }
 

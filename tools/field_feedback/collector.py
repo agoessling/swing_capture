@@ -59,6 +59,66 @@ TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{32}")
 IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 ROLES: frozenset[str] = frozenset(("down_the_line", "face_on"))
+COORDINATION_ROOT_FIELDS: frozenset[str] = frozenset(
+    (
+        "schema_version",
+        "shared_session_id",
+        "status",
+        "recorded_at_epoch_ms",
+        "down_the_line",
+        "face_on",
+        "minimum_trigger_separation_ns",
+        "maximum_trigger_separation_ns",
+    )
+)
+COORDINATION_NODE_FIELDS: frozenset[str] = frozenset(
+    (
+        "role",
+        "node_id",
+        "local_session_id",
+        "trigger_timestamp_ns",
+        "trigger_uncertainty_ns",
+        "mapped_coordinator_timestamp_ns",
+        "mapped_coordinator_uncertainty_ns",
+        "clock_offset_ns",
+        "clock_uncertainty_ns",
+        "minimum_round_trip_ns",
+        "maximum_round_trip_ns",
+        "clock_sample_count",
+        "source",
+    )
+)
+PEER_IMPACT_MAPPING_FIELDS: frozenset[str] = frozenset(
+    (
+        "schema_version",
+        "request_schema_version",
+        "leader_node_id",
+        "leader_trigger_elapsed_realtime_ns",
+        "target_peer_node_id",
+        "mapped_peer_trigger_elapsed_realtime_ns",
+        "mapping_uncertainty_ns",
+        "mapping_age_at_send_ns",
+        "minimum_round_trip_ns",
+        "maximum_round_trip_ns",
+        "clock_sample_count",
+        "request_arrival_elapsed_realtime_ns",
+        "selection_source",
+        "selected_local_trigger_elapsed_realtime_ns",
+        "selected_local_uncertainty_ns",
+        "selected_to_mapped_residual_ns",
+        "mapping_policy",
+        "effective_request_schema_version",
+        "fallback_semantics",
+    )
+)
+MAXIMUM_PEER_MAPPING_AGE_NS = 10_000_000_000
+MAXIMUM_PEER_MAPPING_UNCERTAINTY_NS = 25_000_000
+PEER_CLOCK_MATCH_BASE_TOLERANCE_NS = 80_000_000
+MAXIMUM_LEGACY_LOCAL_CANDIDATE_AGE_NS = 250_000_000
+PEER_IMPACT_MAPPING_SCHEMA_VERSION = 2
+MINIMUM_CLOCK_SAMPLE_COUNT = 3
+MAXIMUM_CLOCK_SAMPLE_COUNT = 64
+MAXIMUM_COORDINATION_SOURCE_LENGTH = 64
 INCIDENT_CLASSIFICATIONS: frozenset[str] = frozenset(
     (
         "successful_capture",
@@ -211,6 +271,8 @@ class ArchiveInspection:
     trigger_source: str
     shared_session_id: str | None
     coordination_sha256: str | None
+    coordination_timing: dict[str, object] | None
+    peer_impact_mapping: dict[str, object] | None
     linkage_status: str
     diagnostic_audio: dict[str, object] | None
     pose_diagnostics_status: str | None
@@ -655,6 +717,9 @@ class FieldFeedbackCollector:
         root = require_object(decoded, "field feedback index")
         if root.get("schema_version") != INDEX_SCHEMA_VERSION:
             raise CollectionError("unsupported field feedback index schema")
+        indexed_nodes = [_identity_from_index(value) for value in _index_nodes(root)]
+        _validate_distinct_identities(indexed_nodes)
+        identities_by_node_id = {identity.node_id: identity for identity in indexed_nodes}
         artifacts = _index_artifacts(root)
         seen: set[tuple[str, str]] = set()
         for artifact in artifacts:
@@ -662,12 +727,32 @@ class FieldFeedbackCollector:
             if key in seen:
                 raise CollectionError("field feedback index contains a duplicate artifact")
             seen.add(key)
-            _validate_indexed_artifact(self._output_directory, artifact)
-        _index_nodes(root)
+            identity = identities_by_node_id.get(key[0])
+            if identity is None:
+                raise CollectionError("indexed artifact has no matching indexed node identity")
+            archive_path, archive_bytes = _validate_indexed_artifact(
+                self._output_directory, artifact
+            )
+            session = SessionSummary(key[1], required_timestamp(artifact, "session_created_at_utc"))
+            inspection = inspect_archive(archive_bytes, identity, session)
+            rebuilt = _artifact_index_entry(
+                identity,
+                session,
+                inspection,
+                archive_path,
+                required_timestamp(artifact, "collected_at_utc"),
+            )
+            if artifact.get("preview_bundle") is not None:
+                rebuilt["preview_bundle"] = artifact["preview_bundle"]
+            if rebuilt != artifact:
+                raise CollectionError("indexed artifact metadata contradicts its archive")
         return root
 
     def _fetch_identity(self, specification: NodeSpec) -> NodeIdentity:
-        payload = self._request(specification, "/api/v1/node", authenticated=False)
+        # The descriptor is deliberately public as an untrusted bootstrap hint, but this collector
+        # already owns the destination-bound credential and sends it consistently with all other
+        # metadata reads. Identity is still validated against the authenticated archive evidence.
+        payload = self._request(specification, "/api/v1/node", authenticated=True)
         root = require_object(parse_json(payload.body, "node identity"), "node identity")
         if root.get("schema_version") != NODE_SCHEMA_VERSION:
             raise CollectionError("unsupported node identity schema")
@@ -679,7 +764,7 @@ class FieldFeedbackCollector:
         return NodeIdentity(specification.base_url, node_id, role, capture_profile)
 
     def _fetch_sessions(self, specification: NodeSpec) -> list[SessionSummary]:
-        payload = self._request(specification, "/api/v1/sessions", authenticated=False)
+        payload = self._request(specification, "/api/v1/sessions", authenticated=True)
         root = require_object(parse_json(payload.body, "session list"), "session list")
         if root.get("schema_version") != SESSION_SCHEMA_VERSION:
             raise CollectionError("unsupported session list schema")
@@ -827,6 +912,7 @@ def inspect_archive(
             shared_session_id = manifest_metadata["shared_session_id"]
             coordination_path = f"{session_root}/coordination_record.json"
             coordination_sha256: str | None = None
+            coordination_timing: dict[str, object] | None = None
             linkage_status = "single_node"
             if coordination_path in by_name:
                 coordination_bytes = archive.read(coordination_path)
@@ -834,7 +920,7 @@ def inspect_archive(
                     parse_json(coordination_bytes, "coordination record"),
                     "coordination record",
                 )
-                _validate_coordination(
+                coordination_timing = _validate_coordination(
                     coordination,
                     identity,
                     session,
@@ -857,6 +943,10 @@ def inspect_archive(
         trigger_source=cast("str", manifest_metadata["trigger_source"]),
         shared_session_id=cast("str | None", shared_session_id),
         coordination_sha256=coordination_sha256,
+        coordination_timing=coordination_timing,
+        peer_impact_mapping=cast(
+            "dict[str, object] | None", manifest_metadata.get("peer_impact_mapping")
+        ),
         linkage_status=linkage_status,
         diagnostic_audio=cast("dict[str, object] | None", manifest_metadata["diagnostic_audio"]),
         pose_diagnostics_status=cast("str | None", manifest_metadata["pose_diagnostics_status"]),
@@ -1362,6 +1452,7 @@ def _validate_manifest(
     if required_string(view, "role") != identity.role:
         raise CollectionError("manifest camera role differs from node identity")
     trigger = require_object(manifest.get("trigger"), "manifest trigger")
+    trigger_source = required_identifier(trigger, "source")
     pose_diagnostics_status = _validate_capture_pose_diagnostics(
         android_capture, session.session_id + "/", entries, archive, session.session_id
     )
@@ -1369,7 +1460,10 @@ def _validate_manifest(
         "created_at_utc": created_at,
         "session_kind": CAPTURE_SESSION_KIND,
         "shared_session_id": shared,
-        "trigger_source": required_identifier(trigger, "source"),
+        "trigger_source": trigger_source,
+        "peer_impact_mapping": _validate_peer_impact_mapping(
+            android_capture, identity.node_id, trigger_source
+        ),
         "diagnostic_audio": None,
         "pose_diagnostics_status": pose_diagnostics_status,
     }
@@ -1410,6 +1504,128 @@ def _validate_capture_pose_diagnostics(
     elif preview_value is not None:
         raise CollectionError("unavailable capture pose preview has artifact metadata")
     return preview_status
+
+
+# The peer schema is a cross-field integrity contract, so keeping its checks together is clearer.
+def _validate_peer_impact_mapping(  # noqa: C901, PLR0912, PLR0915
+    android_capture: Mapping[str, object], node_id: str, trigger_source: str
+) -> dict[str, object] | None:
+    value = android_capture.get("peer_impact_mapping")
+    if value is None:
+        return None
+    evidence = require_object(value, "peer impact mapping")
+    if (
+        frozenset(evidence) != PEER_IMPACT_MAPPING_FIELDS
+        or evidence.get("schema_version") != PEER_IMPACT_MAPPING_SCHEMA_VERSION
+    ):
+        raise CollectionError("peer impact mapping fields do not match schema v2")
+    request_schema = required_nonnegative_integer(evidence, "request_schema_version")
+    effective_request_schema = required_nonnegative_integer(
+        evidence, "effective_request_schema_version"
+    )
+    leader_node_id = required_identifier(evidence, "leader_node_id")
+    leader_trigger = _signed_decimal(evidence, "leader_trigger_elapsed_realtime_ns")
+    request_arrival = _signed_decimal(evidence, "request_arrival_elapsed_realtime_ns")
+    selection_source = required_identifier(evidence, "selection_source")
+    selected_local = _signed_decimal(evidence, "selected_local_trigger_elapsed_realtime_ns")
+    selected_uncertainty = _signed_decimal(evidence, "selected_local_uncertainty_ns")
+    sample_count = required_nonnegative_integer(evidence, "clock_sample_count")
+    mapping_policy = required_identifier(evidence, "mapping_policy")
+    fallback_semantics = required_identifier(evidence, "fallback_semantics")
+    if (
+        not leader_node_id
+        or leader_trigger <= 0
+        or request_arrival <= 0
+        or selected_local <= 0
+        or selected_uncertainty < 0
+        or selection_source != trigger_source
+        or selection_source
+        not in {
+            "peer_audio_clock_candidate",
+            "peer_audio_local_candidate",
+            "peer_audio_arrival",
+        }
+    ):
+        raise CollectionError("peer impact mapping selection evidence is invalid")
+    mapped_fields = (
+        "target_peer_node_id",
+        "mapped_peer_trigger_elapsed_realtime_ns",
+        "mapping_uncertainty_ns",
+        "mapping_age_at_send_ns",
+        "minimum_round_trip_ns",
+        "maximum_round_trip_ns",
+        "selected_to_mapped_residual_ns",
+    )
+    if request_schema == 1:
+        if (
+            any(evidence.get(name) is not None for name in mapped_fields)
+            or sample_count != 0
+            or selection_source == "peer_audio_clock_candidate"
+            or mapping_policy != "not_applicable"
+            or effective_request_schema != 1
+            or fallback_semantics != "fresh_local_candidate_else_arrival"
+        ):
+            raise CollectionError("legacy peer impact contains clock mapping evidence")
+    elif request_schema == PEER_IMPACT_MAPPING_SCHEMA_VERSION:
+        if required_identifier(evidence, "target_peer_node_id") != node_id:
+            raise CollectionError("peer impact mapping targets another node")
+        mapped_trigger = _signed_decimal(evidence, "mapped_peer_trigger_elapsed_realtime_ns")
+        mapping_uncertainty = _signed_decimal(evidence, "mapping_uncertainty_ns")
+        mapping_age = _signed_decimal(evidence, "mapping_age_at_send_ns")
+        minimum_round_trip = _signed_decimal(evidence, "minimum_round_trip_ns")
+        maximum_round_trip = _signed_decimal(evidence, "maximum_round_trip_ns")
+        residual = _signed_decimal(evidence, "selected_to_mapped_residual_ns")
+        if (
+            mapped_trigger <= 0
+            or mapping_uncertainty < 0
+            or mapping_age < 0
+            or minimum_round_trip < 0
+            or maximum_round_trip < minimum_round_trip
+            or not MINIMUM_CLOCK_SAMPLE_COUNT <= sample_count <= MAXIMUM_CLOCK_SAMPLE_COUNT
+            or residual != abs(selected_local - mapped_trigger)
+        ):
+            raise CollectionError("peer impact clock mapping or selected residual is invalid")
+        within_policy = (
+            mapping_age <= MAXIMUM_PEER_MAPPING_AGE_NS
+            and mapping_uncertainty <= MAXIMUM_PEER_MAPPING_UNCERTAINTY_NS
+        )
+        expected_policy = "accepted" if within_policy else "rejected"
+        expected_effective_schema = 2 if within_policy else 1
+        expected_fallback = (
+            "mapped_candidate_else_arrival"
+            if within_policy
+            else "fresh_local_candidate_else_arrival"
+        )
+        if (
+            mapping_policy != expected_policy
+            or effective_request_schema != expected_effective_schema
+            or fallback_semantics != expected_fallback
+        ):
+            raise CollectionError("peer impact mapping policy contradicts its timing evidence")
+    else:
+        raise CollectionError("peer impact request schema is unsupported")
+    if selection_source == "peer_audio_arrival":
+        if selected_local != request_arrival or selected_uncertainty != 0:
+            raise CollectionError("peer arrival selection does not match request arrival")
+    elif selection_source == "peer_audio_local_candidate":
+        if (
+            effective_request_schema != 1
+            or selected_local > request_arrival
+            or request_arrival - selected_local > MAXIMUM_LEGACY_LOCAL_CANDIDATE_AGE_NS
+        ):
+            raise CollectionError("peer local candidate is stale or incompatible")
+    elif selection_source == "peer_audio_clock_candidate":
+        if effective_request_schema != PEER_IMPACT_MAPPING_SCHEMA_VERSION:
+            raise CollectionError("peer clock candidate lacks an accepted clock mapping")
+        mapped_trigger = _signed_decimal(evidence, "mapped_peer_trigger_elapsed_realtime_ns")
+        mapping_uncertainty = _signed_decimal(evidence, "mapping_uncertainty_ns")
+        residual = _signed_decimal(evidence, "selected_to_mapped_residual_ns")
+        maximum_residual = (
+            PEER_CLOCK_MATCH_BASE_TOLERANCE_NS + mapping_uncertainty + selected_uncertainty
+        )
+        if residual > maximum_residual:
+            raise CollectionError("peer clock candidate exceeds its selection window")
+    return dict(evidence)
 
 
 def _validate_standby_manifest(  # noqa: C901, PLR0912, PLR0915
@@ -1995,31 +2211,108 @@ def _signed_decimal(value: Mapping[str, object], name: str) -> int:
     return parsed
 
 
-def _validate_coordination(
+# Coordination evidence deliberately validates both role records in one cross-record contract.
+def _validate_coordination(  # noqa: C901, PLR0912, PLR0915
     record: Mapping[str, object],
     identity: NodeIdentity,
     session: SessionSummary,
     shared_session_id: str | None,
-) -> None:
+) -> dict[str, object]:
     if shared_session_id is None:
         raise CollectionError("coordination evidence exists without a shared session")
+    if frozenset(record) != COORDINATION_ROOT_FIELDS:
+        raise CollectionError("coordination record fields do not match schema v1")
     if (
         record.get("schema_version") != 1
         or required_identifier(record, "shared_session_id") != shared_session_id
+        or required_string(record, "status") != "paired"
     ):
         raise CollectionError("coordination record belongs to another shared session")
+    recorded_at = _signed_decimal(record, "recorded_at_epoch_ms")
+    if recorded_at <= 0:
+        raise CollectionError("coordination recorded_at_epoch_ms must be positive")
     matches = False
+    observed_node_ids: set[str] = set()
+    nodes: dict[str, dict[str, object]] = {}
     for role in ("down_the_line", "face_on"):
         evidence = require_object(record.get(role), f"coordination {role}")
+        if frozenset(evidence) != COORDINATION_NODE_FIELDS:
+            raise CollectionError(f"coordination {role} fields do not match schema v1")
         if required_string(evidence, "role") != role:
             raise CollectionError("coordination evidence role is inconsistent")
-        if (
-            required_identifier(evidence, "node_id") == identity.node_id
-            and required_identifier(evidence, "local_session_id") == session.session_id
-        ):
+        node_id = required_identifier(evidence, "node_id")
+        local_session_id = required_identifier(evidence, "local_session_id")
+        if node_id in observed_node_ids:
+            raise CollectionError("coordination record reuses one node for both roles")
+        observed_node_ids.add(node_id)
+        if node_id == identity.node_id and local_session_id == session.session_id:
+            if role != identity.role:
+                raise CollectionError("coordination local session is recorded under another role")
             matches = True
+        trigger_timestamp = _signed_decimal(evidence, "trigger_timestamp_ns")
+        trigger_uncertainty = _signed_decimal(evidence, "trigger_uncertainty_ns")
+        mapped_timestamp = _signed_decimal(evidence, "mapped_coordinator_timestamp_ns")
+        mapped_uncertainty = _signed_decimal(evidence, "mapped_coordinator_uncertainty_ns")
+        clock_offset = _signed_decimal(evidence, "clock_offset_ns")
+        clock_uncertainty = _signed_decimal(evidence, "clock_uncertainty_ns")
+        minimum_round_trip = _signed_decimal(evidence, "minimum_round_trip_ns")
+        maximum_round_trip = _signed_decimal(evidence, "maximum_round_trip_ns")
+        sample_count = required_nonnegative_integer(evidence, "clock_sample_count")
+        source = required_string(evidence, "source")
+        if (
+            len(source) > MAXIMUM_COORDINATION_SOURCE_LENGTH
+            or IDENTIFIER_PATTERN.fullmatch(source) is None
+        ):
+            raise CollectionError("coordination source is not a bounded identifier")
+        if (
+            trigger_timestamp <= 0
+            or trigger_uncertainty < 0
+            or mapped_timestamp < 0
+            or mapped_uncertainty < 0
+            or clock_uncertainty < 0
+            or minimum_round_trip < 0
+            or maximum_round_trip < minimum_round_trip
+            or not 1 <= sample_count <= MAXIMUM_CLOCK_SAMPLE_COUNT
+        ):
+            raise CollectionError("coordination timing or clock bounds are invalid")
+        if trigger_timestamp - clock_offset != mapped_timestamp:
+            raise CollectionError("coordination mapped timestamp disagrees with clock offset")
+        if trigger_uncertainty + clock_uncertainty != mapped_uncertainty:
+            raise CollectionError("coordination mapped uncertainty is not composed")
+        nodes[role] = {
+            "clock_sample_count": sample_count,
+            "clock_uncertainty_ns": str(clock_uncertainty),
+            "mapped_coordinator_timestamp_ns": str(mapped_timestamp),
+            "mapped_coordinator_uncertainty_ns": str(mapped_uncertainty),
+            "maximum_round_trip_ns": str(maximum_round_trip),
+            "minimum_round_trip_ns": str(minimum_round_trip),
+            "node_id": node_id,
+            "source": source,
+            "trigger_uncertainty_ns": str(trigger_uncertainty),
+        }
     if not matches:
         raise CollectionError("coordination record does not contain the local session")
+    if nodes["down_the_line"].get("mapped_coordinator_timestamp_ns") is None:
+        raise CollectionError("coordination down-the-line mapped timestamp is absent")
+    down_timestamp = int(cast("str", nodes["down_the_line"]["mapped_coordinator_timestamp_ns"]))
+    face_timestamp = int(cast("str", nodes["face_on"]["mapped_coordinator_timestamp_ns"]))
+    combined_uncertainty = int(
+        cast("str", nodes["down_the_line"]["mapped_coordinator_uncertainty_ns"])
+    ) + int(cast("str", nodes["face_on"]["mapped_coordinator_uncertainty_ns"]))
+    center_separation = abs(down_timestamp - face_timestamp)
+    expected_minimum = max(0, center_separation - combined_uncertainty)
+    expected_maximum = center_separation + combined_uncertainty
+    minimum_separation = _signed_decimal(record, "minimum_trigger_separation_ns")
+    maximum_separation = _signed_decimal(record, "maximum_trigger_separation_ns")
+    if minimum_separation != expected_minimum or maximum_separation != expected_maximum:
+        raise CollectionError("coordination trigger-separation bounds are inconsistent")
+    return {
+        "combined_mapped_uncertainty_ns": str(combined_uncertainty),
+        "down_the_line": nodes["down_the_line"],
+        "face_on": nodes["face_on"],
+        "maximum_trigger_separation_ns": str(maximum_separation),
+        "minimum_trigger_separation_ns": str(minimum_separation),
+    }
 
 
 def _validate_candidate_linkage(
@@ -2063,6 +2356,7 @@ def _artifact_index_entry(
         "checksum_validation": "passed",
         "collected_at_utc": collected_at,
         "coordination_sha256": inspection.coordination_sha256,
+        "coordination_timing": inspection.coordination_timing,
         "diagnostic_audio": inspection.diagnostic_audio,
         "diagnostic_incident": inspection.incident,
         "export_created_at_utc": inspection.export_created_at_utc,
@@ -2071,6 +2365,7 @@ def _artifact_index_entry(
         "manifest_created_at_utc": inspection.manifest_created_at_utc,
         "node_id": identity.node_id,
         "node_role": identity.role,
+        "peer_impact_mapping": inspection.peer_impact_mapping,
         "session_created_at_utc": session.created_at_utc,
         "session_id": session.session_id,
         "session_kind": inspection.session_kind,
@@ -2093,6 +2388,16 @@ def _shared_session_index(artifacts: Sequence[dict[str, object]]) -> list[dict[s
             key=lambda item: (required_string(item, "node_role"), required_string(item, "node_id")),
         )
         roles = [required_string(item, "node_role") for item in ordered]
+        coordination_hashes = [item.get("coordination_sha256") for item in ordered]
+        coordination_timings = [item.get("coordination_timing") for item in ordered]
+        timing_qualified = (
+            len(ordered) == DUAL_NODE_COUNT
+            and all(isinstance(value, str) for value in coordination_hashes)
+            and len(set(cast("list[str]", coordination_hashes))) == 1
+            and all(isinstance(value, dict) for value in coordination_timings)
+            and coordination_timings[0] == coordination_timings[1]
+        )
+        coordination_timing = coordination_timings[0] if timing_qualified else None
         result.append(
             {
                 "artifacts": [
@@ -2103,6 +2408,8 @@ def _shared_session_index(artifacts: Sequence[dict[str, object]]) -> list[dict[s
                     }
                     for item in ordered
                 ],
+                "coordination_timing": coordination_timing,
+                "coordination_status": "validated_pair" if timing_qualified else "incomplete",
                 "shared_session_id": shared,
                 "status": (
                     "paired"
@@ -2240,7 +2547,7 @@ def _read_indexed_preview_bundle(
 def _validate_indexed_artifact(
     output_directory: Path,
     artifact: Mapping[str, object],
-) -> None:
+) -> tuple[PurePosixPath, bytes]:
     archive_path = _safe_index_archive_path(required_string(artifact, "archive_path"))
     absolute_path = output_directory.joinpath(*archive_path.parts)
     if absolute_path.is_symlink() or not absolute_path.is_file():
@@ -2256,10 +2563,16 @@ def _validate_indexed_artifact(
         raise CollectionError(
             f"indexed archive checksum changed (byte count): {archive_path.as_posix()}"
         )
+    archive_bytes = _read_bounded_local_file(absolute_path, expected_archive_bytes)
+    if len(archive_bytes) != expected_archive_bytes:
+        raise CollectionError(
+            f"indexed archive checksum changed (bounded read): {archive_path.as_posix()}"
+        )
     expected = required_sha256(artifact, "archive_sha256")
-    if sha256_file(absolute_path) != expected:
+    if hashlib.sha256(archive_bytes).hexdigest() != expected:
         raise CollectionError(f"indexed archive checksum changed: {archive_path.as_posix()}")
     _validate_preview_index_entry(output_directory, artifact, archive_path)
+    return archive_path, archive_bytes
 
 
 def _pending_transaction_paths(directory: Path) -> list[Path]:

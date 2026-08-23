@@ -13,6 +13,19 @@ cc_test(
     deps = [":pose_replay_hil_support"],
 )
 
+cc_library(
+    name = "pose_experiment_hil_support",
+    srcs = ["pose_experiment_hil_support.cc"],
+    hdrs = ["pose_experiment_hil_support.h"],
+)
+
+cc_test(
+    name = "pose_experiment_hil_support_test",
+    size = "small",
+    srcs = ["pose_experiment_hil_support_test.cc"],
+    deps = [":pose_experiment_hil_support"],
+)
+
 cc_test(
     name = "android_pose_replay_hil_test",
     size = "medium",
@@ -45,6 +58,7 @@ cc_library(
     name = "pose_standby_validation",
     srcs = ["pose_standby_validation.cc"],
     hdrs = ["pose_standby_validation.h"],
+    visibility = ["//android/dual_hil:__pkg__"],
     deps = ["@nlohmann_json//:json"],
 )
 
@@ -53,6 +67,24 @@ cc_test(
     size = "small",
     srcs = ["pose_standby_validation_test.cc"],
     deps = [":pose_standby_validation"],
+)
+
+cc_library(
+    name = "pose_qualification_performance",
+    srcs = ["pose_qualification_performance.cc"],
+    hdrs = ["pose_qualification_performance.h"],
+    visibility = ["//android/dual_hil:__pkg__"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "pose_qualification_performance_test",
+    size = "small",
+    srcs = ["pose_qualification_performance_test.cc"],
+    deps = [
+        ":pose_qualification_performance",
+        "@nlohmann_json//:json",
+    ],
 )
 
 cc_library(
@@ -95,10 +127,10 @@ cc_test(
     srcs = ["pose_standby_hil_test.cc"],
     args = [
         "$(rootpath //tools/android:adb)",
-        "$(rootpath //android/app:swing_capture.apk)",
+        "$(rootpath //android/app:swing_capture_pose_experiment.apk)",
     ],
     data = [
-        "//android/app:swing_capture.apk",
+        "//android/app:swing_capture_pose_experiment.apk",
         "//tools/android:adb",
     ],
     tags = [
@@ -111,6 +143,7 @@ cc_test(
     ],
     timeout = "short",
     deps = [
+        ":pose_experiment_hil_support",
         ":pose_standby_validation",
         ":standby_missed_validation",
         ":warm_retained_validation",
@@ -145,6 +178,7 @@ cc_test(
     ],
     timeout = "short",
     deps = [
+        ":pose_experiment_hil_support",
         ":pose_standby_validation",
         ":standby_missed_validation",
         ":warm_retained_validation",
@@ -179,6 +213,7 @@ cc_test(
     ],
     timeout = "short",
     deps = [
+        ":pose_experiment_hil_support",
         ":pose_standby_validation",
         ":standby_missed_validation",
         ":warm_retained_validation",
@@ -214,6 +249,7 @@ cc_test(
     ],
     timeout = "short",
     deps = [
+        ":pose_experiment_hil_support",
         ":pose_standby_validation",
         ":standby_missed_validation",
         ":warm_retained_validation",

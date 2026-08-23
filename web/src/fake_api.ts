@@ -3,12 +3,14 @@ import {
   type CameraRole,
   type CameraSettingsUpdate,
   type CameraStatus,
+  type FetchedPreview,
   type StationApi,
   type StationStatus,
 } from "./api.js";
 
 export const FIXTURE_STATUS: StationStatus = {
   schema_version: STATION_STATUS_SCHEMA_VERSION,
+  service_instance_id: "fixture-service-instance-1",
   mode: "setup_preview_fixture",
   cameras: [
     {
@@ -39,6 +41,17 @@ export const FIXTURE_STATUS: StationStatus = {
         resize_ms: 0,
         encode_ms: 1.1,
         total_ms: 5.3,
+        latest_capture_frame_id: "800",
+        latest_capture_age_ms: 3,
+        latest_sink_frame_id: "800",
+        latest_sink_completion_age_ms: 2,
+        latest_sampler_frame_id: "800",
+        latest_sampler_completion_age_ms: 1,
+        sampled_sequence: 18,
+        sampled_age_ms: 7,
+        render_queue_ms: 1.4,
+        renderer_stage: "idle",
+        render_pending: false,
       },
     },
     {
@@ -69,6 +82,17 @@ export const FIXTURE_STATUS: StationStatus = {
         resize_ms: 0,
         encode_ms: 1.2,
         total_ms: 5.5,
+        latest_capture_frame_id: "900",
+        latest_capture_age_ms: 4,
+        latest_sink_frame_id: "900",
+        latest_sink_completion_age_ms: 3,
+        latest_sampler_frame_id: "900",
+        latest_sampler_completion_age_ms: 2,
+        sampled_sequence: 30,
+        sampled_age_ms: 8,
+        render_queue_ms: 1.5,
+        renderer_stage: "idle",
+        render_pending: false,
       },
     },
   ],
@@ -90,8 +114,41 @@ export class FakeStationApi implements StationApi {
     return structuredClone(this.#status);
   }
 
-  async getPreview(role: CameraRole, sequence: number): Promise<Blob> {
-    return new Blob([`${role}:${sequence}`], { type: "image/png" });
+  async getPreview(role: CameraRole, sequence: number): Promise<FetchedPreview> {
+    const camera = this.#status.cameras.find((candidate) => candidate.role === role);
+    if (camera === undefined) {
+      throw new Error(`No fixture camera is assigned to ${role}`);
+    }
+    return {
+      image: new Blob([`${role}:${sequence}`], { type: "image/png" }),
+      telemetry: {
+        headers_ms: 2,
+        body_ms: 1,
+        total_ms: 3,
+        server: {
+          requested_sequence: sequence,
+          served_sequence: sequence,
+          latest_capture_frame_id: String(camera.preview_performance.latest_capture_frame_id),
+          latest_capture_age_ms: camera.preview_performance.latest_capture_age_ms,
+          latest_sink_frame_id: camera.preview_performance.latest_sink_frame_id,
+          latest_sink_completion_age_ms: camera.preview_performance.latest_sink_completion_age_ms,
+          latest_sampler_frame_id: camera.preview_performance.latest_sampler_frame_id,
+          latest_sampler_completion_age_ms:
+            camera.preview_performance.latest_sampler_completion_age_ms,
+          sampled_sequence: camera.preview_performance.sampled_sequence,
+          sampled_age_ms: camera.preview_performance.sampled_age_ms,
+          source_age_ms: camera.preview_performance.source_age_ms,
+          rendered_age_ms: camera.preview_performance.rendered_age_ms,
+          render_queue_ms: camera.preview_performance.render_queue_ms,
+          render_ms: camera.preview_performance.total_ms,
+          renderer_stage: camera.preview_performance.renderer_stage,
+          render_pending: camera.preview_performance.render_pending,
+          backend_ms: 0.2,
+          response_prepare_ms: 0.1,
+          handler_ms: 0.3,
+        },
+      },
+    };
   }
 
   async updateCameraSettings(

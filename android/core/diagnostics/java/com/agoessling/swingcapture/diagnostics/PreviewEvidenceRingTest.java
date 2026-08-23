@@ -113,9 +113,41 @@ public final class PreviewEvidenceRingTest {
     expectIllegalArgument(() -> evidence(-1, 1), "negative timestamp");
     expectIllegalArgument(() -> evidence(Long.MAX_VALUE, 1), "unrepresentable end");
     check(!evidence(1, 0).hasCompressedFrame(), "trace-only evidence accepted");
+    PreviewEvidence rotated =
+        new PreviewEvidence(
+            2,
+            new byte[0],
+            "model",
+            90,
+            1,
+            0.5,
+            0.5,
+            0.1,
+            true,
+            ControllerState.MONITORING,
+            "reason");
+    check(rotated.imageRotationDegrees() == 90, "sensor rotation retained");
+    check(
+        rotated.withCompressedFrame(new byte[] {1}).imageRotationDegrees() == 90,
+        "JPEG attachment retains sensor rotation");
     expectIllegalArgument(
         () -> evidence(1, 0).withCompressedFrame(new byte[0]),
         "empty attached frame");
+    expectIllegalArgument(
+        () ->
+            new PreviewEvidence(
+                2,
+                new byte[0],
+                "model",
+                45,
+                1,
+                0.5,
+                0.5,
+                0.1,
+                true,
+                ControllerState.MONITORING,
+                "reason"),
+        "unsupported sensor rotation");
     expectIllegalArgument(
         () ->
             new PreviewEvidence(

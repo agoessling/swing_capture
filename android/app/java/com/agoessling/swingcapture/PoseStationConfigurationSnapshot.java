@@ -3,7 +3,6 @@ package com.agoessling.swingcapture;
 import com.agoessling.swingcapture.node.BearerAuthorization;
 import com.agoessling.swingcapture.pose.NormalizedHittingRegion;
 import com.agoessling.swingcapture.pose.inference.PoseInferenceDelegatePolicy;
-import java.net.URI;
 import java.util.Locale;
 import java.util.Objects;
 
@@ -16,7 +15,7 @@ public record PoseStationConfigurationSnapshot(
     String peerOrigin,
     String peerControlToken) {
   public static final NormalizedHittingRegion DEFAULT_HITTING_REGION =
-      new NormalizedHittingRegion(0.15, 0.30, 0.85, 1.0);
+      new NormalizedHittingRegion(0.0, 0.0, 1.0, 1.0);
 
   public PoseStationConfigurationSnapshot {
     Objects.requireNonNull(mode, "mode");
@@ -65,21 +64,7 @@ public record PoseStationConfigurationSnapshot(
   }
 
   private static void validatePeerOrigin(String value) {
-    URI origin;
-    try {
-      origin = URI.create(value);
-    } catch (IllegalArgumentException invalid) {
-      throw new IllegalArgumentException("peer origin is not a valid URI", invalid);
-    }
-    if (!"http".equals(origin.getScheme())
-        || origin.getHost() == null
-        || origin.getUserInfo() != null
-        || origin.getQuery() != null
-        || origin.getFragment() != null
-        || !(origin.getPath().isEmpty() || origin.getPath().equals("/"))
-        || origin.getPort() <= 0
-        || origin.getPort() > 65_535) {
-      throw new IllegalArgumentException("peer origin must be http://host:port with no path");
-    }
+    PeerTransportSecurityPolicy.validateOrigin(
+        value, PeerTransportSecurityPolicy.Requirement.TRUSTED_LAN_DEMO_ALLOWED);
   }
 }

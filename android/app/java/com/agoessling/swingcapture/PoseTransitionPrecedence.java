@@ -11,12 +11,12 @@ final class PoseTransitionPrecedence {
   private PoseTransitionPrecedence() {}
 
   /**
-   * A diagnostic that was confirmed before the pose claim is retained. Once pose owns the camera,
-   * newly arriving diagnostics are truncated so a two-second post-roll cannot miss the backswing.
+   * A real pose capture always outranks standby diagnostics. Any diagnostic post-roll already in
+   * progress is truncated so it cannot prevent either phone from recording the backswing.
    */
   static Outcome resolve(boolean poseClaimed, boolean diagnosticBusy) {
     if (!poseClaimed && diagnosticBusy) {
-      return Outcome.DIAGNOSTIC_WINS;
+      return Outcome.POSE_WINS_AND_CANCELS_DIAGNOSTIC;
     }
     return diagnosticBusy ? Outcome.POSE_WINS_AND_CANCELS_DIAGNOSTIC : Outcome.POSE_WINS;
   }

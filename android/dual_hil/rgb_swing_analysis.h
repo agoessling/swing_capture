@@ -19,6 +19,21 @@ struct RetainedLuminanceFrame {
   std::vector<std::byte> pixels;
 };
 
+struct RgbSwingAcceptanceEvidence {
+  double minimum_white_delta = 0.0;
+  std::size_t minimum_white_frames = 0;
+  std::size_t maximum_white_frames = 0;
+  double minimum_white_duration_us = 0.0;
+  double maximum_white_duration_us = 0.0;
+  std::int64_t maximum_absolute_optical_audio_offset_us = 0;
+  std::size_t maximum_localized_response_tile_count = 0;
+  bool minimum_white_delta_passed = false;
+  bool white_frame_count_passed = false;
+  bool white_duration_passed = false;
+  bool optical_audio_offset_passed = false;
+  bool localized_response_passed = false;
+};
+
 struct RgbSwingAnalysis {
   bool detected = false;
   std::string diagnostic;
@@ -30,6 +45,7 @@ struct RgbSwingAnalysis {
   std::size_t tile_x = 0;
   std::size_t tile_y = 0;
   double maximum_white_delta = 0.0;
+  std::size_t white_frame_count = 0;
   double white_duration_us = 0.0;
   std::int64_t optical_to_audio_offset_us = 0;
   std::int64_t optical_onset_lower_bound_us = 0;
@@ -40,6 +56,7 @@ struct RgbSwingAnalysis {
   // Diagnostic only: the fixture intentionally emits colored post-impact states for the entire
   // retained post-roll, so their brightness is not an "off" acceptance baseline.
   double post_sequence_baseline_shift = 0.0;
+  RgbSwingAcceptanceEvidence acceptance;
 };
 
 struct RgbSwingSequenceConfiguration {

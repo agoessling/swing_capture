@@ -76,7 +76,7 @@ public final class PoseTriggerController {
    *
    * <p>The defaults require three coherent observations at 5 fps and tolerate one isolated missed
    * observation. {@code maximumArmedDurationNs} is a sliding evidence lease: observations that
-   * still place the golfer in the hitting region extend it. {@code thermalHardCapNs} is absolute
+   * still show a usable golfer pose extend it. {@code thermalHardCapNs} is absolute
    * from the first arm request and cannot be extended. Defaults therefore allow an address dwell
    * to remain armed beyond 15 seconds, but force a stop after 30 seconds without an impact.
    *
@@ -233,6 +233,7 @@ public final class PoseTriggerController {
   private long thermalHardStopNs = -1;
   private long cooldownUntilNs = -1;
   private long clearStartedNs = -1;
+  private boolean resetObserved;
 
   public PoseTriggerController(Config config) {
     this.config = Objects.requireNonNull(config, "config");
@@ -248,7 +249,7 @@ public final class PoseTriggerController {
       case WATCHING -> observeWatching(observation);
       case QUALIFYING -> observeQualifying(observation, previousTimestampNs);
       case ARM_REQUESTED -> observeArmed(observation, previousTimestampNs);
-      case WAITING_FOR_CLEAR -> observeWaitingForClear(observation, previousTimestampNs);
+      case WAITING_FOR_CLEAR -> observeWaitingForClear(observation);
     };
   }
 
@@ -305,6 +306,7 @@ public final class PoseTriggerController {
     thermalHardStopNs = -1;
     cooldownUntilNs = -1;
     clearStartedNs = -1;
+    resetObserved = false;
   }
 
   public State state() {
@@ -374,7 +376,7 @@ public final class PoseTriggerController {
   private Decision observeArmed(Observation observation, long previousTimestampNs) {
     if (observation.timestampNs() >= thermalHardStopNs) {
       enterWaitingForClear(observation.timestampNs());
-      updateClearEvidence(observation);
+      updateResetEvidence(observation);
       return decision(
           Command.STOP_HIGH_SPEED,
           "absolute thermal hard cap stopped high-speed capture",
@@ -383,7 +385,7 @@ public final class PoseTriggerController {
 
     if (observation.timestampNs() >= activeUntilNs) {
       enterWaitingForClear(observation.timestampNs());
-      updateClearEvidence(observation);
+      updateResetEvidence(observation);
       return decision(
           Command.STOP_HIGH_SPEED,
           "active pose evidence expired before the thermal hard cap",
@@ -407,11 +409,11 @@ public final class PoseTriggerController {
             > config.maximumObservationGapNs()) {
       clearStartedNs = -1;
     }
-    updateClearEvidence(observation);
+    updateSceneClearEvidence(observation);
     if (clearStartedNs >= 0
         && elapsedNs(observation.timestampNs(), clearStartedNs) >= config.clearDurationNs()) {
       enterWaitingForClear(observation.timestampNs());
-      updateClearEvidence(observation);
+      updateResetEvidence(observation);
       return decision(
           Command.STOP_HIGH_SPEED,
           "golfer cleared; stopped high-speed capture and entered rearm cooldown",
@@ -423,26 +425,18 @@ public final class PoseTriggerController {
         TransitionReason.ACTIVE_CLEARING);
   }
 
-  private Decision observeWaitingForClear(
-      Observation observation, long previousTimestampNs) {
-    if (previousTimestampNs >= 0
-        && elapsedNs(observation.timestampNs(), previousTimestampNs)
-            > config.maximumObservationGapNs()) {
-      clearStartedNs = -1;
-    }
-    updateClearEvidence(observation);
-    if (clearStartedNs >= 0
-        && elapsedNs(observation.timestampNs(), clearStartedNs) >= config.clearDurationNs()
-        && observation.timestampNs() >= cooldownUntilNs) {
+  private Decision observeWaitingForClear(Observation observation) {
+    updateResetEvidence(observation);
+    if (resetObserved && observation.timestampNs() >= cooldownUntilNs) {
       enterWatchingAfterClear();
       return decision(
           Command.NONE,
-          "golfer cleared and cooldown elapsed; standby trigger is ready again",
+          "post-swing reset was observed and cooldown elapsed; standby trigger is ready again",
           TransitionReason.CLEAR_COMPLETE_REARMED);
     }
     return decision(
         Command.NONE,
-        "waiting for continuous clear-region evidence",
+        "waiting for post-swing reset evidence and cooldown",
         TransitionReason.WAITING_FOR_CLEAR);
   }
 
@@ -472,6 +466,7 @@ public final class PoseTriggerController {
     state = State.WAITING_FOR_CLEAR;
     cooldownUntilNs = saturatedAdd(timestampNs, config.cooldownNs());
     clearStartedNs = -1;
+    resetObserved = false;
     qualificationStartedNs = -1;
     lastQualifiedNs = -1;
     activeUntilNs = -1;
@@ -487,24 +482,35 @@ public final class PoseTriggerController {
     thermalHardStopNs = -1;
     cooldownUntilNs = -1;
     clearStartedNs = -1;
+    resetObserved = false;
   }
 
-  private void updateClearEvidence(Observation observation) {
-    if (!isClear(observation)) {
+  private void updateSceneClearEvidence(Observation observation) {
+    if (!isSceneClear(observation)) {
       clearStartedNs = -1;
     } else if (clearStartedNs < 0) {
       clearStartedNs = observation.timestampNs();
     }
   }
 
-  private boolean isClear(Observation observation) {
-    return !observation.insideHittingRegion()
-        || observation.personConfidence() <= config.maximumClearPersonConfidence();
+  private void updateResetEvidence(Observation observation) {
+    if (isResetEvidence(observation)) {
+      resetObserved = true;
+    }
+  }
+
+  private boolean isSceneClear(Observation observation) {
+    return observation.personConfidence() <= config.maximumClearPersonConfidence();
+  }
+
+  private boolean isResetEvidence(Observation observation) {
+    return isSceneClear(observation)
+        || observation.addressConfidence() < config.minimumAddressConfidence()
+        || observation.motionMagnitude() > config.maximumMotionMagnitude();
   }
 
   private boolean isEngaged(Observation observation) {
-    return observation.insideHittingRegion()
-        && observation.personConfidence() >= config.minimumPersonConfidence();
+    return observation.personConfidence() >= config.minimumPersonConfidence();
   }
 
   private boolean qualifies(Observation observation) {

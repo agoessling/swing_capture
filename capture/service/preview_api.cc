@@ -2,17 +2,22 @@
 
 #include <httplib.h>
 
+#include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <ratio>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -21,6 +26,22 @@ namespace swing_capture::service {
 namespace {
 
 using Json = nlohmann::json;  // NOLINT(misc-include-cleaner)
+
+std::string MakeServiceInstanceId() {
+  // This value is an opaque restart boundary, not a credential. Combining two
+  // independent process-local clocks with an ordinal keeps registrations in
+  // one process distinct and makes accidental reuse after a restart vanishingly
+  // unlikely without adding a persistent identity or entropy dependency.
+  static std::atomic<std::uint64_t> next_ordinal = 0;
+  const auto wall_nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+  const auto steady_nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch())
+                                      .count();
+  return std::to_string(wall_nanoseconds) + "-" + std::to_string(steady_nanoseconds) + "-" +
+         std::to_string(next_ordinal.fetch_add(1, std::memory_order_relaxed));
+}
 
 Json NumericSettingJson(const NumericSettingStatus &setting) {
   return {
@@ -62,6 +83,22 @@ Json CameraStatusJson(const CameraStatus &status) {
            {"resize_ms", status.preview_performance.resize_milliseconds},
            {"encode_ms", status.preview_performance.encode_milliseconds},
            {"total_ms", status.preview_performance.total_milliseconds},
+           {"latest_capture_frame_id",
+            std::to_string(status.preview_performance.latest_capture_frame_id)},
+           {"latest_capture_age_ms", status.preview_performance.latest_capture_age_milliseconds},
+           {"latest_sink_frame_id",
+            std::to_string(status.preview_performance.latest_sink_frame_id)},
+           {"latest_sink_completion_age_ms",
+            status.preview_performance.latest_sink_completion_age_milliseconds},
+           {"latest_sampler_frame_id",
+            std::to_string(status.preview_performance.latest_sampler_frame_id)},
+           {"latest_sampler_completion_age_ms",
+            status.preview_performance.latest_sampler_completion_age_milliseconds},
+           {"sampled_sequence", status.preview_performance.sampled_sequence},
+           {"sampled_age_ms", status.preview_performance.sampled_age_milliseconds},
+           {"render_queue_ms", status.preview_performance.render_queue_milliseconds},
+           {"renderer_stage", status.preview_performance.renderer_stage},
+           {"render_pending", status.preview_performance.render_pending},
        }},
   };
 }
@@ -208,7 +245,8 @@ std::optional<CameraRole> RoleFromRequest(const httplib::Request &request) {
   return ParseCameraRole(request.matches[1].str());
 }
 
-void HandleStatus(StationBackend &backend, httplib::Response &response) {
+void HandleStatus(StationBackend &backend, std::string_view service_instance_id,
+                  httplib::Response &response) {
   try {
     const std::vector<CameraStatus> cameras = backend.CameraStatuses();
     Json camera_values = Json::array();
@@ -219,6 +257,7 @@ void HandleStatus(StationBackend &backend, httplib::Response &response) {
     }
     SetJson(response, {
                           {"schema_version", 1},
+                          {"service_instance_id", service_instance_id},
                           {"mode", all_connected ? "setup_preview" : "setup_preview_degraded"},
                           {"cameras", std::move(camera_values)},
                       });
@@ -229,6 +268,7 @@ void HandleStatus(StationBackend &backend, httplib::Response &response) {
 
 void HandlePreview(StationBackend &backend, const httplib::Request &request,
                    httplib::Response &response) {
+  const auto handler_started_at = std::chrono::steady_clock::now();
   const std::optional<CameraRole> role = RoleFromRequest(request);
   if (!role.has_value()) {
     SetError(response, 404, "unknown camera role");
@@ -237,7 +277,9 @@ void HandlePreview(StationBackend &backend, const httplib::Request &request,
   try {
     const bool full_resolution =
         request.has_param("full") && request.get_param_value("full") == "1";
+    const auto backend_started_at = std::chrono::steady_clock::now();
     const std::optional<PreviewImage> preview = backend.LatestPreview(*role, full_resolution);
+    const auto backend_completed_at = std::chrono::steady_clock::now();
     if (!preview.has_value()) {
       SetError(response, 503, "preview is not available yet");
       return;
@@ -246,6 +288,64 @@ void HandlePreview(StationBackend &backend, const httplib::Request &request,
     response.set_content(preview->bytes, preview->media_type);
     response.set_header("Cache-Control", "no-store");
     response.set_header("X-Preview-Sequence", std::to_string(preview->sequence));
+    if (request.has_param("sequence")) {
+      const std::string requested = request.get_param_value("sequence");
+      std::uint64_t requested_sequence = 0;
+      const char *const requested_end = std::to_address(requested.cend());
+      const auto [end, error] =
+          std::from_chars(requested.data(), requested_end, requested_sequence);
+      if (error == std::errc{} && end == requested_end) {
+        response.set_header("X-Preview-Requested-Sequence", std::to_string(requested_sequence));
+      }
+    }
+    const PreviewPerformanceStatus &performance = preview->performance;
+    response.set_header("X-Preview-Latest-Capture-Frame-Id",
+                        std::to_string(performance.latest_capture_frame_id));
+    response.set_header("X-Preview-Latest-Capture-Age-Ms",
+                        std::to_string(performance.latest_capture_age_milliseconds));
+    response.set_header("X-Preview-Latest-Sink-Frame-Id",
+                        std::to_string(performance.latest_sink_frame_id));
+    response.set_header("X-Preview-Latest-Sink-Completion-Age-Ms",
+                        std::to_string(performance.latest_sink_completion_age_milliseconds));
+    response.set_header("X-Preview-Latest-Sampler-Frame-Id",
+                        std::to_string(performance.latest_sampler_frame_id));
+    response.set_header("X-Preview-Latest-Sampler-Completion-Age-Ms",
+                        std::to_string(performance.latest_sampler_completion_age_milliseconds));
+    response.set_header("X-Preview-Sampled-Sequence", std::to_string(performance.sampled_sequence));
+    response.set_header("X-Preview-Sampled-Age-Ms",
+                        std::to_string(performance.sampled_age_milliseconds));
+    response.set_header("X-Preview-Source-Age-Ms",
+                        std::to_string(performance.source_age_milliseconds));
+    response.set_header("X-Preview-Rendered-Age-Ms",
+                        std::to_string(performance.rendered_age_milliseconds));
+    response.set_header("X-Preview-Render-Queue-Ms",
+                        std::to_string(performance.render_queue_milliseconds));
+    response.set_header("X-Preview-Render-Ms", std::to_string(performance.total_milliseconds));
+    response.set_header("X-Preview-Renderer-Stage", performance.renderer_stage);
+    response.set_header("X-Preview-Render-Pending", performance.render_pending ? "true" : "false");
+    // This is the last instant the route can observe before cpp-httplib takes
+    // ownership of serialization and socket delivery. It includes content
+    // copying and every non-timing header above, but cannot measure the later
+    // response write performed outside this handler.
+    const auto response_prepared_at = std::chrono::steady_clock::now();
+    const double backend_milliseconds =
+        std::chrono::duration<double, std::milli>(backend_completed_at - backend_started_at)
+            .count();
+    const double response_prepare_milliseconds =
+        std::chrono::duration<double, std::milli>(response_prepared_at - backend_completed_at)
+            .count();
+    const double handler_milliseconds =
+        std::chrono::duration<double, std::milli>(response_prepared_at - handler_started_at)
+            .count();
+    response.set_header("X-Preview-Server-Backend-Ms", std::to_string(backend_milliseconds));
+    response.set_header("X-Preview-Server-Response-Prepare-Ms",
+                        std::to_string(response_prepare_milliseconds));
+    response.set_header("X-Preview-Server-Handler-Ms", std::to_string(handler_milliseconds));
+    response.set_header(
+        "Server-Timing",
+        "preview_backend;dur=" + std::to_string(backend_milliseconds) +
+            ", preview_response;dur=" + std::to_string(response_prepare_milliseconds) +
+            ", preview_handler;dur=" + std::to_string(handler_milliseconds));
   } catch (const std::invalid_argument &error) {
     SetError(response, 400, error.what());
   } catch (const std::exception &error) {
@@ -526,6 +626,7 @@ std::optional<CameraRole> ParseCameraRole(std::string_view value) noexcept {
 
 void RegisterPreviewRoutes(httplib::Server &server, StationBackend &backend,
                            const std::optional<std::filesystem::path> &static_root) {
+  const std::string service_instance_id = MakeServiceInstanceId();
   server.set_payload_max_length(4096);
   server.set_default_headers({
       {"Content-Security-Policy",
@@ -535,8 +636,9 @@ void RegisterPreviewRoutes(httplib::Server &server, StationBackend &backend,
       {"X-Content-Type-Options", "nosniff"},
       {"X-Frame-Options", "DENY"},
   });
-  server.Get("/api/v1/status", [&backend](const httplib::Request &, httplib::Response &response) {
-    HandleStatus(backend, response);
+  server.Get("/api/v1/status", [&backend, service_instance_id](const httplib::Request &,
+                                                               httplib::Response &response) {
+    HandleStatus(backend, service_instance_id, response);
   });
 
   server.Get(R"(/api/v1/cameras/(down_the_line|face_on)/preview\.png)",

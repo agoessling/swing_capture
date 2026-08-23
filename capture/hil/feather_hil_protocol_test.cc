@@ -3,17 +3,28 @@
 #include <cassert>
 #include <cstdint>
 #include <functional>
+#include <limits>
+#include <span>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 namespace {
 
 using swing_capture::hil::BuildFeatherCalibrationCommand;
 using swing_capture::hil::BuildFeatherLedCommand;
+using swing_capture::hil::BuildFeatherPcmAbortCommand;
+using swing_capture::hil::BuildFeatherPcmBeginCommand;
+using swing_capture::hil::BuildFeatherPcmChunkCommand;
+using swing_capture::hil::BuildFeatherPcmCommitCommand;
+using swing_capture::hil::BuildFeatherPcmPlayCommand;
 using swing_capture::hil::BuildFeatherQueryCommand;
 using swing_capture::hil::BuildFeatherSwingCommand;
 using swing_capture::hil::BuildFeatherToneCommand;
+using swing_capture::hil::FeatherPcm16LeBytes;
+using swing_capture::hil::FeatherPcmCrc32;
 using swing_capture::hil::FeatherResponseKind;
+using swing_capture::hil::FeatherScaledPcmCrc32;
 using swing_capture::hil::ParseFeatherResponse;
 using swing_capture::hil::RequiredUnsignedField;
 
@@ -28,8 +39,8 @@ bool Rejects(const std::function<void()> &operation) {
 
 void TestParsesExactFirmwareTranscripts() {
   constexpr std::string_view kQuery =
-      "SC-HIL/1 101 OK QUERY firmware=prop-maker-hil-5 protocol=1 "
-      "capabilities=query,led,tone,calibrate,swing lead_max_us=2000000 led_duration_min_us=100 "
+      "SC-HIL/1 101 OK QUERY firmware=prop-maker-hil-9 protocol=1 "
+      "capabilities=query,led,tone,pcm,calibrate,swing lead_max_us=2000000 led_duration_min_us=100 "
       "led_duration_max_us=1000000 tone_lead_min_us=20000 tone_duration_min_us=1000 "
       "tone_duration_max_us=250000 tone_frequency_min_hz=100 "
       "tone_frequency_max_hz=10000 tone_level_min_permille=1 "
@@ -38,13 +49,13 @@ void TestParsesExactFirmwareTranscripts() {
   const auto info = ParseFeatherResponse(kQuery);
   assert(info.kind == FeatherResponseKind::kOk);
   assert(info.request_id == 101);
-  assert(info.fields.at("firmware") == "prop-maker-hil-5");
-  assert(info.fields.at("capabilities") == "query,led,tone,calibrate,swing");
+  assert(info.fields.at("firmware") == "prop-maker-hil-9");
+  assert(info.fields.at("capabilities") == "query,led,tone,pcm,calibrate,swing");
   assert(info.fields.at("fixture_neopixel_color_order") == "rgb");
   assert(info.wire_line == kQuery);
 
   const auto boot =
-      ParseFeatherResponse("SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-5 device_us=42\n");
+      ParseFeatherResponse("SC-HIL/1 0 EVENT BOOT firmware=prop-maker-hil-9 device_us=42\n");
   assert(boot.kind == FeatherResponseKind::kEvent);
   assert(boot.subject == "BOOT");
   assert(boot.state.empty());
@@ -99,6 +110,20 @@ void TestBuildsOnlyFirmwareAcceptedCommands() {
   assert(BuildFeatherLedCommand(2, 100000, 44053) == "SC-HIL/1 2 LED 100000 44053\n");
   assert(BuildFeatherToneCommand(3, 100000, 20000, 2000, 125) ==
          "SC-HIL/1 3 TONE 100000 20000 2000 125\n");
+  const std::vector<std::int16_t> samples = {0, 32767, -32768, 0x1234};
+  const auto bytes = FeatherPcm16LeBytes(samples);
+  assert(bytes == std::vector<std::uint8_t>({0x00, 0x00, 0xff, 0x7f, 0x00, 0x80, 0x34, 0x12}));
+  assert(FeatherPcmCrc32(bytes) == 0x53c29a84U);
+  assert(FeatherScaledPcmCrc32(samples, 125U) == 0xfe5f190bU);
+  assert(BuildFeatherPcmBeginCommand(6, 4, 0x53c29a84U) == "SC-HIL/1 6 PCM_BEGIN 4 1405262468\n");
+  assert(BuildFeatherPcmChunkCommand(6, 0, bytes) == "SC-HIL/1 6 PCM_CHUNK 0 0000ff7f00803412\n");
+  assert(BuildFeatherPcmCommitCommand(6) == "SC-HIL/1 6 PCM_COMMIT\n");
+  assert(BuildFeatherPcmAbortCommand(6) == "SC-HIL/1 6 PCM_ABORT\n");
+  assert(BuildFeatherPcmPlayCommand(7, 100000, 125, 12, 480) ==
+         "SC-HIL/1 7 PCM_PLAY 100000 125 12 480\n");
+  assert(BuildFeatherPcmPlayCommand(7, 20'000, 1, 1, 0) == "SC-HIL/1 7 PCM_PLAY 20000 1 1 0\n");
+  assert(BuildFeatherPcmPlayCommand(7, 20'000, 1, 1, 11'999) ==
+         "SC-HIL/1 7 PCM_PLAY 20000 1 1 11999\n");
   assert(BuildFeatherCalibrationCommand(4) == "SC-HIL/1 4 CALIBRATE\n");
   assert(BuildFeatherSwingCommand(5, 1) == "SC-HIL/1 5 SWING 1\n");
   assert(BuildFeatherSwingCommand(5, 12) == "SC-HIL/1 5 SWING 12\n");
@@ -123,6 +148,20 @@ void TestBuildsOnlyFirmwareAcceptedCommands() {
       Rejects([] { static_cast<void>(BuildFeatherToneCommand(1, 20'000, 20'000, 2'000, 126)); }));
   assert(Rejects([] { static_cast<void>(BuildFeatherCalibrationCommand(0)); }));
   assert(Rejects([] { static_cast<void>(BuildFeatherSwingCommand(1, 24)); }));
+  assert(Rejects([] { static_cast<void>(FeatherPcm16LeBytes({})); }));
+  assert(Rejects([] { static_cast<void>(BuildFeatherPcmBeginCommand(1, 0, 0)); }));
+  assert(Rejects([] {
+    std::vector<std::uint8_t> too_large(49);
+    static_cast<void>(BuildFeatherPcmChunkCommand(1, 0, too_large));
+  }));
+  assert(Rejects([] {
+    const std::uint8_t byte = 0;
+    static_cast<void>(BuildFeatherPcmChunkCommand(1, 24'000, std::span(&byte, 1U)));
+  }));
+  assert(Rejects([] { static_cast<void>(BuildFeatherPcmPlayCommand(1, 19'999, 125, 12, 0)); }));
+  assert(Rejects([] { static_cast<void>(BuildFeatherPcmPlayCommand(1, 20'000, 1'001, 12, 0)); }));
+  assert(
+      Rejects([] { static_cast<void>(BuildFeatherPcmPlayCommand(1, 20'000, 125, 12, 12'000)); }));
 }
 
 void TestRejectsMalformedResponses() {
@@ -139,7 +178,7 @@ void TestRejectsMalformedResponses() {
            "SC-HIL/1 0 OK QUERY protocol=1",
            "SC-HIL/1 0 ACK LED accepted_us=1",
            "SC-HIL/1 0 EVENT LED START device_us=1",
-           "SC-HIL/1 1 EVENT BOOT firmware=prop-maker-hil-5 device_us=1",
+           "SC-HIL/1 1 EVENT BOOT firmware=prop-maker-hil-9 device_us=1",
        }) {
     assert(Rejects([response] { static_cast<void>(ParseFeatherResponse(response)); }));
   }

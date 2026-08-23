@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define SWING_HIL_PROTOCOL_PREFIX "SC-HIL/1"
-#define SWING_HIL_FIRMWARE_VERSION "prop-maker-hil-5"
+#define SWING_HIL_FIRMWARE_VERSION "prop-maker-hil-9"
 #define SWING_HIL_MAX_LINE_BYTES 160U
 
 #define SWING_HIL_MAX_LEAD_US 2000000U
@@ -23,11 +23,23 @@ extern "C" {
 #define SWING_HIL_TONE_MAX_FREQUENCY_HZ 10000U
 #define SWING_HIL_TONE_MIN_LEVEL_PERMILLE 1U
 #define SWING_HIL_TONE_MAX_LEVEL_PERMILLE 125U
+#define SWING_HIL_PCM_SAMPLE_RATE_HZ 48000U
+#define SWING_HIL_PCM_MAX_SAMPLES 12000U
+#define SWING_HIL_PCM_MAX_CHUNK_BYTES 48U
+#define SWING_HIL_PCM_MIN_LEAD_US 20000U
+#define SWING_HIL_PCM_MIN_GAIN_PERMILLE 1U
+#define SWING_HIL_PCM_MAX_GAIN_PERMILLE 1000U
+#define SWING_HIL_PCM_WHITE_US 20000U
 
 typedef enum swing_hil_command_kind {
   SWING_HIL_COMMAND_QUERY = 0,
   SWING_HIL_COMMAND_LED,
   SWING_HIL_COMMAND_TONE,
+  SWING_HIL_COMMAND_PCM_BEGIN,
+  SWING_HIL_COMMAND_PCM_CHUNK,
+  SWING_HIL_COMMAND_PCM_COMMIT,
+  SWING_HIL_COMMAND_PCM_ABORT,
+  SWING_HIL_COMMAND_PCM_PLAY,
   SWING_HIL_COMMAND_CALIBRATE,
   SWING_HIL_COMMAND_SWING,
 } swing_hil_command_kind;
@@ -44,6 +56,24 @@ typedef struct swing_hil_tone_command {
   uint32_t level_permille;
 } swing_hil_tone_command;
 
+typedef struct swing_hil_pcm_begin_command {
+  uint32_t sample_count;
+  uint32_t crc32;
+} swing_hil_pcm_begin_command;
+
+typedef struct swing_hil_pcm_chunk_command {
+  uint32_t byte_offset;
+  uint32_t byte_count;
+  uint8_t bytes[SWING_HIL_PCM_MAX_CHUNK_BYTES];
+} swing_hil_pcm_chunk_command;
+
+typedef struct swing_hil_pcm_play_command {
+  uint32_t lead_us;
+  uint32_t gain_permille;
+  uint32_t brightness;
+  uint32_t marker_sample;
+} swing_hil_pcm_play_command;
+
 typedef struct swing_hil_swing_command {
   uint32_t brightness;
 } swing_hil_swing_command;
@@ -54,6 +84,9 @@ typedef struct swing_hil_command {
   union {
     swing_hil_led_command led;
     swing_hil_tone_command tone;
+    swing_hil_pcm_begin_command pcm_begin;
+    swing_hil_pcm_chunk_command pcm_chunk;
+    swing_hil_pcm_play_command pcm_play;
     swing_hil_swing_command swing;
   } parameters;
 } swing_hil_command;

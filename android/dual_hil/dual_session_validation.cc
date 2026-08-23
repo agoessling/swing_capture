@@ -68,6 +68,102 @@ double DecimalString(const Json &value, std::string_view field) {
   }
 }
 
+std::uint64_t CanonicalNonnegativeIntegerString(const Json &value, std::string_view field) {
+  if (!value.is_string()) {
+    Invalid(std::string(field) + " must be a canonical nonnegative decimal string");
+  }
+  const auto &text = value.get_ref<const std::string &>();
+  if (text.empty() || (text.size() > 1U && text.front() == '0') ||
+      !std::ranges::all_of(text,
+                           [](char character) { return character >= '0' && character <= '9'; })) {
+    Invalid(std::string(field) + " must be a canonical nonnegative decimal string");
+  }
+  std::size_t consumed = 0;
+  std::uint64_t parsed = 0;
+  try {
+    parsed = std::stoull(text, &consumed);
+  } catch (const std::exception &) {
+    Invalid(std::string(field) + " is outside the unsigned 64-bit range");
+  }
+  if (consumed != text.size()) {
+    Invalid(std::string(field) + " is outside the unsigned 64-bit range");
+  }
+  return parsed;
+}
+
+CaptureStartupTimingEvidence ValidateStartupTiming(const Json &android_capture) {
+  const auto timing = android_capture.find("startup_timing");
+  if (timing == android_capture.end() || !timing->is_object() ||
+      timing->value("schema_version", 0) != 1 || timing->value("clock", "") != "CLOCK_BOOTTIME") {
+    Invalid("retained Android manifest is missing canonical startup timing");
+  }
+  CaptureStartupTimingEvidence evidence = {
+      .arm_requested_ns = CanonicalNonnegativeIntegerString(
+          timing->at("arm_requested_elapsed_realtime_ns"), "arm_requested_elapsed_realtime_ns"),
+      .engine_started_ns = CanonicalNonnegativeIntegerString(
+          timing->at("engine_started_elapsed_realtime_ns"), "engine_started_elapsed_realtime_ns"),
+      .first_camera_frame_ns =
+          CanonicalNonnegativeIntegerString(timing->at("first_camera_frame_elapsed_realtime_ns"),
+                                            "first_camera_frame_elapsed_realtime_ns"),
+      .first_usable_encoded_frame_ns = CanonicalNonnegativeIntegerString(
+          timing->at("first_usable_encoded_frame_elapsed_realtime_ns"),
+          "first_usable_encoded_frame_elapsed_realtime_ns"),
+      .full_pre_roll_ready_ns =
+          CanonicalNonnegativeIntegerString(timing->at("full_pre_roll_ready_elapsed_realtime_ns"),
+                                            "full_pre_roll_ready_elapsed_realtime_ns"),
+      .arm_to_engine_start_ns = CanonicalNonnegativeIntegerString(
+          timing->at("arm_to_engine_start_ns"), "arm_to_engine_start_ns"),
+      .engine_start_to_first_camera_frame_ns =
+          CanonicalNonnegativeIntegerString(timing->at("engine_start_to_first_camera_frame_ns"),
+                                            "engine_start_to_first_camera_frame_ns"),
+      .arm_to_first_camera_frame_ns = CanonicalNonnegativeIntegerString(
+          timing->at("arm_to_first_camera_frame_ns"), "arm_to_first_camera_frame_ns"),
+      .first_camera_frame_to_first_usable_encoded_frame_ns = CanonicalNonnegativeIntegerString(
+          timing->at("first_camera_frame_to_first_usable_encoded_frame_ns"),
+          "first_camera_frame_to_first_usable_encoded_frame_ns"),
+      .arm_to_first_usable_encoded_frame_ns =
+          CanonicalNonnegativeIntegerString(timing->at("arm_to_first_usable_encoded_frame_ns"),
+                                            "arm_to_first_usable_encoded_frame_ns"),
+      .first_usable_encoded_frame_to_full_pre_roll_ready_ns = CanonicalNonnegativeIntegerString(
+          timing->at("first_usable_encoded_frame_to_full_pre_roll_ready_ns"),
+          "first_usable_encoded_frame_to_full_pre_roll_ready_ns"),
+      .arm_to_full_pre_roll_ready_ns = CanonicalNonnegativeIntegerString(
+          timing->at("arm_to_full_pre_roll_ready_ns"), "arm_to_full_pre_roll_ready_ns"),
+      .continuity_reset_count = CanonicalNonnegativeIntegerString(
+          timing->at("startup_continuity_reset_count"), "startup_continuity_reset_count"),
+      .maximum_continuity_gap_ns = CanonicalNonnegativeIntegerString(
+          timing->at("maximum_startup_continuity_gap_ns"), "maximum_startup_continuity_gap_ns"),
+  };
+  if (evidence.engine_started_ns < evidence.arm_requested_ns ||
+      evidence.first_camera_frame_ns < evidence.engine_started_ns ||
+      evidence.first_usable_encoded_frame_ns < evidence.first_camera_frame_ns ||
+      evidence.full_pre_roll_ready_ns < evidence.first_usable_encoded_frame_ns) {
+    Invalid("retained Android startup timing milestones are not monotonic");
+  }
+  if (evidence.arm_to_engine_start_ns != evidence.engine_started_ns - evidence.arm_requested_ns ||
+      evidence.engine_start_to_first_camera_frame_ns !=
+          evidence.first_camera_frame_ns - evidence.engine_started_ns ||
+      evidence.arm_to_first_camera_frame_ns !=
+          evidence.first_camera_frame_ns - evidence.arm_requested_ns ||
+      evidence.first_camera_frame_to_first_usable_encoded_frame_ns !=
+          evidence.first_usable_encoded_frame_ns - evidence.first_camera_frame_ns ||
+      evidence.arm_to_first_usable_encoded_frame_ns !=
+          evidence.first_usable_encoded_frame_ns - evidence.arm_requested_ns ||
+      evidence.first_usable_encoded_frame_to_full_pre_roll_ready_ns !=
+          evidence.full_pre_roll_ready_ns - evidence.first_usable_encoded_frame_ns ||
+      evidence.arm_to_full_pre_roll_ready_ns !=
+          evidence.full_pre_roll_ready_ns - evidence.arm_requested_ns) {
+    Invalid("retained Android startup timing durations do not match their milestones");
+  }
+  if ((evidence.continuity_reset_count == 0U) != (evidence.maximum_continuity_gap_ns == 0U)) {
+    Invalid("retained Android startup continuity counters are inconsistent");
+  }
+  if (evidence.continuity_reset_count != 0U) {
+    Invalid("retained Android capture experienced a startup continuity reset");
+  }
+  return evidence;
+}
+
 bool SafeRelativeSessionPath(std::string_view path, std::string_view session_id,
                              std::string_view suffix) {
   return !session_id.empty() && !session_id.contains("..") &&
@@ -201,9 +297,9 @@ NodeEvidence ValidateNodeEvidence(const NodeEvidenceInspection &inspection) {
     const auto views = manifest.find("views");
     const auto android_capture = manifest.find("android_capture");
     if (trigger == manifest.end() || !trigger->is_object() ||
-        trigger->value("source", "") != "local_audio" || views == manifest.end() ||
-        !views->is_array() || views->size() != 1U || android_capture == manifest.end() ||
-        !android_capture->is_object()) {
+        trigger->value("source", "") != inspection.expected_trigger_source ||
+        views == manifest.end() || !views->is_array() || views->size() != 1U ||
+        android_capture == manifest.end() || !android_capture->is_object()) {
       Invalid("retained manifest trigger, view, or Android metadata is invalid");
     }
     PopulateAudioEvidence(*trigger, &evidence);
@@ -215,6 +311,7 @@ NodeEvidence ValidateNodeEvidence(const NodeEvidenceInspection &inspection) {
         android_capture->value("local_nearest_frame_residual_us", -1L);
     evidence.trigger_timestamp_uncertainty_ns =
         android_capture->value("trigger_timestamp_uncertainty_ns", -1L);
+    evidence.startup_timing = ValidateStartupTiming(*android_capture);
     if (android_capture->value("node_id", "") != evidence.node_id ||
         evidence.shared_session_id != inspection.expected_shared_session_id ||
         android_capture->value("timestamp_pair_count", 0) < 16 ||
@@ -326,7 +423,8 @@ std::int64_t ValidateFfprobeTimeline(const NodeEvidence &evidence, std::string_v
 
 TimingCorrelationEvidence EvaluateTimingCorrelation(const TimingCorrelationInspection &inspection) {
   constexpr std::int64_t kMaximumInputUs = 1000000;
-  if (inspection.optical_onset_lower_bound_us < -kMaximumInputUs ||
+  if (inspection.acceptance_limit_us <= 0 || inspection.acceptance_limit_us > kMaximumInputUs ||
+      inspection.optical_onset_lower_bound_us < -kMaximumInputUs ||
       inspection.optical_onset_lower_bound_us > kMaximumInputUs ||
       inspection.optical_onset_upper_bound_us < -kMaximumInputUs ||
       inspection.optical_onset_upper_bound_us > kMaximumInputUs ||
@@ -337,6 +435,7 @@ TimingCorrelationEvidence EvaluateTimingCorrelation(const TimingCorrelationInspe
     throw std::invalid_argument("timing-correlation evidence is outside its supported range");
   }
   TimingCorrelationEvidence evidence;
+  evidence.acceptance_limit_us = inspection.acceptance_limit_us;
   evidence.optical_onset_lower_bound_us = inspection.optical_onset_lower_bound_us;
   evidence.optical_onset_upper_bound_us = inspection.optical_onset_upper_bound_us;
   evidence.optical_interval_width_us =

@@ -60,7 +60,7 @@ class Labels:
 
 @dataclasses.dataclass(frozen=True)
 class HittingRegion:
-    """Inclusive normalized station rectangle used by the pose feature adapter."""
+    """Legacy normalized station rectangle retained for evidence provenance."""
 
     left: float
     top: float
@@ -71,6 +71,11 @@ class HittingRegion:
         """Return the Java CLI's stable left,top,right,bottom representation."""
         values = (self.left, self.top, self.right, self.bottom)
         return ",".join(format(value, ".9g") for value in values)
+
+
+# The production controller is ROI-free. Corpus evaluation uses this constant instead of
+# clip-specific legacy rectangles so a tripod move cannot silently change qualification results.
+FULL_FRAME_HITTING_REGION = HittingRegion(left=0.0, top=0.0, right=1.0, bottom=1.0)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -307,9 +312,6 @@ def _validate_positive_clip(clip: Clip) -> None:
     labels = clip.labels
     if clip.view not in SUPPORTED_VIEWS:
         message = f"{clip.clip_id} positive clips require a supported station view"
-        raise ValueError(message)
-    if clip.hitting_region is None:
-        message = f"{clip.clip_id} positive clips require a configured hitting region"
         raise ValueError(message)
     required = (labels.safe_arm_start_ms, labels.preferred_arm_ms, labels.takeaway_ms)
     if any(value is None for value in required):

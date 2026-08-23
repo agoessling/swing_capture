@@ -524,6 +524,7 @@ void TestDisplayPowerStateInspection() {
       .display = "",
   });
   assert(asleep.confirmed_off());
+  assert(!asleep.confirmed_on());
   assert(asleep.non_interactive);
   assert(asleep.display_off);
 
@@ -578,6 +579,14 @@ void TestDisplayPowerStateInspection() {
   assert(!misleading.confirmed_off());
   assert(!misleading.non_interactive);
   assert(!misleading.display_off);
+  assert(!misleading.confirmed_on());
+
+  const auto awake = InspectDisplayPowerState(DisplayPowerStateDumps{
+      .power = "mWakefulness=Awake\nmInteractive=true\nDisplay Power: state=ON\n",
+      .display = "mScreenState=ON\n",
+  });
+  assert(!awake.confirmed_off());
+  assert(awake.confirmed_on());
 }
 
 }  // namespace

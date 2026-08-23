@@ -79,7 +79,7 @@ class FrameResult:
 
 
 class VideoReader(Protocol):
-    """Seekable decoded-video boundary used by the deterministic coordinator."""
+    """Timestamp-addressable decoded-video boundary used by the coordinator."""
 
     @property
     def duration_ms(self) -> int:
@@ -121,6 +121,7 @@ def run_inference(
 ) -> int:
     """Sample a video, infer poses, and emit deterministic newline-delimited JSON."""
     timestamps = sample_timestamps(reader.duration_ms, sample_period_ms)
+    previous_source_timestamp_ms = -1
     for sample_index, timestamp_ms in enumerate(timestamps):
         frame = reader.read_at(timestamp_ms)
         if frame is None:
@@ -129,7 +130,17 @@ def run_inference(
         if frame.width <= 0 or frame.height <= 0:
             message = f"video decoder returned invalid geometry at {timestamp_ms} ms"
             raise RuntimeError(message)
-        poses = tuple(landmarker.detect_for_video(frame.pixels, timestamp_ms))
+        if frame.source_timestamp_ms < timestamp_ms:
+            message = (
+                f"video decoder returned source timestamp {frame.source_timestamp_ms} ms "
+                f"before requested time {timestamp_ms} ms"
+            )
+            raise RuntimeError(message)
+        if frame.source_timestamp_ms <= previous_source_timestamp_ms:
+            message = "video decoder returned non-increasing source timestamps"
+            raise RuntimeError(message)
+        previous_source_timestamp_ms = frame.source_timestamp_ms
+        poses = tuple(landmarker.detect_for_video(frame.pixels, frame.source_timestamp_ms))
         value = FrameResult(
             sample_index=sample_index,
             timestamp_ms=timestamp_ms,

@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
-from tools.pose_inference.corpus import HittingRegion
+from tools.pose_inference.corpus import FULL_FRAME_HITTING_REGION, HittingRegion
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -267,7 +267,16 @@ def _point(
     return round(x * (width - 1)), round(y * (height - 1))
 
 
-def _draw(  # noqa: PLR0913
+def is_address_qualifying(evidence: Evidence) -> bool:
+    """Mirror the ROI-free controller's per-observation qualification predicate."""
+    return (
+        evidence.person_confidence >= MINIMUM_PERSON_CONFIDENCE
+        and evidence.address_confidence >= MINIMUM_ADDRESS_CONFIDENCE
+        and evidence.motion_magnitude <= MAXIMUM_ADDRESS_MOTION
+    )
+
+
+def _draw(  # noqa: C901, PLR0913
     cv2: _Cv2,
     frame: object,
     evidence: Evidence,
@@ -279,13 +288,17 @@ def _draw(  # noqa: PLR0913
     takeaway_ms: int,
     hitting_region: HittingRegion,
 ) -> None:
-    cv2.rectangle(
-        frame,
-        (round(hitting_region.left * (width - 1)), round(hitting_region.top * (height - 1))),
-        (round(hitting_region.right * (width - 1)), round(hitting_region.bottom * (height - 1))),
-        (255, 170, 0),
-        3,
-    )
+    if hitting_region != FULL_FRAME_HITTING_REGION:
+        cv2.rectangle(
+            frame,
+            (round(hitting_region.left * (width - 1)), round(hitting_region.top * (height - 1))),
+            (
+                round(hitting_region.right * (width - 1)),
+                round(hitting_region.bottom * (height - 1)),
+            ),
+            (255, 170, 0),
+            3,
+        )
     points = tuple(_point(value, width, height) for value in evidence.landmarks)
     for first, second in SKELETON_EDGES:
         if first < len(points) and second < len(points):
@@ -297,12 +310,7 @@ def _draw(  # noqa: PLR0913
         if point is not None:
             cv2.circle(frame, point, 4, (0, 220, 0), -1)
 
-    qualifies = (
-        evidence.person_confidence >= MINIMUM_PERSON_CONFIDENCE
-        and evidence.address_confidence >= MINIMUM_ADDRESS_CONFIDENCE
-        and evidence.motion_magnitude <= MAXIMUM_ADDRESS_MOTION
-        and evidence.inside_hitting_region
-    )
+    qualifies = is_address_qualifying(evidence)
     if timestamp_ms >= ready_ms:
         status, status_color = "HIGH SPEED READY", (40, 220, 40)
     elif timestamp_ms >= arm_ms:
@@ -316,7 +324,7 @@ def _draw(  # noqa: PLR0913
         f"{timestamp_ms / 1000.0:5.2f}s  {status}",
         f"person {evidence.person_confidence:.2f}  address {evidence.address_confidence:.2f}",
         (
-            f"motion {evidence.motion_magnitude:.2f}  in region "
+            f"motion {evidence.motion_magnitude:.2f}  ROI diagnostic "
             f"{str(evidence.inside_hitting_region).lower()}"
         ),
         (

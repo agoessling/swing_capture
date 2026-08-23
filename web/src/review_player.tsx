@@ -20,6 +20,7 @@ type PresentationMethod = "requestVideoFrameCallback" | "seeked-paint-fallback";
 
 interface ImpactFramePresentation {
   performance_ms: number;
+  media_time_seconds: number;
   method: PresentationMethod;
 }
 
@@ -32,6 +33,7 @@ export interface BrowserPipelineTiming {
   schema_version: 1;
   session_id: string;
   presentation_method: PresentationMethod | "mixed";
+  impact_frame_media_time_seconds: Partial<Record<ReviewRole, number>>;
   manifest_fetch_duration_ms: number;
   manifest_response_received_performance_ms: number;
   both_impact_frames_presented_performance_ms: number;
@@ -53,6 +55,8 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
   const [impactPresentations, setImpactPresentations] = useState<
     Partial<Record<ReviewRole, ImpactFramePresentation>>
   >({});
+  const currentFrameRef = useRef(referenceTrack.impact_frame_index);
+  const operatorSeekRevisionRef = useRef(0);
   const videoRefs = useRef<Partial<Record<ReviewRole, HTMLVideoElement>>>({});
   const timelinePreviewVideoRef = useRef<HTMLVideoElement | null>(null);
   const presentationCleanupsRef = useRef<Partial<Record<ReviewRole, () => void>>>({});
@@ -65,6 +69,8 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
   }
 
   useEffect(() => {
+    currentFrameRef.current = referenceTrack.impact_frame_index;
+    operatorSeekRevisionRef.current = 0;
     setCurrentFrame(referenceTrack.impact_frame_index);
     setPlaying(false);
     setMediaError(null);
@@ -93,36 +99,110 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
   const watchImpactPresentation = (track: ClipTrack, video: HTMLVideoElement) => {
     presentationCleanupsRef.current[track.role]?.();
     const sessionId = manifest.session_id;
-    const targetSeconds =
-      requiredFrame(track.frames, track.impact_frame_index).media_time_us / 1_000_000;
+    const targetFrame = requiredFrame(track.frames, track.impact_frame_index);
+    const targetSeconds = targetFrame.media_time_us / 1_000_000;
+    const recoverySeekSeconds = presentationRecoverySeekTimeSeconds(track, targetFrame);
     const toleranceSeconds = Math.max(0.002, 0.55 / track.nominal_fps);
+    const operatorSeekRevision = operatorSeekRevisionRef.current;
     if (
       typeof video.requestVideoFrameCallback === "function" &&
       typeof video.cancelVideoFrameCallback === "function"
     ) {
       let active = true;
       let callbackId = 0;
+      let stalledSeekTimer: ReturnType<typeof setTimeout> | undefined;
+      let presentationNudgeDeadline: ReturnType<typeof setTimeout> | undefined;
+      let presentationNudge = false;
+      const originalPlaybackRate = video.playbackRate;
+      const stopPresentationNudge = () => {
+        if (!presentationNudge) {
+          return;
+        }
+        video.pause();
+        video.playbackRate = originalPlaybackRate;
+        presentationNudge = false;
+        if (presentationNudgeDeadline !== undefined) {
+          clearTimeout(presentationNudgeDeadline);
+          presentationNudgeDeadline = undefined;
+        }
+      };
       const inspectFrame: VideoFrameRequestCallback = (now, metadata) => {
         if (!active) {
           return;
         }
         if (Math.abs(metadata.mediaTime - targetSeconds) <= toleranceSeconds) {
+          if (stalledSeekTimer !== undefined) {
+            clearTimeout(stalledSeekTimer);
+          }
+          stopPresentationNudge();
           markImpactPresented(
             track.role,
             {
               performance_ms: Math.max(now, metadata.expectedDisplayTime),
+              media_time_seconds: metadata.mediaTime,
               method: "requestVideoFrameCallback",
             },
             sessionId,
           );
           return;
         }
-        video.currentTime = targetSeconds;
+        if (operatorSeekRevisionRef.current !== operatorSeekRevision) {
+          active = false;
+          stopPresentationNudge();
+          return;
+        }
+        if (!presentationNudge) {
+          // A frame callback registered before the initialization seek may first observe the
+          // previously presented sample. Recover through a second, distinct interior point. The
+          // distinct value forces a new paused seek even when initialization already selected the
+          // midpoint, while avoiding the raw MP4 boundary that may resolve to the prior sample.
+          video.currentTime = recoverySeekSeconds;
+        }
         callbackId = video.requestVideoFrameCallback(inspectFrame);
       };
+      const recoverStalledPausedSeek = () => {
+        if (
+          !active ||
+          presentationNudge ||
+          !video.paused ||
+          operatorSeekRevisionRef.current !== operatorSeekRevision ||
+          !navigator.userAgent.includes("Firefox/")
+        ) {
+          return;
+        }
+        if (stalledSeekTimer !== undefined) {
+          clearTimeout(stalledSeekTimer);
+        }
+        stalledSeekTimer = setTimeout(() => {
+          if (
+            !active ||
+            !video.paused ||
+            operatorSeekRevisionRef.current !== operatorSeekRevision
+          ) {
+            return;
+          }
+          presentationNudge = true;
+          video.playbackRate = 0.25;
+          const previousFrame = requiredFrame(
+            track.frames,
+            Math.max(0, track.impact_frame_index - 1),
+          );
+          video.currentTime = presentationSeekTimeSeconds(track, previousFrame);
+          presentationNudgeDeadline = setTimeout(stopPresentationNudge, 1_000);
+          void video.play().catch(() => {
+            stopPresentationNudge();
+          });
+        }, 200);
+      };
       callbackId = video.requestVideoFrameCallback(inspectFrame);
+      video.addEventListener("seeked", recoverStalledPausedSeek);
       presentationCleanupsRef.current[track.role] = () => {
         active = false;
+        video.removeEventListener("seeked", recoverStalledPausedSeek);
+        if (stalledSeekTimer !== undefined) {
+          clearTimeout(stalledSeekTimer);
+        }
+        stopPresentationNudge();
         video.cancelVideoFrameCallback(callbackId);
       };
       return;
@@ -139,7 +219,12 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
         if (active) {
           markImpactPresented(
             track.role,
-            { performance_ms: highResolutionNow(), method: "seeked-paint-fallback" },
+            {
+              performance_ms: highResolutionNow(),
+              media_time_seconds:
+                nearestMediaFrame(track, video.currentTime * 1_000_000).media_time_us / 1_000_000,
+              method: "seeked-paint-fallback",
+            },
             sessionId,
           );
         }
@@ -179,6 +264,8 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
 
   const seekFrame = (requestedFrame: number, pause = true) => {
     const frameIndex = clamp(Math.round(requestedFrame), 0, referenceTrack.frame_count - 1);
+    operatorSeekRevisionRef.current += 1;
+    currentFrameRef.current = frameIndex;
     if (pause) {
       pauseAll();
     }
@@ -186,8 +273,10 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
     for (const track of tracks) {
       const video = videoRefs.current[track.role];
       if (video !== undefined) {
-        video.currentTime =
-          nearestImpactFrame(track, referenceFrame.time_from_impact_us).media_time_us / 1_000_000;
+        video.currentTime = presentationSeekTimeSeconds(
+          track,
+          nearestImpactFrame(track, referenceFrame.time_from_impact_us),
+        );
       }
     }
     setCurrentFrame(frameIndex);
@@ -198,18 +287,29 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
     if (video.dataset.reviewSession === manifest.session_id) {
       return;
     }
-    const targetTime =
-      requiredFrame(track.frames, track.impact_frame_index).media_time_us / 1_000_000;
-    // Register before seeking so a fast decoder cannot present the target frame
-    // between the seek assignment and requestVideoFrameCallback registration.
-    watchImpactPresentation(track, video);
+    const operatorAlreadySought = operatorSeekRevisionRef.current > 0;
+    const selectedReferenceFrame = requiredFrame(referenceTrack.frames, currentFrameRef.current);
+    const targetTime = operatorAlreadySought
+      ? presentationSeekTimeSeconds(
+          track,
+          nearestImpactFrame(track, selectedReferenceFrame.time_from_impact_us),
+        )
+      : presentationSeekTimeSeconds(track, requiredFrame(track.frames, track.impact_frame_index));
+    if (!operatorAlreadySought) {
+      // Register before seeking so a fast decoder cannot present the target frame
+      // between the seek assignment and requestVideoFrameCallback registration.
+      watchImpactPresentation(track, video);
+    }
     if (Math.abs(video.currentTime - targetTime) > 0.000_001) {
       video.currentTime = targetTime;
     }
     video.dataset.reviewSession = manifest.session_id;
     if (track.role === referenceTrack.role) {
       initializedRef.current = true;
-      setCurrentFrame(referenceTrack.impact_frame_index);
+      if (!operatorAlreadySought) {
+        currentFrameRef.current = referenceTrack.impact_frame_index;
+        setCurrentFrame(referenceTrack.impact_frame_index);
+      }
     }
   };
 
@@ -218,7 +318,7 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
       pauseAll();
       return;
     }
-    if (currentFrame === referenceTrack.frame_count - 1) {
+    if (currentFrameRef.current === referenceTrack.frame_count - 1) {
       seekFrame(0, false);
     }
     setMediaError(null);
@@ -254,10 +354,11 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
   };
 
   const updateFromReferenceVideo = (video: HTMLVideoElement) => {
-    if (!initializedRef.current) {
+    if (!initializedRef.current || video.paused) {
       return;
     }
     const nextFrame = nearestMediaFrame(referenceTrack, video.currentTime * 1_000_000);
+    currentFrameRef.current = nextFrame.frame_index;
     setCurrentFrame(nextFrame.frame_index);
     const relativeTimeUs = nextFrame.time_from_impact_us;
     for (const track of tracks.slice(1)) {
@@ -265,7 +366,10 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
       if (secondary === undefined) {
         continue;
       }
-      const expected = nearestImpactFrame(track, relativeTimeUs).media_time_us / 1_000_000;
+      const expected = presentationSeekTimeSeconds(
+        track,
+        nearestImpactFrame(track, relativeTimeUs),
+      );
       const tolerance = Math.max(0.004, 0.75 / track.nominal_fps);
       if (Math.abs(secondary.currentTime - expected) > tolerance) {
         secondary.currentTime = expected;
@@ -291,7 +395,7 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
 
   const frame = requiredFrame(referenceTrack.frames, currentFrame);
   const impactOffsetFrames = currentFrame - referenceTrack.impact_frame_index;
-  const step = (amount: number) => seekFrame(currentFrame + amount);
+  const step = (amount: number) => seekFrame(currentFrameRef.current + amount);
   const browserTiming = buildBrowserPipelineTiming(manifest, impactPresentations);
 
   useEffect(() => {
@@ -299,8 +403,10 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
     if (previewVideo === null || timelinePreview === null) {
       return;
     }
-    const mediaTimeSeconds =
-      requiredFrame(referenceTrack.frames, timelinePreview.frameIndex).media_time_us / 1_000_000;
+    const mediaTimeSeconds = presentationSeekTimeSeconds(
+      referenceTrack,
+      requiredFrame(referenceTrack.frames, timelinePreview.frameIndex),
+    );
     if (Math.abs(previewVideo.currentTime - mediaTimeSeconds) > 0.000_001) {
       previewVideo.currentTime = mediaTimeSeconds;
     }
@@ -377,8 +483,12 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
           return (
             <figure className="review-view" key={track.role}>
               <div className="review-video-shell">
+                {/* Metadata plus the explicit impact-frame seek is sufficient for initial paused
+                    review. Avoid downloading whole high-speed clips before Play; it wastes phone
+                    and network work and can starve live API requests behind slow Range readers. */}
                 <video
                   aria-label={`${roleLabel(track.role)} recorded swing`}
+                  crossOrigin="anonymous"
                   muted
                   onCanPlay={(event) => initializeVideo(track, event.currentTarget)}
                   onEnded={index === 0 ? () => setPlaying(false) : undefined}
@@ -395,7 +505,7 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
                       : undefined
                   }
                   playsInline
-                  preload="auto"
+                  preload="metadata"
                   ref={(video) => {
                     if (video === null) {
                       delete videoRefs.current[track.role];
@@ -509,12 +619,14 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
               }}
             >
               <video
+                crossOrigin="anonymous"
                 data-timeline-thumbnail
                 muted
                 onLoadedMetadata={(event) => {
-                  const mediaTimeSeconds =
-                    requiredFrame(referenceTrack.frames, timelinePreview.frameIndex).media_time_us /
-                    1_000_000;
+                  const mediaTimeSeconds = presentationSeekTimeSeconds(
+                    referenceTrack,
+                    requiredFrame(referenceTrack.frames, timelinePreview.frameIndex),
+                  );
                   event.currentTarget.currentTime = mediaTimeSeconds;
                 }}
                 playsInline
@@ -800,6 +912,12 @@ function buildBrowserPipelineTiming(
       new Set(completed.map((value) => value.method)).size === 1
         ? requiredPresentation(completed, 0).method
         : "mixed",
+    impact_frame_media_time_seconds: Object.fromEntries(
+      manifest.views.map((track, index) => [
+        track.role,
+        requiredPresentation(completed, index).media_time_seconds,
+      ]),
+    ),
     manifest_fetch_duration_ms: delivery.manifest_fetch_duration_ms,
     manifest_response_received_performance_ms: delivery.manifest_response_received_performance_ms,
     both_impact_frames_presented_performance_ms: bothPresented,
@@ -872,6 +990,36 @@ function requiredPresentation(
 
 function nearestImpactFrame(track: ClipTrack, timeFromImpactUs: number): ClipFrame {
   return nearestFrame(track.frames, timeFromImpactUs, (frame) => frame.time_from_impact_us);
+}
+
+function presentationSeekTimeSeconds(track: ClipTrack, frame: ClipFrame): number {
+  const frameDurationUs = presentationIntervalUs(track, frame);
+  // Seeking exactly to an MP4 sample timestamp is a boundary operation. Chromium can resolve that
+  // boundary to the preceding decoded sample, especially immediately after a GOP's IDR. A point
+  // inside the selected sample's interval makes the desired frame unambiguous while the retained
+  // frame timestamp remains the synchronization and labeling authority.
+  return (frame.media_time_us + Math.max(1, Math.floor(frameDurationUs / 2))) / 1_000_000;
+}
+
+function presentationRecoverySeekTimeSeconds(track: ClipTrack, frame: ClipFrame): number {
+  const frameDurationUs = presentationIntervalUs(track, frame);
+  const offsetUs = Math.min(
+    frameDurationUs - 1,
+    Math.max(1, Math.floor((3 * frameDurationUs) / 4)),
+  );
+  return (frame.media_time_us + offsetUs) / 1_000_000;
+}
+
+function presentationIntervalUs(track: ClipTrack, frame: ClipFrame): number {
+  const next = track.frames[frame.frame_index + 1];
+  const frameDurationUs =
+    next === undefined
+      ? Math.round(1_000_000 / track.nominal_fps)
+      : next.media_time_us - frame.media_time_us;
+  if (!Number.isSafeInteger(frameDurationUs) || frameDurationUs <= 1) {
+    throw new Error(`Frame ${String(frame.frame_index)} has no usable presentation interval`);
+  }
+  return frameDurationUs;
 }
 
 function nearestMediaFrame(track: ClipTrack, mediaTimeUs: number): ClipFrame {

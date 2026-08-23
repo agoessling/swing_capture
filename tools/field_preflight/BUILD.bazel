@@ -1,0 +1,74 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+py_library(
+    name = "admission",
+    srcs = [
+        "__init__.py",
+        "admission.py",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+py_binary(
+    name = "android_field_preflight",
+    srcs = ["main.py"],
+    main = "main.py",
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "$(rootpath //tools:android_pair_doctor_current_apk)",
+        "$(rootpath //android/app:swing_capture.apk)",
+    ],
+    data = [
+        "//tools/android:adb",
+        "//tools:android_pair_doctor_current_apk",
+        "//android/app:swing_capture.apk",
+    ],
+    legacy_create_init = False,
+    deps = [":admission"],
+)
+
+py_binary(
+    name = "fake_adb",
+    testonly = True,
+    srcs = ["fake_adb.py"],
+    legacy_create_init = False,
+)
+
+py_binary(
+    name = "fake_doctor",
+    testonly = True,
+    srcs = ["fake_doctor.py"],
+    legacy_create_init = False,
+)
+
+py_binary(
+    name = "android_field_preflight_test_fixture",
+    testonly = True,
+    srcs = ["main.py"],
+    main = "main.py",
+    legacy_create_init = False,
+    deps = [":admission"],
+)
+
+py_test(
+    name = "executable_smoke_test",
+    size = "small",
+    srcs = ["executable_smoke_test.py"],
+    data = [
+        ":android_field_preflight_test_fixture",
+        ":fake_adb",
+        ":fake_doctor",
+    ],
+    legacy_create_init = False,
+    deps = ["@rules_python//python/runfiles"],
+)
+
+py_test(
+    name = "admission_test",
+    size = "small",
+    srcs = ["admission_test.py"],
+    legacy_create_init = False,
+    deps = [":admission"],
+)

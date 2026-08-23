@@ -1,0 +1,275 @@
+load("@rules_java//java:java_binary.bzl", "java_binary")
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "frozen_audio_policy_locks",
+    srcs = glob(["policy_locks/*.json"], allow_empty = True),
+)
+
+filegroup(
+    name = "production_audio_detector_replay_source",
+    srcs = ["java/com/agoessling/swingcapture/ProductionAudioDetectorReplayCli.java"],
+)
+
+java_library(
+    name = "production_audio_detector_replay_support",
+    srcs = [":production_audio_detector_replay_source"],
+    deps = [
+        "//android/app:device_audio_detector_policy",
+        "//android/core/audio:impact_timing_core",
+    ],
+)
+
+java_binary(
+    name = "production_audio_detector_replay",
+    main_class = "com.agoessling.swingcapture.ProductionAudioDetectorReplayCli",
+    runtime_deps = [":production_audio_detector_replay_support"],
+)
+
+py_library(
+    name = "field_evidence_manifest",
+    srcs = [
+        "__init__.py",
+        "manifest.py",
+    ],
+)
+
+py_library(
+    name = "output_lib",
+    srcs = ["output.py"],
+)
+
+py_library(
+    name = "audio_holdout_lib",
+    srcs = ["audio_holdout.py"],
+    deps = [":field_evidence_manifest"],
+)
+
+py_library(
+    name = "production_audio_predictions_lib",
+    srcs = ["production_audio_predictions.py"],
+    deps = [
+        ":audio_holdout_lib",
+        ":field_evidence_manifest",
+    ],
+)
+
+py_library(
+    name = "envelope_audio_predictions_lib",
+    srcs = ["envelope_audio_predictions.py"],
+    deps = [
+        ":audio_holdout_lib",
+        ":field_evidence_manifest",
+    ],
+)
+
+py_binary(
+    name = "envelope_audio_predictions",
+    srcs = ["envelope_audio_predictions_main.py"],
+    data = [
+        "//capture/offline/experiments/envelope:streaming_envelope_replay",
+        "//capture/offline/experiments/envelope:streaming_envelope_replay_sources",
+    ],
+    legacy_create_init = False,
+    main = "envelope_audio_predictions_main.py",
+    deps = [
+        ":envelope_audio_predictions_lib",
+        ":field_evidence_manifest",
+        ":output_lib",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_library(
+    name = "audio_policy_lock_lib",
+    srcs = ["audio_policy_lock.py"],
+    deps = [
+        ":audio_holdout_lib",
+        ":field_evidence_manifest",
+    ],
+)
+
+py_binary(
+    name = "audio_policy_lock",
+    srcs = ["audio_policy_lock_main.py"],
+    legacy_create_init = False,
+    main = "audio_policy_lock_main.py",
+    deps = [
+        ":audio_policy_lock_lib",
+        ":output_lib",
+    ],
+)
+
+py_binary(
+    name = "production_audio_predictions",
+    srcs = ["production_audio_predictions_main.py"],
+    data = [
+        ":production_audio_detector_replay",
+        ":production_audio_detector_replay_source",
+        "//android/app:device_audio_detector_policy_source",
+        "//android/core/audio:impact_detector_source",
+    ],
+    legacy_create_init = False,
+    main = "production_audio_predictions_main.py",
+    deps = [
+        ":field_evidence_manifest",
+        ":output_lib",
+        ":production_audio_predictions_lib",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_library(
+    name = "audio_holdout_compare_lib",
+    srcs = ["audio_holdout_compare.py"],
+)
+
+py_binary(
+    name = "audio_holdout_compare",
+    srcs = ["audio_holdout_compare_main.py"],
+    legacy_create_init = False,
+    main = "audio_holdout_compare_main.py",
+    deps = [
+        ":audio_holdout_compare_lib",
+        ":output_lib",
+    ],
+)
+
+py_binary(
+    name = "audio_holdout_gate",
+    srcs = ["audio_holdout_main.py"],
+    legacy_create_init = False,
+    main = "audio_holdout_main.py",
+    deps = [
+        ":audio_holdout_lib",
+        ":field_evidence_manifest",
+        ":output_lib",
+    ],
+)
+
+py_binary(
+    name = "field_evidence",
+    srcs = ["main.py"],
+    legacy_create_init = False,
+    main = "main.py",
+    deps = [":field_evidence_manifest"],
+)
+
+py_test(
+    name = "manifest_test",
+    size = "small",
+    srcs = ["manifest_test.py"],
+    legacy_create_init = False,
+    deps = [":field_evidence_manifest"],
+)
+
+py_test(
+    name = "output_test",
+    size = "small",
+    srcs = ["output_test.py"],
+    legacy_create_init = False,
+    deps = [":output_lib"],
+)
+
+py_test(
+    name = "audio_holdout_test",
+    size = "small",
+    srcs = ["audio_holdout_test.py"],
+    legacy_create_init = False,
+    deps = [
+        ":audio_holdout_lib",
+        ":field_evidence_manifest",
+    ],
+)
+
+py_test(
+    name = "production_audio_predictions_test",
+    size = "medium",
+    srcs = ["production_audio_predictions_test.py"],
+    data = [
+        ":production_audio_detector_replay",
+        ":production_audio_detector_replay_source",
+        ":production_audio_predictions",
+        "//android/app:device_audio_detector_policy_source",
+        "//android/core/audio:impact_detector_source",
+    ],
+    legacy_create_init = False,
+    deps = [
+        ":audio_holdout_lib",
+        ":audio_holdout_test_fixture",
+        ":field_evidence_manifest",
+        ":production_audio_predictions_lib",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_test(
+    name = "envelope_audio_predictions_test",
+    size = "medium",
+    srcs = ["envelope_audio_predictions_test.py"],
+    data = [
+        ":envelope_audio_predictions",
+        "//capture/offline/experiments/envelope:streaming_envelope_replay",
+        "//capture/offline/experiments/envelope:streaming_envelope_replay_sources",
+    ],
+    legacy_create_init = False,
+    deps = [
+        ":audio_holdout_lib",
+        ":audio_holdout_test_fixture",
+        ":envelope_audio_predictions_lib",
+        ":field_evidence_manifest",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_test(
+    name = "audio_policy_lock_test",
+    size = "small",
+    srcs = ["audio_policy_lock_test.py"],
+    data = [":audio_policy_lock"],
+    legacy_create_init = False,
+    deps = [
+        ":audio_holdout_lib",
+        ":audio_policy_lock_lib",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_test(
+    name = "audio_holdout_compare_test",
+    size = "small",
+    srcs = ["audio_holdout_compare_test.py"],
+    data = [":audio_holdout_compare"],
+    legacy_create_init = False,
+    deps = [
+        ":audio_holdout_compare_lib",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_library(
+    name = "audio_holdout_test_fixture",
+    testonly = True,
+    srcs = ["audio_holdout_test.py"],
+    deps = [
+        ":audio_holdout_lib",
+        ":field_evidence_manifest",
+    ],
+)
+
+py_test(
+    name = "audio_holdout_executable_test",
+    size = "small",
+    srcs = ["audio_holdout_executable_test.py"],
+    data = [":audio_holdout_gate"],
+    legacy_create_init = False,
+    deps = [
+        ":audio_holdout_test_fixture",
+        "@rules_python//python/runfiles",
+    ],
+)

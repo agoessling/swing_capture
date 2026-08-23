@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DiagnosticFeedbackPanel } from "./diagnostic_feedback.js";
+import { FieldRecordingPanel, supportsFieldRecording } from "./field_recording.js";
+import { operationalHealthDescription, type OperationalHealth } from "./operational_health.js";
 import type {
   CaptureStatus,
   ClipManifest,
@@ -23,7 +25,8 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [manifest, setManifest] = useState<ClipManifest | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [refreshRevision, setRefreshRevision] = useState(0);
   const latestSeenRef = useRef<string | null>(null);
@@ -47,6 +50,10 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
       if (manifestRequestRef.current === session.session_id) {
         return;
       }
+      if (manifestSessionIdRef.current !== session.session_id) {
+        manifestSessionIdRef.current = null;
+        setManifest(null);
+      }
       manifestRequestRef.current = session.session_id;
       try {
         const nextManifest = await api.getManifest(session.session_id);
@@ -55,11 +62,14 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
         }
         manifestSessionIdRef.current = nextManifest.session_id;
         setManifest(nextManifest);
-        setError(null);
+        setRefreshError(null);
       } catch (caught) {
+        if (selectedSessionIdRef.current !== session.session_id) {
+          return;
+        }
         manifestSessionIdRef.current = null;
         setManifest(null);
-        setError(errorMessage(caught));
+        setRefreshError(errorMessage(caught));
       } finally {
         if (manifestRequestRef.current === session.session_id) {
           manifestRequestRef.current = null;
@@ -70,11 +80,22 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
   );
 
   const refresh = useCallback(async () => {
+    const captureRequest = api.getCaptureStatus();
+    const sessionsRequest = api.getSessions();
+    let nextCapture: CaptureStatus;
     try {
-      const [nextCapture, sessionList] = await Promise.all([
-        api.getCaptureStatus(),
-        api.getSessions(),
-      ]);
+      nextCapture = await captureRequest;
+      setCapture(nextCapture);
+      setRefreshError(null);
+    } catch (caught) {
+      // Observe the independently-started catalog request even when live status is unavailable.
+      void sessionsRequest.catch(() => undefined);
+      setCapture(null);
+      setRefreshError(errorMessage(caught));
+      return;
+    }
+    try {
+      const sessionList = await sessionsRequest;
       const visibleSessions = [...sessionList.sessions];
       const pendingSession = pendingSessionRef.current;
       if (pendingSession !== null) {
@@ -99,10 +120,9 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
           pendingSessionDeadlineMsRef.current = null;
         }
       }
-      setCapture(nextCapture);
       setSessions(visibleSessions);
       setRefreshRevision((revision) => revision + 1);
-      setError(null);
+      setRefreshError(null);
       const latest = visibleSessions[0];
       if (latest !== undefined && latest.session_id !== latestSeenRef.current) {
         latestSeenRef.current = latest.session_id;
@@ -121,7 +141,8 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
         await openSession(selected);
       }
     } catch (caught) {
-      setError(errorMessage(caught));
+      // Historical catalog failure must not make otherwise-live capture controls unusable.
+      setRefreshError(errorMessage(caught));
     }
   }, [api, openSession]);
 
@@ -171,9 +192,9 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
     setActionPending(true);
     try {
       setCapture(await api.setArmed(armed));
-      setError(null);
+      setActionError(null);
     } catch (caught) {
-      setError(errorMessage(caught));
+      setActionError(errorMessage(caught));
     } finally {
       setActionPending(false);
     }
@@ -203,9 +224,9 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
       latestSeenRef.current = session.session_id;
       setSessions((current) => [session, ...current]);
       await openSession(session);
-      setError(null);
+      setActionError(null);
     } catch (caught) {
-      setError(errorMessage(caught));
+      setActionError(errorMessage(caught));
     } finally {
       setActionPending(false);
     }
@@ -215,9 +236,9 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
     setActionPending(true);
     try {
       setCapture(await api.startSyntheticSwing());
-      setError(null);
+      setActionError(null);
     } catch (caught) {
-      setError(errorMessage(caught));
+      setActionError(errorMessage(caught));
     } finally {
       setActionPending(false);
     }
@@ -236,6 +257,7 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
       [...sessions].sort((left, right) => right.created_at_utc.localeCompare(left.created_at_utc)),
     [sessions],
   );
+  const error = actionError ?? refreshError;
 
   return (
     <div className="app-shell review-shell">
@@ -293,10 +315,17 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
               {error}
             </p>
           ) : null}
+          {capture?.operational_health === undefined ? null : (
+            <OperationalHealthNotice health={capture.operational_health} />
+          )}
           {capture?.pose === undefined ? null : (
             <PeerArmNotice context="live" status={capture.pose.peer_arm} />
           )}
         </section>
+
+        {supportsFieldRecording(api) ? (
+          <FieldRecordingPanel api={api} pollIntervalMs={pollIntervalMs} />
+        ) : null}
 
         {capture?.hil.enabled === true ? (
           <section aria-labelledby="synthetic-hil-heading" className="synthetic-hil-panel">
@@ -395,7 +424,9 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
               )}
             </div>
           ) : null}
-          {manifest !== null && selectedSession?.state === "ready" ? (
+          {manifest !== null &&
+          selectedSession?.state === "ready" &&
+          manifest.session_id === selectedSession.session_id ? (
             <>
               <div className="clip-summary">
                 <span>{triggerLabel(manifest.trigger.source)}</span>
@@ -406,7 +437,7 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
               {manifest.android_capture?.peer_arm === undefined ? null : (
                 <PeerArmNotice context="recorded" status={manifest.android_capture.peer_arm} />
               )}
-              <ReviewPlayer manifest={manifest} />
+              <ReviewPlayer key={`player-${manifest.session_id}`} manifest={manifest} />
               <DiagnosticFeedbackPanel api={api} key={manifest.session_id} manifest={manifest} />
             </>
           ) : null}
@@ -431,6 +462,23 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
         Playback uses encoded review media. Frame labels and synchronization come from retained
         camera timestamps, independently of the camera SDK.
       </footer>
+    </div>
+  );
+}
+
+function OperationalHealthNotice({ health }: { health: OperationalHealth }) {
+  return (
+    <div
+      className={`peer-arm-notice ${health.ready_for_capture ? "peer-arm-accepted" : "peer-arm-failure"}`}
+      role={health.ready_for_capture ? undefined : "alert"}
+    >
+      <strong>
+        {health.ready_for_capture ? "Capture resources ready" : "Capture resources need attention"}
+      </strong>
+      <span>{operationalHealthDescription(health)}</span>
+      {health.issues.map((issue) => (
+        <span key={issue}>{issue}</span>
+      ))}
     </div>
   );
 }

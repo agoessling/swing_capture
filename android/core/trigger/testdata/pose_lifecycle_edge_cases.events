@@ -1,0 +1,45 @@
+# A single reviewable lifecycle proving that non-address activity does not arm,
+# an abandoned arm recovers, and repeated setups work without requiring the
+# golfer to leave the frame.
+name,pose_lifecycle_edge_cases
+
+# Empty scene, walk-through, and an aborted two-frame setup must create no attempt.
+pose,0,800,200,0.05,0.05,0.05
+pose,1000,2000,200,0.95,0.10,0.90
+pose,2200,2400,200,0.95,0.90,0.10
+pose,2600,2800,200,0.95,0.10,0.90
+
+# A complete setup arms attempt 0, but no impact follows. Pose samples during
+# high-speed capture are deliberately present and must be camera-blind.
+pose,3200,6400,200,0.95,0.90,0.10
+
+# The first post-timeout reset happens while the golfer remains in frame. A
+# repeated address during cooldown must wait, then arm only after a fresh 5 Hz
+# qualification window.
+pose,7000,7200,200,0.95,0.10,0.90
+pose,7400,9400,200,0.95,0.90,0.10
+target,S01,10200,10600
+audio,10600,S01
+
+# Address-like finish frames alone must not rearm after cooldown. Motion/non-address
+# posture releases the latch without requiring a person-confidence scene clear.
+pose,11000,12800,200,0.95,0.90,0.10
+pose,13000,13000,200,0.95,0.10,0.90
+pose,13200,13600,200,0.95,0.90,0.10
+target,S02,14200,14600
+audio,14600,S02
+
+# A true clear-and-rearm path also remains valid. The observation at the cooldown
+# boundary releases the latch; the following three observations qualify S03.
+pose,15000,16800,200,0.05,0.05,0.05
+pose,17000,17400,200,0.95,0.90,0.10
+
+# These motion frames model a practice swing after arming. They are skipped while
+# the same camera is in high-speed mode; absent a terminal audio candidate, the
+# already-running attempt remains available for the later real impact.
+pose,17600,18400,200,0.95,0.10,0.90
+pose,18600,19800,200,0.95,0.90,0.10
+target,S03,19600,20000
+audio,20000,S03
+pose,20200,21200,200,0.95,0.10,0.90
+end,21200

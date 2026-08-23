@@ -14,9 +14,10 @@ export class FakeNodeSetupApi implements NodeSetupApi {
     model = "Pixel 6 Pro",
     poseMode?: "disabled" | "shadow" | "leader",
     peerOrigin?: string | null,
+    nodeId?: string,
   ) {
     this.displayOrigin = displayOrigin;
-    this.#setup = fixtureNodeSetup(displayOrigin, role, model, poseMode, peerOrigin);
+    this.#setup = fixtureNodeSetup(displayOrigin, role, model, poseMode, peerOrigin, nodeId);
   }
 
   getSetup(): Promise<NodeSetupSnapshot> {
@@ -58,6 +59,36 @@ export class FakeNodeSetupApi implements NodeSetupApi {
     };
     return Promise.resolve(structuredClone(this.#setup));
   }
+
+  rotateControlCredential(expectedRevision: number, confirmedNodeId: string) {
+    if (expectedRevision !== this.#setup.revision) {
+      return Promise.reject(new Error("setup configuration changed; reload before rotating"));
+    }
+    if (confirmedNodeId !== this.#setup.node.node_id) {
+      return Promise.reject(
+        new Error("Control credential rotation confirmation must match the full local node ID"),
+      );
+    }
+    if (!this.#setup.readiness.editable) {
+      return Promise.reject(new Error("Stop capture before rotating the control credential"));
+    }
+    this.#setup = {
+      ...this.#setup,
+      revision: this.#setup.revision + 1,
+      node: {
+        ...this.#setup.node,
+        control_credential_generation: this.#setup.node.control_credential_generation + 1,
+      },
+    };
+    return Promise.resolve({
+      schema_version: 1 as const,
+      node_id: this.#setup.node.node_id,
+      setup_revision: this.#setup.revision,
+      control_credential_generation: this.#setup.node.control_credential_generation,
+      control_token: "rotatedFixtureControlToken00001_",
+      remote_peer_bindings_require_re_pair: true as const,
+    });
+  }
 }
 
 export function fixtureNodeSetup(
@@ -66,13 +97,16 @@ export function fixtureNodeSetup(
   model = "Pixel 6 Pro",
   poseMode?: "disabled" | "shadow" | "leader",
   peerOrigin?: string | null,
+  nodeId?: string,
 ): NodeSetupSnapshot {
   const configuredPoseMode = poseMode ?? (role === "down_the_line" ? "leader" : "shadow");
   return {
     schema_version: 1,
     revision: 4,
     node: {
-      node_id: role === "face_on" ? "fixture-pixel-5a-node" : "fixture-pixel-6-pro-node",
+      node_id:
+        nodeId ?? (role === "face_on" ? "fixture-pixel-5a-node" : "fixture-pixel-6-pro-node"),
+      control_credential_generation: 1,
       service_urls: [origin],
       device_model: model,
     },
@@ -107,6 +141,8 @@ export function fixtureNodeSetup(
         { value: "gpu_preferred", label: "GPU preferred" },
         { value: "gpu_required", label: "GPU required" },
         { value: "cpu_only", label: "CPU only" },
+        { value: "npu_preferred", label: "NPU preferred (experimental)" },
+        { value: "npu_required", label: "NPU required (experimental)" },
       ],
     },
     configuration: {
@@ -116,7 +152,7 @@ export function fixtureNodeSetup(
         mode: configuredPoseMode,
         inference_delegate: "gpu_preferred",
         debug_evidence_enabled: true,
-        hitting_region: { left: 0.15, top: 0.3, right: 0.85, bottom: 1 },
+        hitting_region: { left: 0, top: 0, right: 1, bottom: 1 },
         peer:
           peerOrigin === null
             ? null
@@ -136,6 +172,16 @@ export function fixtureNodeSetup(
       editable: true,
       capture_state: "setup",
       issues: role === "unassigned" ? ["Assign a camera view before capture."] : [],
+    },
+    operational_health: {
+      ready_for_capture: true,
+      thermal: { status: 1, headroom: 0.18, ready: true, power_save_mode: false },
+      storage: {
+        usable_bytes: 21_474_836_480,
+        minimum_free_bytes: 2_147_483_648,
+        ready: true,
+      },
+      issues: [],
     },
     preview: { available: false, url: null },
   };

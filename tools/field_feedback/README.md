@@ -4,6 +4,21 @@ This Nucky-side tool polls one or two Android capture nodes for newly published 
 unseen `(node_id, session_id)`, it downloads the bearer-authenticated diagnostics ZIP, validates the
 ZIP and every SHA-256 declared by `diagnostic_export.json`, checks the manifest and diagnostic
 incident identities, and checks retained shared-session coordination evidence when available.
+The coordination check independently revalidates mapped timestamps, composed uncertainty, clock
+sample/round-trip bounds, and the derived trigger-separation interval before indexing a compact
+timing summary under the shared session. This makes later pair-clock threshold analysis depend on
+validated evidence rather than merely a matching session ID and ZIP checksum.
+The shared index publishes that summary only when both role archives contain the same coordination
+record; a two-manifest association with one-sided evidence remains `coordination_status:
+"incomplete"`. On every collector pass, archive-derived timing and peer-impact fields are rebuilt
+from the retained ZIP and compared with `index.json`, so the index cannot silently replace the
+archive as the evidence authority.
+
+Peer-triggered capture manifests also retain the original peer impact request, whether its mapping
+was accepted or rejected, its age/uncertainty/round-trip bounds, the effective fallback policy, and
+the selected local candidate residual. The collector independently enforces the 10-second/25-ms
+mapping policy and source-specific 80-ms mapped or 250-ms legacy candidate windows before indexing
+those fields.
 
 The collector accepts both ordinary capture manifests and
 `session_kind: "standby_diagnostic"` manifests. A standby diagnostic is evidence gathered while the

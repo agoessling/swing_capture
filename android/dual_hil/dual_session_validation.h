@@ -10,6 +10,23 @@
 
 namespace swing_capture::android::dual_hil {
 
+struct CaptureStartupTimingEvidence {
+  std::uint64_t arm_requested_ns = 0;
+  std::uint64_t engine_started_ns = 0;
+  std::uint64_t first_camera_frame_ns = 0;
+  std::uint64_t first_usable_encoded_frame_ns = 0;
+  std::uint64_t full_pre_roll_ready_ns = 0;
+  std::uint64_t arm_to_engine_start_ns = 0;
+  std::uint64_t engine_start_to_first_camera_frame_ns = 0;
+  std::uint64_t arm_to_first_camera_frame_ns = 0;
+  std::uint64_t first_camera_frame_to_first_usable_encoded_frame_ns = 0;
+  std::uint64_t arm_to_first_usable_encoded_frame_ns = 0;
+  std::uint64_t first_usable_encoded_frame_to_full_pre_roll_ready_ns = 0;
+  std::uint64_t arm_to_full_pre_roll_ready_ns = 0;
+  std::uint64_t continuity_reset_count = 0;
+  std::uint64_t maximum_continuity_gap_ns = 0;
+};
+
 struct NodeEvidence {
   std::string node_id;
   std::string role;
@@ -33,6 +50,7 @@ struct NodeEvidence {
   double audio_peak_amplitude = 0.0;
   double audio_noise_floor = 0.0;
   double audio_threshold = 0.0;
+  CaptureStartupTimingEvidence startup_timing;
   std::vector<std::int64_t> media_times_us;
   std::vector<std::int64_t> times_from_impact_us;
 };
@@ -49,10 +67,12 @@ struct NodeEvidenceInspection {
   std::string_view media;
   std::string_view expected_role;
   std::string_view expected_shared_session_id;
+  std::string_view expected_trigger_source = "local_audio";
   CaptureProfileExpectation expected_profile;
 };
 
 struct TimingCorrelationInspection {
+  std::int64_t acceptance_limit_us = 20000;
   std::int64_t optical_onset_lower_bound_us = 0;
   std::int64_t optical_onset_upper_bound_us = 0;
   std::int64_t audio_trigger_uncertainty_ns = 0;

@@ -42,11 +42,14 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -68,6 +71,13 @@ public final class ContinuousCaptureEngine {
   private static final long THREAD_STOP_TIMEOUT_MILLIS = 5_000;
   private static final long AUDIO_TIMESTAMP_BASE_UNCERTAINTY_NANOS = 250_000L;
   private static final long AUDIO_EVIDENCE_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(750);
+  private static final long PEER_LOCAL_CANDIDATE_MAX_AGE_NANOS =
+      TimeUnit.MILLISECONDS.toNanos(250);
+  private static final long PEER_CLOCK_MATCH_BASE_TOLERANCE_NANOS =
+      TimeUnit.MILLISECONDS.toNanos(80);
+  private static final long PEER_CLOCK_CANDIDATE_WAIT_NANOS =
+      TimeUnit.MILLISECONDS.toNanos(150);
+  private static final int PEER_AUDIO_CANDIDATE_CAPACITY = 32;
   private static final int DIAGNOSTIC_AUDIO_PRE_ROLL_FRAMES = 10 * AUDIO_SAMPLE_RATE_HZ;
   private static final int DIAGNOSTIC_AUDIO_POST_ROLL_FRAMES = 2 * AUDIO_SAMPLE_RATE_HZ;
   private static final long DIAGNOSTIC_AUDIO_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(2_500);
@@ -137,6 +147,7 @@ public final class ContinuousCaptureEngine {
     private final float peakAmplitude;
     private final float noiseFloor;
     private final float threshold;
+    private final PeerImpactMappingManifest peerImpactMapping;
 
     private TriggerEvidence(
         String source,
@@ -146,7 +157,8 @@ public final class ContinuousCaptureEngine {
         long strikeFramePosition,
         float peakAmplitude,
         float noiseFloor,
-        float threshold) {
+        float threshold,
+        PeerImpactMappingManifest peerImpactMapping) {
       this.source = source;
       this.confirmationTimestampNanos = confirmationTimestampNanos;
       this.timestampUncertaintyNanos = timestampUncertaintyNanos;
@@ -155,13 +167,15 @@ public final class ContinuousCaptureEngine {
       this.peakAmplitude = peakAmplitude;
       this.noiseFloor = noiseFloor;
       this.threshold = threshold;
+      this.peerImpactMapping = peerImpactMapping;
     }
 
     private static TriggerEvidence operator(
         String source, long timestampNanos, long audioFramePosition) {
       if (!source.equals("manual")
           && !source.equals("missed_shot")
-          && !source.equals("pose_armed_no_impact")) {
+          && !source.equals("pose_armed_no_impact")
+          && !source.equals("peer_audio_arrival")) {
         throw new IllegalArgumentException("unsupported operator trigger source");
       }
       return new TriggerEvidence(
@@ -172,7 +186,8 @@ public final class ContinuousCaptureEngine {
           audioFramePosition,
           Float.NaN,
           Float.NaN,
-          Float.NaN);
+          Float.NaN,
+          null);
     }
   }
 
@@ -204,7 +219,8 @@ public final class ContinuousCaptureEngine {
   private final CaptureConfigurationSnapshot captureConfiguration;
   private final CaptureProfile profile;
   private final String sharedSessionId;
-  private final boolean automaticAudioTriggersRequested;
+  private final long armRequestedElapsedRealtimeNanos;
+  private final AutomaticTriggerReadinessGate automaticTriggerReadinessGate;
   private final Listener listener;
   private final WarmCameraLease warmCameraLease;
   private final PreviewEvidenceRing.Snapshot poseDiagnosticSnapshot;
@@ -219,6 +235,11 @@ public final class ContinuousCaptureEngine {
           DiagnosticAudioRing.recommendedCapacityFrames(
               AUDIO_SAMPLE_RATE_HZ, DiagnosticAudioRing.RECOMMENDED_RETENTION_SECONDS));
   private final Object pcmEvidenceMonitor = new Object();
+  private final Object peerAudioCandidateMonitor = new Object();
+  private final Object triggerAdmissionMonitor = new Object();
+  private final Object startupTimingMonitor = new Object();
+  private final ArrayDeque<ContinuousAudioImpactDetector.TimedImpact> peerAudioCandidates =
+      new ArrayDeque<>(PEER_AUDIO_CANDIDATE_CAPACITY);
   private final Map<Long, PendingCapture> pendingCaptures = new ConcurrentHashMap<>();
   private final ExecutorService publisher = Executors.newSingleThreadExecutor();
   private final AtomicBoolean stopping = new AtomicBoolean();
@@ -233,6 +254,8 @@ public final class ContinuousCaptureEngine {
   private final AtomicLong rejectedAudioTimestamps = new AtomicLong();
   private final AtomicReference<AudioTimestampAnchor> latestAudioTimestamp =
       new AtomicReference<>();
+  private final AtomicReference<ContinuousAudioImpactDetector.TimedImpact>
+      latestValidatedAudioImpact = new AtomicReference<>();
   private volatile long firstRetainedSensorTimestampNanos;
   private volatile long lastRetainedSensorTimestampNanos;
   private volatile MediaFormat encoderOutputFormat;
@@ -268,6 +291,31 @@ public final class ContinuousCaptureEngine {
         null,
         null,
         null,
+        false,
+        SystemClock.elapsedRealtimeNanos(),
+        listener);
+  }
+
+  /** Creates a direct-start engine tied to the service's immutable arm-request milestone. */
+  public ContinuousCaptureEngine(
+      Context context,
+      CaptureConfigurationSnapshot captureConfiguration,
+      String sharedSessionId,
+      boolean audioHilMode,
+      boolean automaticAudioTriggersRequested,
+      long armRequestedElapsedRealtimeNanos,
+      Listener listener) {
+    this(
+        context,
+        captureConfiguration,
+        sharedSessionId,
+        audioHilMode,
+        automaticAudioTriggersRequested,
+        null,
+        null,
+        null,
+        false,
+        armRequestedElapsedRealtimeNanos,
         listener);
   }
 
@@ -288,6 +336,8 @@ public final class ContinuousCaptureEngine {
         warmCameraLease,
         null,
         null,
+        false,
+        SystemClock.elapsedRealtimeNanos(),
         listener);
   }
 
@@ -304,12 +354,51 @@ public final class ContinuousCaptureEngine {
       WarmCameraLease warmCameraLease,
       PreviewEvidenceRing.Snapshot poseDiagnosticSnapshot,
       PeerArmStatusTracker peerArmStatus,
+      boolean peerReadinessRequired,
       Listener listener) {
+    this(
+        context,
+        captureConfiguration,
+        sharedSessionId,
+        audioHilMode,
+        automaticAudioTriggersRequested,
+        warmCameraLease,
+        poseDiagnosticSnapshot,
+        peerArmStatus,
+        peerReadinessRequired,
+        SystemClock.elapsedRealtimeNanos(),
+        listener);
+  }
+
+  /**
+   * Creates an engine with an immutable service-observed arm-request milestone.
+   *
+   * <p>The explicit milestone prevents a later monitoring restart from relabeling a retained
+   * session while its publisher thread is still completing.
+   */
+  public ContinuousCaptureEngine(
+      Context context,
+      CaptureConfigurationSnapshot captureConfiguration,
+      String sharedSessionId,
+      boolean audioHilMode,
+      boolean automaticAudioTriggersRequested,
+      WarmCameraLease warmCameraLease,
+      PreviewEvidenceRing.Snapshot poseDiagnosticSnapshot,
+      PeerArmStatusTracker peerArmStatus,
+      boolean peerReadinessRequired,
+      long armRequestedElapsedRealtimeNanos,
+      Listener listener) {
+    if (armRequestedElapsedRealtimeNanos < 0) {
+      throw new IllegalArgumentException("arm request timestamp cannot be negative");
+    }
     this.context = context.getApplicationContext();
     this.captureConfiguration = captureConfiguration;
     this.profile = captureConfiguration.profile();
     this.sharedSessionId = sharedSessionId;
-    this.automaticAudioTriggersRequested = automaticAudioTriggersRequested;
+    this.armRequestedElapsedRealtimeNanos = armRequestedElapsedRealtimeNanos;
+    this.automaticTriggerReadinessGate =
+        new AutomaticTriggerReadinessGate(
+            automaticAudioTriggersRequested, peerReadinessRequired);
     this.warmCameraLease = warmCameraLease;
     if (warmCameraLease == null) {
       expectedEncoderToSensorOffsetNanos = 0;
@@ -378,8 +467,15 @@ public final class ContinuousCaptureEngine {
                 + ")");
       }
       fullPreRollReadyElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
+      boolean automaticTriggersReady = automaticTriggerReadinessGate.markLocalReady();
       listener.onReady();
-      automaticTriggersEnabled.set(automaticAudioTriggersRequested);
+      synchronized (triggerAdmissionMonitor) {
+        automaticTriggersEnabled.set(
+            automaticTriggersReady
+                && pendingCaptures.isEmpty()
+                && !stopping.get()
+                && !failed.get());
+      }
     } catch (Throwable failure) {
       stop();
       if (failure instanceof Exception exception) {
@@ -397,9 +493,185 @@ public final class ContinuousCaptureEngine {
     return triggerOperator(requestedSessionId, "missed_shot");
   }
 
+  /** Releases a paired leader after peer readiness or a bounded degraded-mode resolution. */
+  void resolvePeerArmForAutomaticTriggers(
+      String expectedSharedSessionId,
+      AutomaticTriggerReadinessGate.PeerArmResolution resolution) {
+    if (!sharedSessionId.equals(expectedSharedSessionId)) {
+      return;
+    }
+    boolean automaticTriggersReady = automaticTriggerReadinessGate.resolvePeerArm(resolution);
+    synchronized (triggerAdmissionMonitor) {
+      if (automaticTriggersReady
+          && pendingCaptures.isEmpty()
+          && !stopping.get()
+          && !failed.get()) {
+        automaticTriggersEnabled.set(true);
+      }
+    }
+  }
+
+  boolean activeEvidenceTimeoutAllowed() {
+    return automaticTriggerReadinessGate.activeEvidenceTimeoutAllowed();
+  }
+
   /** Retains bounded evidence when pose armed high-speed capture but no impact followed. */
   public TriggerAttempt triggerPoseArmedNoImpact(String requestedSessionId) {
     return triggerOperator(requestedSessionId, "pose_armed_no_impact");
+  }
+
+  /** Freezes a shadow ring while retaining the original request and its effective policy result. */
+  public TriggerAttempt triggerPeerImpact(
+      PosePeerArmClient.ImpactTrigger originalPeerTrigger,
+      PosePeerArmClient.ImpactTrigger effectivePeerTrigger) {
+    String requestedSessionId = effectivePeerTrigger.sharedSessionId();
+    if (!sharedSessionId.equals(requestedSessionId)) {
+      return rejected("peer_audio", "peer impact session does not match the active arm");
+    }
+    long requestArrivalNanos = SystemClock.elapsedRealtimeNanos();
+    if (effectivePeerTrigger.hasClockMapping()) {
+      ContinuousAudioImpactDetector.TimedImpact matched =
+          awaitClockMatchedCandidate(
+              effectivePeerTrigger.mappedPeerTriggerElapsedRealtimeNanos(),
+              effectivePeerTrigger.mappingUncertaintyNanos(),
+              requestArrivalNanos);
+      if (matched != null) {
+        return triggerPeerLocalCandidate(
+            requestedSessionId,
+            matched,
+            "peer_audio_clock_candidate",
+            originalPeerTrigger,
+            effectivePeerTrigger,
+            requestArrivalNanos);
+      }
+      // A valid mapping with no nearby local evidence is safer than selecting an unrelated
+      // precursor. Retain using the audited arrival timestamp instead.
+      return triggerPeerArrival(
+          requestedSessionId,
+          requestArrivalNanos,
+          originalPeerTrigger,
+          effectivePeerTrigger);
+    }
+
+    ContinuousAudioImpactDetector.TimedImpact local = latestValidatedAudioImpact.get();
+    if (local != null) {
+      AudioTimestampMapper.Estimate strike = local.strikeTime().orElseThrow();
+      if (PeerAudioImpactSelection.isFreshLocalCandidate(
+          requestArrivalNanos,
+          strike.boottimeNanos(),
+          PEER_LOCAL_CANDIDATE_MAX_AGE_NANOS)) {
+        return triggerPeerLocalCandidate(
+            requestedSessionId,
+            local,
+            "peer_audio_local_candidate",
+            originalPeerTrigger,
+            effectivePeerTrigger,
+            requestArrivalNanos);
+      }
+    }
+    return triggerPeerArrival(
+        requestedSessionId, requestArrivalNanos, originalPeerTrigger, effectivePeerTrigger);
+  }
+
+  private TriggerAttempt triggerPeerLocalCandidate(
+      String requestedSessionId,
+      ContinuousAudioImpactDetector.TimedImpact local,
+      String source,
+      PosePeerArmClient.ImpactTrigger originalPeerTrigger,
+      PosePeerArmClient.ImpactTrigger effectivePeerTrigger,
+      long requestArrivalNanos) {
+    AudioTimestampMapper.Estimate strike = local.strikeTime().orElseThrow();
+    AudioTimestampMapper.Estimate confirmation = local.confirmationTime().orElseThrow();
+    TriggerEvidence evidence =
+        new TriggerEvidence(
+            source,
+            confirmation.boottimeNanos(),
+            strike.uncertaintyNanos(),
+            AUDIO_SAMPLE_RATE_HZ,
+            local.impact().strikeFramePosition(),
+            local.impact().peakAmplitude(),
+            local.impact().noiseFloorAtDetection(),
+            local.impact().thresholdAtDetection(),
+            PeerImpactMappingManifest.create(
+                originalPeerTrigger,
+                effectivePeerTrigger,
+                source,
+                requestArrivalNanos,
+                strike.boottimeNanos(),
+                strike.uncertaintyNanos()));
+    return trigger(requestedSessionId, strike.boottimeNanos(), evidence);
+  }
+
+  private TriggerAttempt triggerPeerArrival(
+      String requestedSessionId,
+      long requestArrivalNanos,
+      PosePeerArmClient.ImpactTrigger originalPeerTrigger,
+      PosePeerArmClient.ImpactTrigger effectivePeerTrigger) {
+    long audioFramePosition = -1;
+    AudioTimestampAnchor anchor = latestAudioTimestamp.get();
+    if (anchor != null) {
+      audioFramePosition =
+          AudioFrameMarker.estimate(
+                  requestArrivalNanos,
+                  anchor.framePosition(),
+                  anchor.boottimeNanos(),
+                  anchor.uncertaintyNanos(),
+                  AUDIO_SAMPLE_RATE_HZ)
+              .map(AudioFrameMarker.Marker::framePosition)
+              .orElse(-1L);
+    }
+    TriggerEvidence evidence =
+        new TriggerEvidence(
+            "peer_audio_arrival",
+            requestArrivalNanos,
+            0,
+            AUDIO_SAMPLE_RATE_HZ,
+            audioFramePosition,
+            Float.NaN,
+            Float.NaN,
+            Float.NaN,
+            PeerImpactMappingManifest.create(
+                originalPeerTrigger,
+                effectivePeerTrigger,
+                "peer_audio_arrival",
+                requestArrivalNanos,
+                requestArrivalNanos,
+                0));
+    return trigger(requestedSessionId, requestArrivalNanos, evidence);
+  }
+
+  private ContinuousAudioImpactDetector.TimedImpact awaitClockMatchedCandidate(
+      long mappedLeaderStrikeNanos,
+      long clockUncertaintyNanos,
+      long requestArrivalNanos) {
+    long deadlineNanos = Math.addExact(requestArrivalNanos, PEER_CLOCK_CANDIDATE_WAIT_NANOS);
+    return MonitorCandidateWait.until(
+        peerAudioCandidateMonitor,
+        SystemClock::elapsedRealtimeNanos,
+        deadlineNanos,
+        () -> stopping.get() || failed.get(),
+        () -> closestClockMatchedCandidate(mappedLeaderStrikeNanos, clockUncertaintyNanos));
+  }
+
+  /** Called only while {@link #peerAudioCandidateMonitor} is held. */
+  private ContinuousAudioImpactDetector.TimedImpact closestClockMatchedCandidate(
+      long mappedLeaderStrikeNanos, long clockUncertaintyNanos) {
+    ArrayList<ContinuousAudioImpactDetector.TimedImpact> impacts =
+        new ArrayList<>(peerAudioCandidates);
+    ArrayList<PeerAudioImpactSelection.Candidate> candidates = new ArrayList<>(impacts.size());
+    for (ContinuousAudioImpactDetector.TimedImpact impact : impacts) {
+      AudioTimestampMapper.Estimate strike = impact.strikeTime().orElseThrow();
+      candidates.add(
+          new PeerAudioImpactSelection.Candidate(
+              strike.boottimeNanos(), strike.uncertaintyNanos()));
+    }
+    OptionalInt selected =
+        PeerAudioImpactSelection.closestCandidateIndex(
+            candidates,
+            mappedLeaderStrikeNanos,
+            PEER_CLOCK_MATCH_BASE_TOLERANCE_NANOS,
+            clockUncertaintyNanos);
+    return selected.isPresent() ? impacts.get(selected.orElseThrow()) : null;
   }
 
   private TriggerAttempt triggerOperator(String requestedSessionId, String source) {
@@ -421,6 +693,11 @@ public final class ContinuousCaptureEngine {
         requestedSessionId, now, TriggerEvidence.operator(source, now, audioFramePosition));
   }
 
+  public Optional<CaptureStartupTiming> startupTiming() {
+    return startupTiming(armRequestedElapsedRealtimeNanos);
+  }
+
+  /** Legacy compatibility overload; new callers should use the engine-owned milestone. */
   public Optional<CaptureStartupTiming> startupTiming(long armRequestedElapsedRealtimeNanos) {
     long engineStarted = engineStartedElapsedRealtimeNanos;
     long firstCameraFrame = firstCameraFrameElapsedRealtimeNanos.get();
@@ -441,6 +718,20 @@ public final class ContinuousCaptureEngine {
             fullPreRollReady));
   }
 
+  public Optional<CaptureStartupTimingManifest> startupTimingManifest() {
+    Optional<CaptureStartupTiming> startupTiming = startupTiming();
+    if (startupTiming.isEmpty()) {
+      return Optional.empty();
+    }
+    synchronized (startupTimingMonitor) {
+      return Optional.of(
+          new CaptureStartupTimingManifest(
+              startupTiming.orElseThrow(),
+              startupContinuityResetCount.get(),
+              maximumStartupContinuityGapNanos.get()));
+    }
+  }
+
   public long startupContinuityResetCount() {
     return startupContinuityResetCount.get();
   }
@@ -451,13 +742,21 @@ public final class ContinuousCaptureEngine {
 
   /** Stops automatic impacts from racing the explicit terminal trigger of a soak HIL run. */
   void disableAutomaticTriggersForHil() {
-    automaticTriggersEnabled.set(false);
+    synchronized (triggerAdmissionMonitor) {
+      automaticTriggersEnabled.set(false);
+    }
   }
 
   public void stop() {
-    automaticTriggersEnabled.set(false);
-    if (!stopping.compareAndSet(false, true)) {
-      return;
+    synchronized (triggerAdmissionMonitor) {
+      if (!stopping.compareAndSet(false, true)) {
+        automaticTriggersEnabled.set(false);
+        return;
+      }
+      automaticTriggersEnabled.set(false);
+    }
+    synchronized (peerAudioCandidateMonitor) {
+      peerAudioCandidateMonitor.notifyAll();
     }
     stopCamera();
     stopAudio();
@@ -475,40 +774,60 @@ public final class ContinuousCaptureEngine {
 
   private TriggerAttempt trigger(
       String requestedSessionId, long triggerTimestampNanos, TriggerEvidence evidence) {
-    if (!triggerReady()) {
-      return rejected(evidence.source, "the encoded pre-roll is not ready");
+    return trigger(requestedSessionId, triggerTimestampNanos, evidence, false);
+  }
+
+  private TriggerAttempt trigger(
+      String requestedSessionId,
+      long triggerTimestampNanos,
+      TriggerEvidence evidence,
+      boolean automaticTrigger) {
+    String sessionId;
+    String rejection = null;
+    synchronized (triggerAdmissionMonitor) {
+      if (automaticTrigger && !automaticTriggersEnabled.get()) {
+        return new TriggerAttempt(false, "", "automatic trigger gate is closed");
+      }
+      sessionId =
+          requestedSessionId == null || requestedSessionId.isBlank()
+              ? newSessionId()
+              : requestedSessionId;
+      if (!triggerReady()) {
+        rejection = "the encoded pre-roll is not ready";
+      } else {
+        EncodedAccessUnitRetention.TriggerResult result = retention.trigger(triggerTimestampNanos);
+        if (!result.accepted()) {
+          rejection =
+              result.status().name().toLowerCase(java.util.Locale.ROOT)
+                  + " (trigger="
+                  + triggerTimestampNanos
+                  + ", first="
+                  + firstRetainedSensorTimestampNanos
+                  + ", last="
+                  + lastRetainedSensorTimestampNanos
+                  + ", offset="
+                  + timestampCalibrator.medianOffsetNanos()
+                  + ")";
+        } else {
+          // A physical arm cycle owns one swing and one shared coordination ID. Reject any later
+          // automatic impact while post-roll/publication is in flight; the service stops after a
+          // normal publication and the coordinator must arm both nodes again with a fresh shared
+          // ID.
+          automaticTriggersEnabled.set(false);
+          pendingCaptures.put(
+              result.captureId(),
+              new PendingCapture(
+                  sessionId,
+                  evidence,
+                  timestampCalibrator.medianOffsetNanos(),
+                  timestampCalibrator.offsetSpanNanos(),
+                  timestampCalibrator.evidenceCount()));
+        }
+      }
     }
-    String sessionId =
-        requestedSessionId == null || requestedSessionId.isBlank()
-            ? newSessionId()
-            : requestedSessionId;
-    EncodedAccessUnitRetention.TriggerResult result = retention.trigger(triggerTimestampNanos);
-    if (!result.accepted()) {
-      return rejected(
-          evidence.source,
-          result.status().name().toLowerCase(java.util.Locale.ROOT)
-              + " (trigger="
-              + triggerTimestampNanos
-              + ", first="
-              + firstRetainedSensorTimestampNanos
-              + ", last="
-              + lastRetainedSensorTimestampNanos
-              + ", offset="
-              + timestampCalibrator.medianOffsetNanos()
-              + ")");
+    if (rejection != null) {
+      return rejected(evidence.source, rejection);
     }
-    // A physical arm cycle owns one swing and one shared coordination ID. Reject any later
-    // automatic impact while post-roll/publication is in flight; the service stops after a normal
-    // publication and the coordinator must arm both nodes again with a fresh shared ID.
-    automaticTriggersEnabled.set(false);
-    pendingCaptures.put(
-        result.captureId(),
-        new PendingCapture(
-            sessionId,
-            evidence,
-            timestampCalibrator.medianOffsetNanos(),
-            timestampCalibrator.offsetSpanNanos(),
-            timestampCalibrator.evidenceCount()));
     listener.onTriggerAccepted(
         sessionId,
         triggerTimestampNanos,
@@ -523,8 +842,16 @@ public final class ContinuousCaptureEngine {
   }
 
   private void handleAudioImpact(ContinuousAudioImpactDetector.TimedImpact timedImpact) {
-    if (!automaticTriggersEnabled.get() || !timedImpact.hasValidatedTiming()) {
+    if (!timedImpact.hasValidatedTiming()) {
       return;
+    }
+    latestValidatedAudioImpact.set(timedImpact);
+    synchronized (peerAudioCandidateMonitor) {
+      if (peerAudioCandidates.size() == PEER_AUDIO_CANDIDATE_CAPACITY) {
+        peerAudioCandidates.removeFirst();
+      }
+      peerAudioCandidates.addLast(timedImpact);
+      peerAudioCandidateMonitor.notifyAll();
     }
     AudioTimestampMapper.Estimate strike = timedImpact.strikeTime().orElseThrow();
     AudioTimestampMapper.Estimate confirmation = timedImpact.confirmationTime().orElseThrow();
@@ -537,8 +864,9 @@ public final class ContinuousCaptureEngine {
             timedImpact.impact().strikeFramePosition(),
             timedImpact.impact().peakAmplitude(),
             timedImpact.impact().noiseFloorAtDetection(),
-            timedImpact.impact().thresholdAtDetection());
-    trigger(null, strike.boottimeNanos(), evidence);
+            timedImpact.impact().thresholdAtDetection(),
+            null);
+    trigger(null, strike.boottimeNanos(), evidence, true);
   }
 
   private boolean triggerReady() {
@@ -634,8 +962,10 @@ public final class ContinuousCaptureEngine {
                                 EncodedAccessUnitRetention.ContinuityDiagnostic
                                     ::sensorTimestampGapNs)
                             .orElse(0L);
-                    startupContinuityResetCount.incrementAndGet();
-                    maximumStartupContinuityGapNanos.accumulateAndGet(gapNanos, Math::max);
+                    synchronized (startupTimingMonitor) {
+                      maximumStartupContinuityGapNanos.accumulateAndGet(gapNanos, Math::max);
+                      startupContinuityResetCount.incrementAndGet();
+                    }
                     Log.w(TAG, "Discarding discontinuous encoder warmup: " + discontinuity);
                     retention.resetContinuity();
                     firstRetainedSensorTimestampNanos = 0;
@@ -1088,6 +1418,20 @@ public final class ContinuousCaptureEngine {
                     / 1_000)
             .put("encoded_first_pts_us", firstPtsUs)
             .put("encoded_last_pts_us", lastPtsUs);
+    if (pending.evidence.peerImpactMapping != null) {
+      androidCapture.put(
+          "peer_impact_mapping",
+          new JSONObject(pending.evidence.peerImpactMapping.toCanonicalJson()));
+    }
+    CaptureStartupTimingManifest startupTiming =
+        startupTimingManifest()
+            .orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        "completed retained capture has incomplete startup timing"));
+    androidCapture.put(
+        CaptureStartupTimingManifest.MANIFEST_FIELD_NAME,
+        new JSONObject(startupTiming.toCanonicalJson()));
     if (peerArmStatus != null) {
       PeerArmStatusTracker.Snapshot peerArm = peerArmStatus.snapshot();
       androidCapture.put(
@@ -1196,8 +1540,12 @@ public final class ContinuousCaptureEngine {
       audioRecord.release();
       throw new IllegalStateException("AudioRecord did not initialize");
     }
-    int bufferFrames = bufferBytes / 2;
-    audioThread = new Thread(() -> recordAudio(bufferFrames), "continuous-impact-audio");
+    // AudioRecord keeps the larger buffer for scheduling resilience, but asking a blocking read
+    // to fill that entire buffer delayed detector delivery by as much as 200 ms. Process bounded
+    // chunks so the shadow phone can match its local acoustic candidate before the mapped peer
+    // request falls back to network-arrival time.
+    int readFrames = ContinuousAudioReadPolicy.framesPerRead(AUDIO_SAMPLE_RATE_HZ);
+    audioThread = new Thread(() -> recordAudio(readFrames), "continuous-impact-audio");
     audioThread.start();
     if (!audioStarted.await(5, TimeUnit.SECONDS)) {
       throw new IllegalStateException("Timed out starting continuous AudioRecord");
@@ -1205,8 +1553,8 @@ public final class ContinuousCaptureEngine {
     throwIfFailed();
   }
 
-  private void recordAudio(int bufferFrames) {
-    short[] samples = new short[bufferFrames];
+  private void recordAudio(int readFrames) {
+    short[] samples = new short[readFrames];
     AudioTimestamp timestamp = new AudioTimestamp();
     long firstFramePosition = 0;
     try {

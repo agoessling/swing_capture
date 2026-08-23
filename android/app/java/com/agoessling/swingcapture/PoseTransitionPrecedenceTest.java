@@ -7,8 +7,8 @@ public final class PoseTransitionPrecedenceTest {
   public static void main(String[] arguments) {
     check(
         PoseTransitionPrecedence.resolve(false, true)
-            == PoseTransitionPrecedence.Outcome.DIAGNOSTIC_WINS,
-        "confirmed diagnostic before pose claim must win");
+            == PoseTransitionPrecedence.Outcome.POSE_WINS_AND_CANCELS_DIAGNOSTIC,
+        "pending standby diagnostics must not block a real pose capture");
     check(
         PoseTransitionPrecedence.resolve(false, false)
             == PoseTransitionPrecedence.Outcome.POSE_WINS,

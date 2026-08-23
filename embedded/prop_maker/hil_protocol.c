@@ -60,6 +60,40 @@ static int parse_u32(token value, uint32_t *output) {
   return 1;
 }
 
+static int parse_hex_nibble(char value, uint8_t *output) {
+  if (value >= '0' && value <= '9') {
+    *output = (uint8_t)(value - '0');
+    return 1;
+  }
+  if (value >= 'a' && value <= 'f') {
+    *output = (uint8_t)(value - 'a' + 10);
+    return 1;
+  }
+  if (value >= 'A' && value <= 'F') {
+    *output = (uint8_t)(value - 'A' + 10);
+    return 1;
+  }
+  return 0;
+}
+
+static int parse_hex_bytes(token value, swing_hil_pcm_chunk_command *command) {
+  if (value.length == 0U || (value.length % 2U) != 0U ||
+      value.length / 2U > SWING_HIL_PCM_MAX_CHUNK_BYTES) {
+    return 0;
+  }
+  command->byte_count = (uint32_t)(value.length / 2U);
+  for (size_t index = 0U; index < command->byte_count; ++index) {
+    uint8_t high = 0U;
+    uint8_t low = 0U;
+    if (!parse_hex_nibble(value.begin[index * 2U], &high) ||
+        !parse_hex_nibble(value.begin[index * 2U + 1U], &low)) {
+      return 0;
+    }
+    command->bytes[index] = (uint8_t)((high << 4U) | low);
+  }
+  return 1;
+}
+
 static size_t tokenize(const char *line, size_t length, token *tokens, size_t capacity,
                        int *too_many) {
   size_t position = 0U;
@@ -179,6 +213,85 @@ static swing_hil_parser_event parse_tone(parse_context context) {
   return event;
 }
 
+static swing_hil_parser_event parse_pcm_begin(parse_context context) {
+  if (context.token_count != 5U) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_ARGUMENT_COUNT});
+  }
+  swing_hil_pcm_begin_command command = {0};
+  if (!parse_u32(context.tokens[3], &command.sample_count) ||
+      !parse_u32(context.tokens[4], &command.crc32)) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_MALFORMED});
+  }
+  if (command.sample_count == 0U || command.sample_count > SWING_HIL_PCM_MAX_SAMPLES) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_OUT_OF_RANGE});
+  }
+  swing_hil_parser_event event = command_event(
+      (command_details){.request_id = context.request_id, .kind = SWING_HIL_COMMAND_PCM_BEGIN});
+  event.command.parameters.pcm_begin = command;
+  return event;
+}
+
+static swing_hil_parser_event parse_pcm_chunk(parse_context context) {
+  if (context.token_count != 5U) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_ARGUMENT_COUNT});
+  }
+  swing_hil_pcm_chunk_command command = {0};
+  if (!parse_u32(context.tokens[3], &command.byte_offset) ||
+      !parse_hex_bytes(context.tokens[4], &command)) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_MALFORMED});
+  }
+  const uint32_t maximum_bytes = SWING_HIL_PCM_MAX_SAMPLES * 2U;
+  if (command.byte_offset > maximum_bytes ||
+      command.byte_count > maximum_bytes - command.byte_offset) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_OUT_OF_RANGE});
+  }
+  swing_hil_parser_event event = command_event(
+      (command_details){.request_id = context.request_id, .kind = SWING_HIL_COMMAND_PCM_CHUNK});
+  event.command.parameters.pcm_chunk = command;
+  return event;
+}
+
+static swing_hil_parser_event parse_pcm_simple(parse_context context, swing_hil_command_kind kind) {
+  if (context.token_count != 3U) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_ARGUMENT_COUNT});
+  }
+  return command_event((command_details){.request_id = context.request_id, .kind = kind});
+}
+
+static swing_hil_parser_event parse_pcm_play(parse_context context) {
+  if (context.token_count != 7U) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_ARGUMENT_COUNT});
+  }
+  swing_hil_pcm_play_command command = {0};
+  if (!parse_u32(context.tokens[3], &command.lead_us) ||
+      !parse_u32(context.tokens[4], &command.gain_permille) ||
+      !parse_u32(context.tokens[5], &command.brightness) ||
+      !parse_u32(context.tokens[6], &command.marker_sample)) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_MALFORMED});
+  }
+  if (command.lead_us < SWING_HIL_PCM_MIN_LEAD_US || command.lead_us > SWING_HIL_MAX_LEAD_US ||
+      command.gain_permille < SWING_HIL_PCM_MIN_GAIN_PERMILLE ||
+      command.gain_permille > SWING_HIL_PCM_MAX_GAIN_PERMILLE ||
+      command.marker_sample >= SWING_HIL_PCM_MAX_SAMPLES ||
+      !swing_hil_swing_brightness_is_candidate(command.brightness)) {
+    return error_event(
+        (error_details){.request_id = context.request_id, .error = SWING_HIL_ERROR_OUT_OF_RANGE});
+  }
+  swing_hil_parser_event event = command_event(
+      (command_details){.request_id = context.request_id, .kind = SWING_HIL_COMMAND_PCM_PLAY});
+  event.command.parameters.pcm_play = command;
+  return event;
+}
+
 static swing_hil_parser_event parse_calibrate(parse_context context) {
   if (context.token_count != 3U) {
     return error_event(
@@ -259,6 +372,21 @@ static swing_hil_parser_event parse_line(const char *line, size_t length) {
   }
   if (token_equals(tokens[2], "TONE")) {
     return parse_tone(context);
+  }
+  if (token_equals(tokens[2], "PCM_BEGIN")) {
+    return parse_pcm_begin(context);
+  }
+  if (token_equals(tokens[2], "PCM_CHUNK")) {
+    return parse_pcm_chunk(context);
+  }
+  if (token_equals(tokens[2], "PCM_COMMIT")) {
+    return parse_pcm_simple(context, SWING_HIL_COMMAND_PCM_COMMIT);
+  }
+  if (token_equals(tokens[2], "PCM_ABORT")) {
+    return parse_pcm_simple(context, SWING_HIL_COMMAND_PCM_ABORT);
+  }
+  if (token_equals(tokens[2], "PCM_PLAY")) {
+    return parse_pcm_play(context);
   }
   if (token_equals(tokens[2], "CALIBRATE")) {
     return parse_calibrate(context);

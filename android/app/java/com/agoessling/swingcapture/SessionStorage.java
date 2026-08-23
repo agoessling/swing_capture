@@ -15,7 +15,7 @@ import org.json.JSONObject;
 public final class SessionStorage {
   private static final int MAXIMUM_SESSIONS = 40;
   private static final long MAXIMUM_SESSION_BYTES = 6L * 1024 * 1024 * 1024;
-  private static final long MINIMUM_FREE_BYTES = 2L * 1024 * 1024 * 1024;
+  static final long MINIMUM_FREE_BYTES = 2L * 1024 * 1024 * 1024;
 
   private SessionStorage() {}
 
@@ -69,9 +69,9 @@ public final class SessionStorage {
               new String(
                   Files.readAllBytes(new File(session, "manifest.json").toPath()),
                   StandardCharsets.UTF_8));
-      if ("standby_diagnostic".equals(manifest.optString("session_kind"))) {
-        return SessionRetentionPlanner.RetentionClass.DIAGNOSTIC;
-      }
+      JSONObject event = manifest.optJSONObject("event");
+      return SessionRetentionPlanner.retentionClassForManifest(
+          manifest.optString("session_kind"), event == null ? "" : event.optString("kind"));
     } catch (Exception malformed) {
       // Unknown or legacy data is conservatively protected as a primary capture.
     }

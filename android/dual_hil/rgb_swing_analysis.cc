@@ -167,6 +167,9 @@ void RgbSwingSequenceAnalyzer::Append(std::span<const std::uint8_t> rgb24) {
   ++appended_frames_;
 }
 
+// The acceptance evidence is populated beside the measurements it qualifies so a failed physical
+// run retains one coherent, inspectable decision record.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 RgbSwingAnalysis RgbSwingSequenceAnalyzer::Finish() {
   if (appended_frames_ != timings_.size() || representative_luminance_.empty()) {
     throw std::runtime_error("decoded RGB stream frame count is incomplete");
@@ -216,7 +219,18 @@ RgbSwingAnalysis RgbSwingSequenceAnalyzer::Finish() {
   result.maximum_white_delta = maximum_delta;
   result.representative_luminance = std::move(representative_luminance_);
   result.diagnostic_luminance_frames = std::move(diagnostic_luminance_frames_);
-  if (!std::isfinite(maximum_delta) || maximum_delta < kMinimumWhiteDelta) {
+  result.acceptance = {
+      .minimum_white_delta = kMinimumWhiteDelta,
+      .minimum_white_frames = kMinimumWhiteFrames,
+      .maximum_white_frames = kMaximumWhiteFrames,
+      .minimum_white_duration_us = kMinimumWhiteDurationUs,
+      .maximum_white_duration_us = kMaximumWhiteDurationUs,
+      .maximum_absolute_optical_audio_offset_us = kMaximumOpticalAudioOffsetUs,
+      .maximum_localized_response_tile_count = 12U,
+      .minimum_white_delta_passed =
+          std::isfinite(maximum_delta) && maximum_delta >= kMinimumWhiteDelta,
+  };
+  if (!result.acceptance.minimum_white_delta_passed) {
     result.diagnostic = "no temporally isolated white Feather LED response exceeded 7 DN";
     return result;
   }
@@ -253,6 +267,7 @@ RgbSwingAnalysis RgbSwingSequenceAnalyzer::Finish() {
       static_cast<double>(timings_.size() - 1U);
   result.first_white_frame_index = first;
   result.last_white_frame_index = last;
+  result.white_frame_count = support_frames;
   result.white_duration_us =
       static_cast<double>(timings_[last].media_time_us - timings_[first].media_time_us) +
       frame_interval_us;
@@ -263,12 +278,17 @@ RgbSwingAnalysis RgbSwingSequenceAnalyzer::Finish() {
   const auto onset_bounds = OpticalOnsetBounds(timings_, first);
   result.optical_onset_lower_bound_us = onset_bounds.first;
   result.optical_onset_upper_bound_us = onset_bounds.second;
-  result.detected = support_frames >= kMinimumWhiteFrames &&
-                    support_frames <= kMaximumWhiteFrames &&
-                    result.white_duration_us >= kMinimumWhiteDurationUs &&
-                    result.white_duration_us <= kMaximumWhiteDurationUs &&
-                    std::abs(result.optical_to_audio_offset_us) <= kMaximumOpticalAudioOffsetUs &&
-                    result.localized_response_tile_count <= 12U;
+  result.acceptance.white_frame_count_passed =
+      support_frames >= kMinimumWhiteFrames && support_frames <= kMaximumWhiteFrames;
+  result.acceptance.white_duration_passed = result.white_duration_us >= kMinimumWhiteDurationUs &&
+                                            result.white_duration_us <= kMaximumWhiteDurationUs;
+  result.acceptance.optical_audio_offset_passed =
+      std::abs(result.optical_to_audio_offset_us) <= kMaximumOpticalAudioOffsetUs;
+  result.acceptance.localized_response_passed = result.localized_response_tile_count <= 12U;
+  result.detected =
+      result.acceptance.minimum_white_delta_passed && result.acceptance.white_frame_count_passed &&
+      result.acceptance.white_duration_passed && result.acceptance.optical_audio_offset_passed &&
+      result.acceptance.localized_response_passed;
   std::ostringstream diagnostic;
   diagnostic << "white LED tile=(" << result.tile_x << ',' << result.tile_y
              << ") delta=" << result.maximum_white_delta << " frames=" << support_frames

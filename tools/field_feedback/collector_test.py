@@ -30,6 +30,9 @@ TOKEN_A = "A" * 32
 TOKEN_B = "B" * 32
 CREATED_AT = "2026-08-17T12:34:56Z"
 COLLECTED_AT = datetime.datetime(2026, 8, 17, 13, 0, tzinfo=datetime.UTC)
+validate_peer_impact_mapping = (
+    collector._validate_peer_impact_mapping  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+)
 
 
 @final
@@ -52,12 +55,18 @@ class FakePhone:
         self.archives = dict(archives)
         self.redirect_archives = redirect_archives
         self.archive_requests: list[tuple[str, str | None]] = []
+        self.metadata_requests: list[tuple[str, str | None]] = []
         self.redirect_sink_authorizations: list[str | None] = []
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: PLR0911
                 if self.path == "/api/v1/node":
+                    authorization = self.headers.get("Authorization")
+                    fixture.metadata_requests.append((self.path, authorization))
+                    if authorization != f"Bearer {fixture.token}":
+                        self.send_error(401)
+                        return
                     self._json(
                         {
                             "schema_version": 1,
@@ -68,6 +77,11 @@ class FakePhone:
                     )
                     return
                 if self.path == "/api/v1/sessions":
+                    authorization = self.headers.get("Authorization")
+                    fixture.metadata_requests.append((self.path, authorization))
+                    if authorization != f"Bearer {fixture.token}":
+                        self.send_error(401)
+                        return
                     self._json(
                         {
                             "schema_version": 1,
@@ -127,7 +141,13 @@ class FakePhone:
                 self.wfile.write(body)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # shutdown() waits for the serve loop's next poll. The 500 ms default
+        # accumulated once for each of this test matrix's many fixtures.
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
 
     @property
     def base_url(self) -> str:
@@ -161,6 +181,7 @@ class FieldFeedbackCollectorTest(unittest.TestCase):
             "shared-42",
             coordination,
             include_preview=True,
+            peer_impact_mapping=peer_impact_mapping("dtl-node"),
         )
         atl_archive = diagnostic_archive(
             "atl-local",
@@ -196,6 +217,11 @@ class FieldFeedbackCollectorTest(unittest.TestCase):
             self.assertNotIn(TOKEN_A, index_bytes.decode())
             self.assertNotIn(TOKEN_B, index_bytes.decode())
             self.assertEqual("paired", shared_sessions[0]["status"])
+            self.assertEqual("validated_pair", shared_sessions[0]["coordination_status"])
+            shared_timing = collector.require_object(
+                shared_sessions[0].get("coordination_timing"), "shared coordination timing"
+            )
+            self.assertEqual("1000", shared_timing["combined_mapped_uncertainty_ns"])
             self.assertEqual(
                 ["atl-node", "dtl-node"],
                 [collector.required_string(item, "node_id") for item in artifacts],
@@ -203,6 +229,11 @@ class FieldFeedbackCollectorTest(unittest.TestCase):
             for artifact in artifacts:
                 self.assertEqual("passed", artifact["checksum_validation"])
                 self.assertEqual("validated_coordination", artifact["linkage_status"])
+                timing = collector.require_object(
+                    artifact.get("coordination_timing"), "coordination timing"
+                )
+                self.assertEqual("1000", timing["combined_mapped_uncertainty_ns"])
+                self.assertEqual("1010", timing["maximum_trigger_separation_ns"])
                 archive_path = collector.required_string(artifact, "archive_path")
                 self.assertTrue(archive_path.startswith("artifacts/20260817T130000"))
                 retained = output / archive_path
@@ -224,6 +255,11 @@ class FieldFeedbackCollectorTest(unittest.TestCase):
             preview_index = read_index(preview_directory / "frame_index.json")
             self.assertEqual(3, len(index_objects(preview_index, "frames")))
             self.assertEqual("available", dtl_artifact["pose_diagnostics_status"])
+            retained_mapping = collector.require_object(
+                dtl_artifact.get("peer_impact_mapping"), "peer impact mapping"
+            )
+            self.assertEqual("30", retained_mapping["mapping_age_at_send_ns"])
+            self.assertEqual("5", retained_mapping["selected_to_mapped_residual_ns"])
 
             second = subject.collect_once()
             self.assertEqual((0, 2, ()), (second.downloaded, second.skipped, second.errors))
@@ -657,6 +693,207 @@ class FieldFeedbackCollectorTest(unittest.TestCase):
                 ],
             )
 
+    def test_rejects_checksum_valid_but_internally_corrupt_coordination_timing(self) -> None:
+        """An exported record cannot lie about composed uncertainty or pair separation."""
+        coordination = coordination_record("shared-bad", "dtl-bad", "atl-bad")
+        down = coordination["down_the_line"]
+        self.assertIsInstance(down, dict)
+        cast("dict[str, object]", down)["mapped_coordinator_uncertainty_ns"] = "501"
+        archive = diagnostic_archive(
+            "dtl-bad",
+            "dtl-node",
+            "down_the_line",
+            "shared-bad",
+            coordination,
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            FakePhone("dtl-node", "down_the_line", TOKEN_A, {"dtl-bad": archive}) as phone,
+        ):
+            subject = collector.FieldFeedbackCollector(
+                [collector.NodeSpec(phone.base_url, TOKEN_A)],
+                Path(temporary) / "feedback",
+                clock=lambda: COLLECTED_AT,
+            )
+            result = subject.collect_once()
+            self.assertEqual(0, result.downloaded)
+            self.assertRegex(result.errors[0], r"mapped uncertainty is not composed")
+            self.assertEqual([], index_objects(read_index(subject.index_path), "artifacts"))
+
+    def test_does_not_publish_one_sided_coordination_as_paired_timing(self) -> None:
+        """Keep paired timing unqualified when only one manifest has coordination evidence."""
+        coordination = coordination_record("shared-one-sided", "dtl-one-sided", "atl-one-sided")
+        dtl_archive = diagnostic_archive(
+            "dtl-one-sided",
+            "dtl-node",
+            "down_the_line",
+            "shared-one-sided",
+            coordination,
+        )
+        atl_archive = diagnostic_archive(
+            "atl-one-sided",
+            "atl-node",
+            "face_on",
+            "shared-one-sided",
+            None,
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            FakePhone("dtl-node", "down_the_line", TOKEN_A, {"dtl-one-sided": dtl_archive}) as dtl,
+            FakePhone("atl-node", "face_on", TOKEN_B, {"atl-one-sided": atl_archive}) as atl,
+        ):
+            subject = collector.FieldFeedbackCollector(
+                [
+                    collector.NodeSpec(dtl.base_url, TOKEN_A),
+                    collector.NodeSpec(atl.base_url, TOKEN_B),
+                ],
+                Path(temporary) / "feedback",
+                clock=lambda: COLLECTED_AT,
+            )
+            result = subject.collect_once()
+            self.assertEqual((2, ()), (result.downloaded, result.errors))
+            shared = index_objects(read_index(subject.index_path), "shared_sessions")[0]
+            self.assertEqual("paired", shared["status"])
+            self.assertEqual("incomplete", shared["coordination_status"])
+            self.assertIsNone(shared["coordination_timing"])
+
+    def test_rejects_coordination_that_places_local_session_under_peer_role(self) -> None:
+        """A matching node/session tuple must occur under the manifest's advertised role."""
+        coordination = coordination_record("shared-wrong-role", "peer-session", "dtl-wrong-role")
+        down = collector.require_object(coordination["down_the_line"], "down timing")
+        face = collector.require_object(coordination["face_on"], "face timing")
+        down["node_id"] = "other-node"
+        face["node_id"] = "dtl-node"
+        archive = diagnostic_archive(
+            "dtl-wrong-role",
+            "dtl-node",
+            "down_the_line",
+            "shared-wrong-role",
+            coordination,
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            FakePhone("dtl-node", "down_the_line", TOKEN_A, {"dtl-wrong-role": archive}) as phone,
+        ):
+            subject = collector.FieldFeedbackCollector(
+                [collector.NodeSpec(phone.base_url, TOKEN_A)],
+                Path(temporary) / "feedback",
+                clock=lambda: COLLECTED_AT,
+            )
+            result = subject.collect_once()
+            self.assertEqual(0, result.downloaded)
+            self.assertRegex(result.errors[0], r"recorded under another role")
+
+    def test_rejects_tampered_derived_index_metadata_even_when_archive_is_unchanged(self) -> None:
+        """The retained ZIP, not editable index fields, remains timing evidence authority."""
+        coordination = coordination_record("shared-index", "dtl-index", "atl-index")
+        archive = diagnostic_archive(
+            "dtl-index", "dtl-node", "down_the_line", "shared-index", coordination
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            FakePhone("dtl-node", "down_the_line", TOKEN_A, {"dtl-index": archive}) as phone,
+        ):
+            subject = collector.FieldFeedbackCollector(
+                [collector.NodeSpec(phone.base_url, TOKEN_A)],
+                Path(temporary) / "feedback",
+                clock=lambda: COLLECTED_AT,
+            )
+            self.assertEqual(1, subject.collect_once().downloaded)
+            index = read_index(subject.index_path)
+            artifact = index_objects(index, "artifacts")[0]
+            timing = collector.require_object(artifact["coordination_timing"], "timing")
+            timing["maximum_trigger_separation_ns"] = "999999"
+            subject.index_path.write_bytes(canonical_json(index))
+            with self.assertRaisesRegex(
+                collector.CollectionError, "metadata contradicts its archive"
+            ):
+                subject.collect_once()
+
+    def test_rejects_peer_impact_mapping_with_false_candidate_residual(self) -> None:
+        """Field indexing independently recomputes the shadow candidate-to-mapped residual."""
+        mapping = peer_impact_mapping("dtl-node")
+        mapping["selected_to_mapped_residual_ns"] = "6"
+        coordination = coordination_record("shared-map", "dtl-map", "atl-map")
+        archive = diagnostic_archive(
+            "dtl-map",
+            "dtl-node",
+            "down_the_line",
+            "shared-map",
+            coordination,
+            peer_impact_mapping=mapping,
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            FakePhone("dtl-node", "down_the_line", TOKEN_A, {"dtl-map": archive}) as phone,
+        ):
+            subject = collector.FieldFeedbackCollector(
+                [collector.NodeSpec(phone.base_url, TOKEN_A)],
+                Path(temporary) / "feedback",
+                clock=lambda: COLLECTED_AT,
+            )
+            result = subject.collect_once()
+            self.assertEqual(0, result.downloaded)
+            self.assertRegex(result.errors[0], r"selected residual is invalid")
+
+    def test_peer_impact_mapping_enforces_source_specific_policy(self) -> None:
+        """Validated evidence must be producible by the mapped/local/arrival selection paths."""
+        implausible_clock_candidate = peer_impact_mapping("dtl-node")
+        implausible_clock_candidate["selected_local_trigger_elapsed_realtime_ns"] = "200000000"
+        implausible_clock_candidate["selected_to_mapped_residual_ns"] = "199998000"
+        with self.assertRaisesRegex(collector.CollectionError, "exceeds its selection window"):
+            validate_peer_impact_mapping(
+                {"peer_impact_mapping": implausible_clock_candidate},
+                "dtl-node",
+                "peer_audio_clock_candidate",
+            )
+
+        false_acceptance = peer_impact_mapping("dtl-node")
+        false_acceptance["mapping_age_at_send_ns"] = "10000000001"
+        with self.assertRaisesRegex(collector.CollectionError, "policy contradicts"):
+            validate_peer_impact_mapping(
+                {"peer_impact_mapping": false_acceptance},
+                "dtl-node",
+                "peer_audio_clock_candidate",
+            )
+
+        false_arrival = peer_impact_mapping("dtl-node")
+        false_arrival.update(
+            {
+                "selection_source": "peer_audio_arrival",
+                "selected_local_trigger_elapsed_realtime_ns": "2099",
+                "selected_local_uncertainty_ns": "0",
+                "selected_to_mapped_residual_ns": "99",
+            }
+        )
+        with self.assertRaisesRegex(collector.CollectionError, "does not match request arrival"):
+            validate_peer_impact_mapping(
+                {"peer_impact_mapping": false_arrival},
+                "dtl-node",
+                "peer_audio_arrival",
+            )
+
+        rejected_mapping = peer_impact_mapping("dtl-node")
+        rejected_mapping.update(
+            {
+                "mapping_age_at_send_ns": "10000000001",
+                "mapping_policy": "rejected",
+                "effective_request_schema_version": 1,
+                "fallback_semantics": "fresh_local_candidate_else_arrival",
+                "request_arrival_elapsed_realtime_ns": "300000000",
+                "selection_source": "peer_audio_local_candidate",
+                "selected_local_trigger_elapsed_realtime_ns": "100000000",
+                "selected_local_uncertainty_ns": "7",
+                "selected_to_mapped_residual_ns": "99998000",
+            }
+        )
+        retained = validate_peer_impact_mapping(
+            {"peer_impact_mapping": rejected_mapping},
+            "dtl-node",
+            "peer_audio_local_candidate",
+        )
+        self.assertEqual("rejected", retained["mapping_policy"] if retained else None)
+
     def test_rejects_wrong_token_and_changed_local_evidence(self) -> None:
         """Require bearer auth and refuse silent replacement after local checksum damage."""
         archive = diagnostic_archive("local", "node", "down_the_line", None, None)
@@ -680,6 +917,8 @@ class FieldFeedbackCollectorTest(unittest.TestCase):
                 clock=lambda: COLLECTED_AT,
             )
             self.assertEqual(1, accepted.collect_once().downloaded)
+            self.assertIn(("/api/v1/node", f"Bearer {TOKEN_A}"), phone.metadata_requests)
+            self.assertIn(("/api/v1/sessions", f"Bearer {TOKEN_A}"), phone.metadata_requests)
             index = read_index(accepted.index_path)
             artifact = index_objects(index, "artifacts")[0]
             retained = output / collector.required_string(artifact, "archive_path")
@@ -735,12 +974,59 @@ def coordination_record(
             "role": "down_the_line",
             "node_id": "dtl-node",
             "local_session_id": dtl_session_id,
+            "trigger_timestamp_ns": "10000",
+            "trigger_uncertainty_ns": "200",
+            "mapped_coordinator_timestamp_ns": "9000",
+            "mapped_coordinator_uncertainty_ns": "500",
+            "clock_offset_ns": "1000",
+            "clock_uncertainty_ns": "300",
+            "minimum_round_trip_ns": "400",
+            "maximum_round_trip_ns": "800",
+            "clock_sample_count": 3,
+            "source": "peer_audio_clock_candidate",
         },
         "face_on": {
             "role": "face_on",
             "node_id": "atl-node",
             "local_session_id": atl_session_id,
+            "trigger_timestamp_ns": "20010",
+            "trigger_uncertainty_ns": "250",
+            "mapped_coordinator_timestamp_ns": "9010",
+            "mapped_coordinator_uncertainty_ns": "500",
+            "clock_offset_ns": "11000",
+            "clock_uncertainty_ns": "250",
+            "minimum_round_trip_ns": "500",
+            "maximum_round_trip_ns": "900",
+            "clock_sample_count": 3,
+            "source": "local_audio",
         },
+        "minimum_trigger_separation_ns": "0",
+        "maximum_trigger_separation_ns": "1010",
+    }
+
+
+def peer_impact_mapping(target_node_id: str) -> dict[str, object]:
+    """Build the retained schema emitted for a mapped shadow audio candidate."""
+    return {
+        "schema_version": 2,
+        "request_schema_version": 2,
+        "leader_node_id": "atl-node",
+        "leader_trigger_elapsed_realtime_ns": "1000",
+        "target_peer_node_id": target_node_id,
+        "mapped_peer_trigger_elapsed_realtime_ns": "2000",
+        "mapping_uncertainty_ns": "20",
+        "mapping_age_at_send_ns": "30",
+        "minimum_round_trip_ns": "40",
+        "maximum_round_trip_ns": "50",
+        "clock_sample_count": 3,
+        "request_arrival_elapsed_realtime_ns": "2100",
+        "selection_source": "peer_audio_clock_candidate",
+        "selected_local_trigger_elapsed_realtime_ns": "2005",
+        "selected_local_uncertainty_ns": "7",
+        "selected_to_mapped_residual_ns": "5",
+        "mapping_policy": "accepted",
+        "effective_request_schema_version": 2,
+        "fallback_semantics": "mapped_candidate_else_arrival",
     }
 
 
@@ -808,6 +1094,7 @@ def diagnostic_archive(  # noqa: PLR0913
     include_preview: bool = False,
     corrupt_pose_frame_index: bool = False,
     boolean_pose_frame_index: bool = False,
+    peer_impact_mapping: Mapping[str, object] | None = None,
 ) -> bytes:
     """Create a deterministic Android-shaped diagnostic ZIP fixture."""
     manifest: dict[str, object] = {
@@ -838,6 +1125,11 @@ def diagnostic_archive(  # noqa: PLR0913
         "user_feedback": {"classification": "good_capture", "note": "clean strike"},
         "timing_marks": [],
     }
+    if peer_impact_mapping is not None:
+        android_capture = collector.require_object(manifest["android_capture"], "android capture")
+        android_capture["peer_impact_mapping"] = dict(peer_impact_mapping)
+        trigger = collector.require_object(manifest["trigger"], "manifest trigger")
+        trigger["source"] = collector.required_string(peer_impact_mapping, "selection_source")
     sources: dict[str, bytes] = {
         f"{session_id}/diagnostic_incident.json": canonical_json(incident),
         f"{session_id}/{role}.mp4": b"small encoded fixture",

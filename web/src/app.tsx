@@ -1,6 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CameraRole, CameraStatus, NumericSetting, StationApi, StationStatus } from "./api.js";
-import { PairedPreviewLoader, type PreviewPair } from "./paired_preview.js";
+import {
+  attributePreviewPipelineStall,
+  PairedPreviewLoader,
+  type PreviewDelayStage,
+  type PreviewPair,
+  type PreviewPairTelemetry,
+  type PreviewPipelineStall,
+  type PreviewPipelineStage,
+} from "./paired_preview.js";
+
+export const PREVIEW_STALL_STORAGE_KEY = "swing-capture.preview-pipeline-stall.v2";
+export const PREVIEW_STALL_TTL_MS = 6 * 60 * 60 * 1_000;
+const PREVIEW_STALL_MAX_ENCODED_BYTES = 8_192;
+const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
+const RETAINED_STALL_CLOCK_SKEW_MS = 60_000;
+
+export interface RetainedPreviewPipelineStall {
+  schema_version: 1;
+  station_identity: string;
+  expires_at_epoch_ms: number;
+  active_stall_key: string | null;
+  stall: PreviewPipelineStall;
+}
 
 export interface AppProps {
   api: StationApi;
@@ -12,6 +34,9 @@ export function App({ api, pollIntervalMs = 33 }: AppProps) {
   const [error, setError] = useState<string | null>(null);
   const [previewPair, setPreviewPair] = useState<PreviewPair | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [lastPreviewDelay, setLastPreviewDelay] = useState<PreviewPairTelemetry | null>(null);
+  const [retainedPipelineStall, setRetainedPipelineStall] =
+    useState<RetainedPreviewPipelineStall | null>(null);
 
   const previewLoader = useMemo(
     () =>
@@ -19,6 +44,9 @@ export function App({ api, pollIntervalMs = 33 }: AppProps) {
         api,
         (pair) => {
           setPreviewPair(pair);
+          if (pair.telemetry.attributed_stage !== "nominal") {
+            setLastPreviewDelay(pair.telemetry);
+          }
           setPreviewError(null);
         },
         (caught) => setPreviewError(caught.message),
@@ -37,6 +65,36 @@ export function App({ api, pollIntervalMs = 33 }: AppProps) {
         const nextStatus = await api.getStatus();
         if (active) {
           setStatus(nextStatus);
+          const observedAtEpochMs = Date.now();
+          const stationIdentity = previewStationIdentity(
+            nextStatus.service_instance_id,
+            nextStatus.cameras,
+          );
+          const stall = attributePreviewPipelineStall(nextStatus.cameras, observedAtEpochMs);
+          setRetainedPipelineStall((current) => {
+            if (stationIdentity === null) {
+              clearPreviewPipelineStall();
+              return null;
+            }
+            const scopedCurrent =
+              current !== null &&
+              current.station_identity === stationIdentity &&
+              current.expires_at_epoch_ms > observedAtEpochMs
+                ? current
+                : loadPreviewPipelineStall(stationIdentity, observedAtEpochMs);
+            if (stall === null) {
+              return scopedCurrent?.active_stall_key === null
+                ? scopedCurrent
+                : scopedCurrent === null
+                  ? null
+                  : { ...scopedCurrent, active_stall_key: null };
+            }
+            const activeStallKey = previewPipelineStallKey(stall);
+            if (scopedCurrent?.active_stall_key === activeStallKey) {
+              return scopedCurrent;
+            }
+            return retainPreviewPipelineStall(stationIdentity, stall, observedAtEpochMs);
+          });
           setError(null);
         }
       } catch (caught) {
@@ -59,6 +117,12 @@ export function App({ api, pollIntervalMs = 33 }: AppProps) {
       }
     };
   }, [api, pollIntervalMs]);
+
+  useEffect(() => {
+    if (retainedPipelineStall !== null) {
+      storePreviewPipelineStall(retainedPipelineStall);
+    }
+  }, [retainedPipelineStall]);
 
   useEffect(() => {
     const downTheLine = status?.cameras.find(
@@ -137,11 +201,381 @@ export function App({ api, pollIntervalMs = 33 }: AppProps) {
       </main>
 
       <footer>
+        <PreviewTimingDiagnostics
+          current={previewPair?.telemetry ?? null}
+          delayed={lastPreviewDelay}
+          pipelineStall={retainedPipelineStall?.stall ?? null}
+        />
         Setup previews use a latest-only low-latency path. Capture transport continues at the
         measured stream rate shown on each card.
       </footer>
     </div>
   );
+}
+
+function PreviewTimingDiagnostics({
+  current,
+  delayed,
+  pipelineStall,
+}: {
+  current: PreviewPairTelemetry | null;
+  delayed: PreviewPairTelemetry | null;
+  pipelineStall: PreviewPipelineStall | null;
+}) {
+  return (
+    <details className="preview-timing-diagnostics">
+      <summary>Preview timing</summary>
+      {current === null ? (
+        <p>No paired preview has completed yet.</p>
+      ) : (
+        <p>{previewTimingSummary("Latest pair", current)}</p>
+      )}
+      {delayed === null ? (
+        <p>No paired update above 500 ms has been observed in this browser session.</p>
+      ) : (
+        <p>{previewTimingSummary("Last delayed pair", delayed)}</p>
+      )}
+      {pipelineStall === null ? (
+        <p>No server-side capture, sampling, or render stall above 500 ms is retained.</p>
+      ) : (
+        <>
+          <p>{previewPipelineStallSummary(pipelineStall)}</p>
+          <p>
+            Observed at{" "}
+            <time dateTime={new Date(pipelineStall.observed_at_epoch_ms).toISOString()}>
+              {new Date(pipelineStall.observed_at_epoch_ms).toLocaleString()}
+            </time>
+            . Retention is scoped to this station service instance and expires after six hours.
+          </p>
+        </>
+      )}
+    </details>
+  );
+}
+
+function previewPipelineStallSummary(stall: PreviewPipelineStall): string {
+  const roleMetrics = (["down_the_line", "face_on"] as const)
+    .map((role) => {
+      const evidence = stall.roles[role];
+      if (evidence === null) {
+        return `${roleLabel(role)} unavailable`;
+      }
+      return `${roleLabel(role)} ${previewDelayStageLabel(evidence.stage)} ${evidence.attributed_ms.toFixed(
+        1,
+      )} ms [capture/sink/sample/source ${evidence.latest_capture_age_ms.toFixed(
+        1,
+      )}/${evidence.latest_sink_completion_age_ms.toFixed(
+        1,
+      )}/${evidence.sampled_age_ms.toFixed(1)}/${evidence.source_age_ms.toFixed(1)} ms]`;
+    })
+    .join("; ");
+  return `Retained server evidence: ${previewDelayStageLabel(stall.stage)} (${roleLabel(
+    stall.role,
+  )}, sequence ${stall.preview_sequence}) reached ${stall.attributed_ms.toFixed(
+    1,
+  )} ms. Capture/sample/rendered-source ages ${stall.latest_capture_age_ms.toFixed(
+    1,
+  )}/${stall.sampled_age_ms.toFixed(1)}/${stall.source_age_ms.toFixed(1)} ms; renderer ${
+    stall.renderer_stage
+  }${stall.render_pending ? " with queued work" : ""}. Concurrent evidence: ${roleMetrics}. This is stage evidence, not causal proof.`;
+}
+
+export function previewStationIdentity(
+  serviceInstanceId: string,
+  cameras: CameraStatus[],
+): string | null {
+  if (serviceInstanceId.length === 0) {
+    return null;
+  }
+  const identities = (["down_the_line", "face_on"] as const).map((role) => {
+    const matching = cameras.filter((camera) => camera.role === role);
+    const camera = matching[0];
+    if (matching.length !== 1 || camera === undefined || camera.serial.length === 0) {
+      return null;
+    }
+    return `${role}=${encodeURIComponent(camera.serial)}`;
+  });
+  return identities.some((identity) => identity === null)
+    ? null
+    : `station-v2|instance=${encodeURIComponent(serviceInstanceId)}|${identities.join("|")}`;
+}
+
+export function retainPreviewPipelineStall(
+  stationIdentity: string,
+  stall: PreviewPipelineStall,
+  observedAtEpochMs = Date.now(),
+): RetainedPreviewPipelineStall {
+  return {
+    schema_version: 1,
+    station_identity: stationIdentity,
+    expires_at_epoch_ms: observedAtEpochMs + PREVIEW_STALL_TTL_MS,
+    active_stall_key: previewPipelineStallKey(stall),
+    stall,
+  };
+}
+
+export function loadPreviewPipelineStall(
+  expectedStationIdentity: string,
+  nowEpochMs = Date.now(),
+): RetainedPreviewPipelineStall | null {
+  try {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    const encoded = window.sessionStorage.getItem(PREVIEW_STALL_STORAGE_KEY);
+    if (encoded === null) {
+      return null;
+    }
+    if (encoded.length > PREVIEW_STALL_MAX_ENCODED_BYTES) {
+      clearPreviewPipelineStall();
+      return null;
+    }
+    const value: unknown = JSON.parse(encoded);
+    if (!isObject(value)) {
+      clearPreviewPipelineStall();
+      return null;
+    }
+    const retained = value as Record<string, unknown>;
+    if (
+      retained.schema_version !== 1 ||
+      retained.station_identity !== expectedStationIdentity ||
+      !isNonnegativeSafeInteger(retained.expires_at_epoch_ms) ||
+      (retained.expires_at_epoch_ms as number) <= nowEpochMs ||
+      (retained.expires_at_epoch_ms as number) > nowEpochMs + PREVIEW_STALL_TTL_MS ||
+      !isPreviewPipelineStall(retained.stall)
+    ) {
+      clearPreviewPipelineStall();
+      return null;
+    }
+    const parsed = retained as unknown as RetainedPreviewPipelineStall;
+    if (
+      parsed.stall.observed_at_epoch_ms > MAX_DATE_EPOCH_MS ||
+      parsed.stall.observed_at_epoch_ms > parsed.expires_at_epoch_ms ||
+      parsed.stall.observed_at_epoch_ms > nowEpochMs + RETAINED_STALL_CLOCK_SKEW_MS ||
+      (parsed.active_stall_key !== null &&
+        parsed.active_stall_key !== previewPipelineStallKey(parsed.stall))
+    ) {
+      clearPreviewPipelineStall();
+      return null;
+    }
+    return parsed;
+  } catch {
+    clearPreviewPipelineStall();
+    return null;
+  }
+}
+
+function previewPipelineStallKey(stall: PreviewPipelineStall): string {
+  return `${stall.stage}|${stall.role}|${stall.preview_sequence}`;
+}
+
+export function storePreviewPipelineStall(retained: RetainedPreviewPipelineStall): void {
+  try {
+    if (typeof window !== "undefined") {
+      const encoded = JSON.stringify(retained);
+      if (encoded.length <= PREVIEW_STALL_MAX_ENCODED_BYTES) {
+        window.sessionStorage.setItem(PREVIEW_STALL_STORAGE_KEY, encoded);
+      } else {
+        clearPreviewPipelineStall();
+      }
+    }
+  } catch {
+    // Diagnostics remain visible in memory when private browsing or storage
+    // policy denies session storage.
+  }
+}
+
+export function clearPreviewPipelineStall(): void {
+  try {
+    if (typeof window !== "undefined") {
+      window.sessionStorage.removeItem(PREVIEW_STALL_STORAGE_KEY);
+    }
+  } catch {
+    // Storage policy may deny removal just as it can deny reads and writes.
+  }
+}
+
+function isPreviewPipelineStall(value: unknown): value is PreviewPipelineStall {
+  if (!isObject(value)) {
+    return false;
+  }
+  if (
+    value.schema_version !== 1 ||
+    !isPipelineDelayStage(value.stage, false) ||
+    !isCameraRole(value.role) ||
+    !isRendererStage(value.renderer_stage) ||
+    typeof value.render_pending !== "boolean" ||
+    !isUnsignedDecimalString(value.latest_capture_frame_id) ||
+    !isUnsignedDecimalString(value.latest_sink_frame_id) ||
+    !isUnsignedDecimalString(value.latest_sampler_frame_id) ||
+    !isObject(value.roles)
+  ) {
+    return false;
+  }
+  for (const field of ["preview_sequence", "sampled_sequence"]) {
+    if (!isNonnegativeSafeInteger(value[field])) {
+      return false;
+    }
+  }
+  if (!isNonnegativeSafeInteger(value.observed_at_epoch_ms)) {
+    return false;
+  }
+  const numericFields = [
+    "latest_capture_age_ms",
+    "latest_sink_completion_age_ms",
+    "latest_sampler_completion_age_ms",
+    "sampled_age_ms",
+    "source_age_ms",
+    "rendered_age_ms",
+    "render_queue_ms",
+    "attributed_ms",
+  ];
+  if (!numericFields.every((field) => isNonnegativeFiniteNumber(value[field]))) {
+    return false;
+  }
+  const roles = value.roles;
+  return (["down_the_line", "face_on"] as const).every(
+    (role) => roles[role] === null || isPreviewPipelineRoleEvidence(roles[role]),
+  );
+}
+
+function isPreviewPipelineRoleEvidence(value: unknown): boolean {
+  if (!isObject(value)) {
+    return false;
+  }
+  if (
+    !isPipelineDelayStage(value.stage, true) ||
+    !isRendererStage(value.renderer_stage) ||
+    typeof value.render_pending !== "boolean" ||
+    !isUnsignedDecimalString(value.latest_capture_frame_id) ||
+    !isUnsignedDecimalString(value.latest_sink_frame_id) ||
+    !isUnsignedDecimalString(value.latest_sampler_frame_id)
+  ) {
+    return false;
+  }
+  for (const field of ["preview_sequence", "sampled_sequence"]) {
+    if (!isNonnegativeSafeInteger(value[field])) {
+      return false;
+    }
+  }
+  return [
+    "attributed_ms",
+    "latest_capture_age_ms",
+    "latest_sink_completion_age_ms",
+    "latest_sampler_completion_age_ms",
+    "sampled_age_ms",
+    "source_age_ms",
+    "rendered_age_ms",
+    "render_queue_ms",
+  ].every((field) => isNonnegativeFiniteNumber(value[field]));
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonnegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isUnsignedDecimalString(value: unknown): value is string {
+  return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value);
+}
+
+function isCameraRole(value: unknown): value is CameraRole {
+  return value === "down_the_line" || value === "face_on";
+}
+
+function isRendererStage(
+  value: unknown,
+): value is CameraStatus["preview_performance"]["renderer_stage"] {
+  return (
+    value === "idle" || value === "routine" || value === "full_resolution" || value === "unknown"
+  );
+}
+
+function isPipelineDelayStage(
+  value: unknown,
+  nominalAllowed: boolean,
+): value is PreviewPipelineStage {
+  return (
+    (nominalAllowed && value === "nominal") ||
+    value === "capture" ||
+    value === "capture_sink" ||
+    value === "sampling" ||
+    value === "render"
+  );
+}
+
+function previewTimingSummary(label: string, telemetry: PreviewPairTelemetry): string {
+  const role = telemetry.attributed_role === null ? "pair" : roleLabel(telemetry.attributed_role);
+  const gap = telemetry.presented_gap_ms;
+  return `${label}: ${telemetry.total_ms.toFixed(1)} ms request-to-presentation${
+    gap === null ? "" : `, ${gap.toFixed(1)} ms since the prior pair`
+  }, ${telemetry.queue_wait_ms.toFixed(1)} ms paired-loader queue. Evidence points to ${previewDelayStageLabel(
+    telemetry.attributed_stage,
+  )} (${role}, ${telemetry.attributed_ms.toFixed(
+    1,
+  )} ms); this is a heuristic, not causal proof. ${previewRoleTiming(
+    "DTL",
+    telemetry.roles.down_the_line,
+  )} ${previewRoleTiming("Face-on", telemetry.roles.face_on)}`;
+}
+
+function previewRoleTiming(
+  label: string,
+  telemetry: PreviewPairTelemetry["roles"][CameraRole],
+): string {
+  const server = telemetry.fetch.server;
+  const metric = (value: number | null) => (value === null ? "n/a" : value.toFixed(1));
+  return `${label}: requested/served ${server.requested_sequence ?? "n/a"}/${
+    server.served_sequence
+  }, frame IDs capture/sink/sampler ${server.latest_capture_frame_id ?? "n/a"}/${
+    server.latest_sink_frame_id ?? "n/a"
+  }/${server.latest_sampler_frame_id ?? "n/a"}; capture/sink-complete/sampler-complete/sample/source/rendered ages ${metric(
+    server.latest_capture_age_ms,
+  )}/${metric(server.latest_sink_completion_age_ms)}/${metric(
+    server.latest_sampler_completion_age_ms,
+  )}/${metric(server.sampled_age_ms)}/${metric(server.source_age_ms)}/${metric(
+    server.rendered_age_ms,
+  )} ms; render queue/work ${metric(server.render_queue_ms)}/${metric(server.render_ms)} ms (${
+    server.renderer_stage ?? "n/a"
+  }${server.render_pending === true ? ", queued" : ""}); server backend/prepare/observable-handler ${metric(
+    server.backend_ms,
+  )}/${metric(server.response_prepare_ms)}/${metric(server.handler_ms)} ms; browser headers/body/decode ${telemetry.fetch.headers_ms.toFixed(
+    1,
+  )}/${telemetry.fetch.body_ms.toFixed(1)}/${telemetry.decode_ms.toFixed(1)} ms.`;
+}
+
+function previewDelayStageLabel(stage: PreviewDelayStage): string {
+  switch (stage) {
+    case "nominal":
+      return "nominal";
+    case "capture":
+      return "camera acquisition";
+    case "capture_sink":
+      return "host capture-ring sink";
+    case "sampling":
+      return "latest-frame sampling";
+    case "render":
+      return "preview rendering";
+    case "http_server":
+      return "HTTP handler";
+    case "http_transport_or_dispatch":
+      return "HTTP dispatch or transport";
+    case "response_body":
+      return "response-body delivery";
+    case "browser_decode":
+      return "browser image decode";
+    case "browser_backpressure":
+      return "browser paired-loader backpressure";
+    case "status_poll_or_browser_scheduling":
+      return "status polling or browser scheduling";
+  }
 }
 
 interface CameraCardProps {

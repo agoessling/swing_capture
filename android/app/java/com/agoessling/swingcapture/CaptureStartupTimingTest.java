@@ -14,7 +14,9 @@ public final class CaptureStartupTimingTest {
     CaptureStartupTiming timing = new CaptureStartupTiming(100, 120, 210, 260, 2_800);
 
     check(timing.armToEngineStartNs() == 20, "arm to engine");
+    check(timing.engineStartToFirstCameraFrameNs() == 90, "engine to camera");
     check(timing.armToFirstCameraFrameNs() == 110, "arm to camera");
+    check(timing.firstCameraFrameToFirstUsableEncodedFrameNs() == 50, "camera to encoder");
     check(timing.armToFirstUsableEncodedFrameNs() == 160, "arm to encoder");
     check(timing.armToFullPreRollReadyNs() == 2_700, "arm to full pre-roll");
     check(

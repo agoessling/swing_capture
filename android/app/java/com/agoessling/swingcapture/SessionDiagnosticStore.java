@@ -168,7 +168,11 @@ public final class SessionDiagnosticStore {
   private static DiagnosticIncident.IncidentClassification initialClassification(
       String triggerSource) {
     return switch (Objects.requireNonNull(triggerSource, "triggerSource")) {
-      case "local_audio", "manual" ->
+      case "local_audio",
+          "manual",
+          "peer_audio_arrival",
+          "peer_audio_local_candidate",
+          "peer_audio_clock_candidate" ->
           DiagnosticIncident.IncidentClassification.SUCCESSFUL_CAPTURE;
       case "missed_shot" ->
           DiagnosticIncident.IncidentClassification.USER_REPORTED;

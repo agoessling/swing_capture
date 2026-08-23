@@ -1,0 +1,66 @@
+load("//tools:strict_cc.bzl", "cc_binary", "cc_library", "cc_test")
+
+cc_library(
+    name = "audio_trigger_window_analyzer_lib",
+    srcs = ["audio_trigger_window_analyzer.cc"],
+    hdrs = ["audio_trigger_window_analyzer.h"],
+    deps = [
+        "//capture/audio:pcm_wav",
+        "//capture/trigger:impact_detector",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "audio_trigger_window_analyzer",
+    srcs = ["audio_trigger_window_main.cc"],
+    deps = [
+        ":audio_trigger_window_analyzer_lib",
+        "//capture/audio:pcm_wav",
+        "//capture/trigger:impact_detector",
+    ],
+)
+
+cc_test(
+    name = "audio_trigger_window_analyzer_test",
+    size = "small",
+    srcs = ["audio_trigger_window_analyzer_test.cc"],
+    deps = [
+        ":audio_trigger_window_analyzer_lib",
+        "//capture/audio:pcm_wav",
+        "//capture/trigger:impact_detector",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "field_recording_analyzer_lib",
+    srcs = ["field_recording_analyzer.cc"],
+    hdrs = ["field_recording_analyzer.h"],
+    deps = [
+        "//capture/audio:pcm_wav",
+        "//capture/trigger:impact_detector",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "field_recording_analyzer",
+    srcs = ["main.cc"],
+    deps = [
+        ":field_recording_analyzer_lib",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "field_recording_analyzer_test",
+    size = "small",
+    srcs = ["field_recording_analyzer_test.cc"],
+    deps = [
+        ":field_recording_analyzer_lib",
+        "//capture/audio:pcm_wav",
+        "@nlohmann_json//:json",
+    ],
+)

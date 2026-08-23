@@ -17,6 +17,10 @@
 namespace swing_capture::service {
 
 using CapturedFrameSink = std::function<void(const FrameView &)>;
+// Optional deterministic fault-injection seam used by software tests. Production
+// callers leave this empty; when present it runs after the capture sink and
+// before the bounded latest-frame sampler.
+using PreviewSamplingHook = std::function<void()>;
 
 class PreviewCameraDevice {
  public:
@@ -43,7 +47,8 @@ class CameraWorker final {
   CameraWorker(CameraRole role, std::unique_ptr<PreviewCameraDevice> camera,
                daheng::DahengConfiguration configuration = {},
                std::unique_ptr<preview::PreviewFrameProcessor> frame_processor = nullptr,
-               CapturedFrameSink captured_frame_sink = {});
+               CapturedFrameSink captured_frame_sink = {},
+               PreviewSamplingHook preview_sampling_hook = {});
   ~CameraWorker();
 
   CameraWorker(const CameraWorker &) = delete;

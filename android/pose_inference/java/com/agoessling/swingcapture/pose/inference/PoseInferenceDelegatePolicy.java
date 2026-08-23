@@ -4,5 +4,7 @@ package com.agoessling.swingcapture.pose.inference;
 public enum PoseInferenceDelegatePolicy {
   CPU_ONLY,
   GPU_PREFERRED,
-  GPU_REQUIRED
+  GPU_REQUIRED,
+  NPU_PREFERRED,
+  NPU_REQUIRED
 }

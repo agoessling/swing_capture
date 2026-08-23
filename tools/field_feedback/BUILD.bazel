@@ -24,6 +24,7 @@ py_test(
     name = "collector_test",
     size = "small",
     srcs = ["collector_test.py"],
+    timeout = "short",
     legacy_create_init = False,
     deps = [":collector"],
 )

@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "android/hil/android_probe_hil_support.h"
+#include "android/pose_hil/pose_experiment_hil_support.h"
 #include "android/pose_hil/pose_standby_validation.h"
 #include "android/pose_hil/standby_missed_validation.h"
 #include "android/pose_hil/warm_retained_validation.h"
@@ -83,6 +84,32 @@ std::string EnvironmentValue(std::string_view name) {
   // NOLINTNEXTLINE(concurrency-mt-unsafe)
   const char *value = std::getenv(std::string(name).c_str());
   return value == nullptr ? std::string() : std::string(value);
+}
+
+std::string ResolveDelegatePolicy() {
+  std::string policy = EnvironmentValue("SWING_CAPTURE_ANDROID_POSE_DELEGATE");
+  if (policy.empty()) {
+    return "gpu_preferred";
+  }
+  if (policy != "cpu_only" && policy != "gpu_preferred" && policy != "gpu_required" &&
+      policy != "npu_preferred" && policy != "npu_required") {
+    throw std::runtime_error(
+        "SWING_CAPTURE_ANDROID_POSE_DELEGATE must be cpu_only, gpu_preferred, gpu_required, "
+        "npu_preferred, or npu_required");
+  }
+  return policy;
+}
+
+bool RequireLatencyQualification() {
+  const std::string value = EnvironmentValue("SWING_CAPTURE_ANDROID_REQUIRE_POSE_LATENCY");
+  if (value.empty() || value == "0" || value == "false") {
+    return false;
+  }
+  if (value == "1" || value == "true") {
+    return true;
+  }
+  throw std::runtime_error(
+      "SWING_CAPTURE_ANDROID_REQUIRE_POSE_LATENCY must be true, false, 1, or 0");
 }
 
 std::filesystem::path OutputDirectory() {
@@ -436,8 +463,9 @@ std::uint16_t EstablishForward(const std::filesystem::path &adb, std::string_vie
 }
 
 std::vector<std::string> StartArguments(std::string_view serial, std::string_view role,
-                                        bool debug_evidence) {
-  return {
+                                        std::string_view delegate_policy, bool debug_evidence,
+                                        const pose_hil::PoseExperimentHilInputs &experiment) {
+  std::vector<std::string> arguments = {
       "-s",
       std::string(serial),
       "shell",
@@ -458,7 +486,7 @@ std::vector<std::string> StartArguments(std::string_view serial, std::string_vie
       "shadow",
       "--es",
       "pose_delegate",
-      "gpu_preferred",
+      std::string(delegate_policy),
       "--ez",
       "pose_debug_evidence",
       debug_evidence ? "true" : "false",
@@ -466,6 +494,10 @@ std::vector<std::string> StartArguments(std::string_view serial, std::string_vie
       "run_pose_standby_hil",
       "true",
   };
+  const std::vector<std::string> experiment_extras =
+      pose_hil::PoseExperimentActivityExtras(experiment);
+  arguments.insert(arguments.end(), experiment_extras.begin(), experiment_extras.end());
+  return arguments;
 }
 
 Json TelemetryJson(const pose_hil::DeviceTelemetry &telemetry) {
@@ -607,7 +639,8 @@ bool SafeFileSegment(std::string_view value) {
   });
 }
 
-Json WaitForMissedShotStandby(std::uint16_t host_port, std::uint64_t minimum_audio_end,
+Json WaitForMissedShotStandby(std::uint16_t host_port, std::string_view control_token,
+                              std::uint64_t minimum_audio_end,
                               std::uint64_t minimum_successful_inferences,
                               std::uint64_t minimum_encoded_evidence_frames, Json &report,
                               const std::filesystem::path &report_path,
@@ -617,7 +650,7 @@ Json WaitForMissedShotStandby(std::uint16_t host_port, std::uint64_t minimum_aud
   while (std::chrono::steady_clock::now() < deadline) {
     try {
       const HttpResponse response =
-          HttpRequest(host_port, "GET", "/api/v1/capture/status", "", "", deadline);
+          HttpRequest(host_port, "GET", "/api/v1/capture/status", control_token, "", deadline);
       if (response.status != 200) {
         latest_diagnostic = "capture status returned HTTP " + std::to_string(response.status);
       } else {
@@ -655,10 +688,12 @@ Json WaitForMissedShotStandby(std::uint16_t host_port, std::uint64_t minimum_aud
   throw std::runtime_error("joint pose/audio standby was not ready: " + latest_diagnostic);
 }
 
-void VerifyConfiguredNode(std::uint16_t host_port, std::string_view role, Json &report,
+void VerifyConfiguredNode(std::uint16_t host_port, std::string_view control_token,
+                          std::string_view role, Json &report,
                           const std::filesystem::path &report_path,
                           std::chrono::steady_clock::time_point deadline) {
-  const HttpResponse response = HttpRequest(host_port, "GET", "/api/v1/node", "", "", deadline);
+  const HttpResponse response =
+      HttpRequest(host_port, "GET", "/api/v1/node", control_token, "", deadline);
   if (response.status != 200) {
     throw std::runtime_error("node configuration returned HTTP " + std::to_string(response.status));
   }
@@ -788,15 +823,15 @@ pose_hil::StandbyMissedEvidence RunStandbyMissedShotWorkflow(
     std::uint16_t host_port, std::string &control_token, Json &report,
     const std::filesystem::path &report_path, std::chrono::steady_clock::time_point started,
     std::chrono::steady_clock::time_point deadline) {
-  VerifyConfiguredNode(host_port, role, report, report_path, deadline);
-  const Json before_sleep =
-      WaitForMissedShotStandby(host_port, 24'000, 3, 1, report, report_path, started, deadline);
+  control_token = ReadControlToken(adb, serial, deadline);
+  VerifyConfiguredNode(host_port, control_token, role, report, report_path, deadline);
+  const Json before_sleep = WaitForMissedShotStandby(host_port, control_token, 24'000, 3, 1, report,
+                                                     report_path, started, deadline);
   const pose_hil::PoseStatusSample before_sample = pose_hil::InspectPoseStatus(before_sleep.dump());
   if (!before_sample.valid) {
     throw std::runtime_error(before_sample.diagnostic);
   }
   report["actual_delegate"] = before_sample.actual_delegate;
-  control_token = ReadControlToken(adb, serial, deadline);
   SleepAndVerifyDisplayOff(adb, serial, report, report_path, deadline);
 
   const auto tag_readiness_deadline = deadline - kMissedShotPostTagReserve;
@@ -804,11 +839,11 @@ pose_hil::StandbyMissedEvidence RunStandbyMissedShotWorkflow(
     throw std::runtime_error(
         "insufficient HIL time remains to collect three standby JPEGs before post-roll");
   }
-  const Json screen_off_status =
-      WaitForMissedShotStandby(host_port, before_sample.standby_audio_end_frame_position + 24'000,
-                               before_sample.successful_inferences + 1,
-                               std::max<std::uint64_t>(3, before_sample.encoded_evidence_frames),
-                               report, report_path, started, tag_readiness_deadline);
+  const Json screen_off_status = WaitForMissedShotStandby(
+      host_port, control_token, before_sample.standby_audio_end_frame_position + 24'000,
+      before_sample.successful_inferences + 1,
+      std::max<std::uint64_t>(3, before_sample.encoded_evidence_frames), report, report_path,
+      started, tag_readiness_deadline);
   const pose_hil::PoseStatusSample screen_off_sample =
       pose_hil::InspectPoseStatus(screen_off_status.dump());
   if (!screen_off_sample.valid ||
@@ -844,7 +879,7 @@ pose_hil::StandbyMissedEvidence RunStandbyMissedShotWorkflow(
   bool published = false;
   while (std::chrono::steady_clock::now() < deadline) {
     const HttpResponse sessions =
-        HttpRequest(host_port, "GET", "/api/v1/sessions", "", "", deadline);
+        HttpRequest(host_port, "GET", "/api/v1/sessions", control_token, "", deadline);
     if (sessions.status == 200) {
       for (const Json &session : Json::parse(sessions.body).at("sessions")) {
         if (session.value("session_id", "") == session_id &&
@@ -869,8 +904,10 @@ pose_hil::StandbyMissedEvidence RunStandbyMissedShotWorkflow(
 }
 
 std::set<std::string, std::less<>> PublishedStandbyDiagnosticIds(
-    std::uint16_t host_port, std::chrono::steady_clock::time_point deadline) {
-  const HttpResponse sessions = HttpRequest(host_port, "GET", "/api/v1/sessions", "", "", deadline);
+    std::uint16_t host_port, std::string_view control_token,
+    std::chrono::steady_clock::time_point deadline) {
+  const HttpResponse sessions =
+      HttpRequest(host_port, "GET", "/api/v1/sessions", control_token, "", deadline);
   if (sessions.status != 200) {
     throw std::runtime_error("session list returned HTTP " + std::to_string(sessions.status));
   }
@@ -909,9 +946,10 @@ pose_hil::StandbyMissedEvidence RunStandbyImpactWorkflow(
     std::uint16_t host_port, std::string &control_token, Json &report,
     const std::filesystem::path &report_path, std::chrono::steady_clock::time_point started,
     std::chrono::steady_clock::time_point deadline) {
-  VerifyConfiguredNode(host_port, role, report, report_path, deadline);
-  const Json ready =
-      WaitForMissedShotStandby(host_port, 48'000, 3, 3, report, report_path, started, deadline);
+  control_token = ReadControlToken(adb, serial, deadline);
+  VerifyConfiguredNode(host_port, control_token, role, report, report_path, deadline);
+  const Json ready = WaitForMissedShotStandby(host_port, control_token, 48'000, 3, 3, report,
+                                              report_path, started, deadline);
   const pose_hil::PoseStatusSample ready_sample = pose_hil::InspectPoseStatus(ready.dump());
   const Json &ready_audio = ready.at("pose").at("standby_audio");
   if (!ready_sample.valid || ready_audio.value("pending_events", -1) != 0) {
@@ -922,8 +960,7 @@ pose_hil::StandbyMissedEvidence RunStandbyImpactWorkflow(
   const std::uint64_t baseline_published =
       ready_audio.at("published_sessions").get<std::uint64_t>();
   const std::set<std::string, std::less<>> baseline_ids =
-      PublishedStandbyDiagnosticIds(host_port, deadline);
-  control_token = ReadControlToken(adb, serial, deadline);
+      PublishedStandbyDiagnosticIds(host_port, control_token, deadline);
   report["actual_delegate"] = ready_sample.actual_delegate;
   report["standby_impact_baseline"] = {
       {"detected_events", baseline_detected},
@@ -952,7 +989,7 @@ pose_hil::StandbyMissedEvidence RunStandbyImpactWorkflow(
   std::string published_session_id;
   while (std::chrono::steady_clock::now() < deadline) {
     const HttpResponse status_response =
-        HttpRequest(host_port, "GET", "/api/v1/capture/status", "", "", deadline);
+        HttpRequest(host_port, "GET", "/api/v1/capture/status", control_token, "", deadline);
     if (status_response.status == 200) {
       AppendStatusEvidence(report, status_response.body, started, report_path);
       const Json status = Json::parse(status_response.body);
@@ -967,7 +1004,7 @@ pose_hil::StandbyMissedEvidence RunStandbyImpactWorkflow(
           operator_tags != baseline_operator_tags || published > baseline_published + 1U) {
         throw std::runtime_error("standby impact counters or joint pose/audio health are invalid");
       }
-      const auto current_ids = PublishedStandbyDiagnosticIds(host_port, deadline);
+      const auto current_ids = PublishedStandbyDiagnosticIds(host_port, control_token, deadline);
       std::vector<std::string> new_ids;
       std::ranges::set_difference(current_ids, baseline_ids, std::back_inserter(new_ids));
       if (new_ids.size() > 1U) {
@@ -996,7 +1033,7 @@ pose_hil::StandbyMissedEvidence RunStandbyImpactWorkflow(
       pose_hil::StandbyDiagnosticExpectation::kAutomaticImpact, report, report_path, deadline);
 }
 
-Json WaitForDebugPoseStandby(std::uint16_t host_port, Json &report,
+Json WaitForDebugPoseStandby(std::uint16_t host_port, std::string_view control_token, Json &report,
                              const std::filesystem::path &report_path,
                              std::chrono::steady_clock::time_point started,
                              std::chrono::steady_clock::time_point deadline) {
@@ -1004,7 +1041,7 @@ Json WaitForDebugPoseStandby(std::uint16_t host_port, Json &report,
   while (std::chrono::steady_clock::now() < deadline) {
     try {
       const HttpResponse response =
-          HttpRequest(host_port, "GET", "/api/v1/capture/status", "", "", deadline);
+          HttpRequest(host_port, "GET", "/api/v1/capture/status", control_token, "", deadline);
       if (response.status != 200) {
         latest_diagnostic = "capture status returned HTTP " + std::to_string(response.status);
       } else {
@@ -1041,14 +1078,14 @@ Json WaitForDebugPoseStandby(std::uint16_t host_port, Json &report,
   throw std::runtime_error("debug pose standby was not ready: " + latest_diagnostic);
 }
 
-void WaitForHighSpeedReady(std::uint16_t host_port, Json &report,
+void WaitForHighSpeedReady(std::uint16_t host_port, std::string_view control_token, Json &report,
                            const std::filesystem::path &report_path,
                            std::chrono::steady_clock::time_point started,
                            std::chrono::steady_clock::time_point deadline) {
   while (std::chrono::steady_clock::now() < deadline) {
     try {
       const HttpResponse response =
-          HttpRequest(host_port, "GET", "/api/v1/capture/status", "", "", deadline);
+          HttpRequest(host_port, "GET", "/api/v1/capture/status", control_token, "", deadline);
       if (response.status == 200) {
         AppendStatusEvidence(report, response.body, started, report_path);
         const Json status = Json::parse(response.body);
@@ -1083,8 +1120,8 @@ pose_hil::WarmRetainedEvidence RunWarmRetainedWorkflow(
         "insufficient HIL time remains to collect three warm-preview JPEGs before capture");
   }
   control_token = ReadControlToken(adb, serial, standby_readiness_deadline);
-  const Json monitoring_status =
-      WaitForDebugPoseStandby(host_port, report, report_path, started, standby_readiness_deadline);
+  const Json monitoring_status = WaitForDebugPoseStandby(
+      host_port, control_token, report, report_path, started, standby_readiness_deadline);
   const pose_hil::PoseStatusSample monitoring_sample =
       pose_hil::InspectPoseStatus(monitoring_status.dump());
   if (!pose_hil::HasMinimumEncodedPoseEvidence(monitoring_sample, 3)) {
@@ -1124,7 +1161,7 @@ pose_hil::WarmRetainedEvidence RunWarmRetainedWorkflow(
   if (remaining_after_pose_arm < kWarmPostArmReserve) {
     throw std::runtime_error("pose-arm was not accepted with the required 8.5 second reserve");
   }
-  WaitForHighSpeedReady(host_port, report, report_path, started, deadline);
+  WaitForHighSpeedReady(host_port, control_token, report, report_path, started, deadline);
   report["high_speed_armed"] = true;
   PersistReport(report_path, report);
 
@@ -1145,7 +1182,7 @@ pose_hil::WarmRetainedEvidence RunWarmRetainedWorkflow(
   bool published = false;
   while (std::chrono::steady_clock::now() < deadline) {
     const HttpResponse sessions =
-        HttpRequest(host_port, "GET", "/api/v1/sessions", "", "", deadline);
+        HttpRequest(host_port, "GET", "/api/v1/sessions", control_token, "", deadline);
     if (sessions.status == 200) {
       for (const Json &session : Json::parse(sessions.body).at("sessions")) {
         if (session.value("session_id", "") == session_id &&
@@ -1246,6 +1283,22 @@ int Run(int argument_count, char **arguments) {
   if (role != "down_the_line" && role != "face_on") {
     throw std::runtime_error("SWING_CAPTURE_ANDROID_ROLE must be down_the_line or face_on");
   }
+  const std::string delegate_policy = ResolveDelegatePolicy();
+  const pose_hil::PoseExperimentHilInputs pose_experiment =
+      pose_hil::ResolvePoseExperimentHilInputs(
+          EnvironmentValue("SWING_CAPTURE_ANDROID_POSE_MODEL"),
+          EnvironmentValue("SWING_CAPTURE_ANDROID_POSE_INPUT_SIZE"));
+  const bool require_latency_qualification = RequireLatencyQualification();
+  if ((warm_retained || standby_missed_shot || standby_impact) &&
+      delegate_policy != "gpu_preferred") {
+    throw std::runtime_error(
+        "delegate comparison is supported only by android_pose_standby_hil_test");
+  }
+  if ((warm_retained || standby_missed_shot || standby_impact) &&
+      !pose_hil::IsProductionEquivalent(pose_experiment)) {
+    throw std::runtime_error(
+        "model/input comparison is supported only by android_pose_standby_hil_test");
+  }
 
   const auto started = std::chrono::steady_clock::now();
   const auto deadline = started + kTotalDeadline;
@@ -1264,7 +1317,11 @@ int Run(int argument_count, char **arguments) {
       {"role", role},
       {"capture_profile", "720p240"},
       {"pose_mode", "shadow"},
-      {"configured_delegate", "gpu_preferred"},
+      {"configured_delegate", delegate_policy},
+      {"configured_model_variant", pose_experiment.model_variant},
+      {"configured_model_asset", "pose_landmarker_" + pose_experiment.model_variant + ".task"},
+      {"configured_standby_width", pose_experiment.standby_width},
+      {"configured_standby_height", pose_experiment.standby_height},
       {"debug_evidence_enabled", warm_retained || standby_missed_shot || standby_impact},
       {"acceptance",
        {{"minimum_interval_seconds", 2.0},
@@ -1275,6 +1332,10 @@ int Run(int argument_count, char **arguments) {
         {"maximum_standby_audio_dropped_events", 0},
         {"maximum_standby_audio_discontinuities", 0},
         {"maximum_startup_audio_timestamp_rejections", 2}}},
+      {"latency_acceptance",
+       {{"required", require_latency_qualification},
+        {"maximum_inference_p95_ns", 200'000'000},
+        {"maximum_inference_outlier_ns", 400'000'000}}},
       {"status_samples", Json::array()},
   };
   if (warm_retained) {
@@ -1360,7 +1421,9 @@ int Run(int argument_count, char **arguments) {
     }
     host_port = EstablishForward(adb, serial, deadline);
     RunRequiredAdb(
-        adb, StartArguments(serial, role, warm_retained || standby_missed_shot || standby_impact),
+        adb,
+        StartArguments(serial, role, delegate_policy,
+                       warm_retained || standby_missed_shot || standby_impact, pose_experiment),
         deadline);
 
     if (warm_retained) {
@@ -1448,13 +1511,14 @@ int Run(int argument_count, char **arguments) {
       return 0;
     }
 
+    control_token = ReadControlToken(adb, serial, deadline);
     std::optional<pose_hil::PoseStatusSample> first;
     std::optional<pose_hil::PoseCadenceAcceptance> acceptance;
     std::string latest_diagnostic = "pose status endpoint has not answered";
     while (std::chrono::steady_clock::now() < deadline) {
       try {
         const HttpResponse response =
-            HttpRequest(*host_port, "GET", "/api/v1/capture/status", "", "", deadline);
+            HttpRequest(*host_port, "GET", "/api/v1/capture/status", control_token, "", deadline);
         if (response.status != 200) {
           latest_diagnostic = "capture status returned HTTP " + std::to_string(response.status);
         } else {
@@ -1466,6 +1530,19 @@ int Run(int argument_count, char **arguments) {
                                                 .count();
           report["status_samples"].push_back(std::move(evidence));
           PersistReport(report_path, report);
+          const Json &pose = report["status_samples"].back().at("pose");
+          if (sample.valid &&
+              (!pose.value("experiment_enabled", false) ||
+               pose.value("model_variant", "") != pose_experiment.model_variant ||
+               pose.value("model_asset_path", "") !=
+                   "pose_landmarker_" + pose_experiment.model_variant + ".task" ||
+               pose.value("requested_standby_width", 0U) != pose_experiment.standby_width ||
+               pose.value("requested_standby_height", 0U) != pose_experiment.standby_height ||
+               pose.value("actual_standby_width", 0U) != pose_experiment.standby_width ||
+               pose.value("actual_standby_height", 0U) != pose_experiment.standby_height)) {
+            throw std::runtime_error(
+                "phone did not apply the exact pose model/input experiment configuration");
+          }
           if (sample.valid &&
               (sample.failed_inferences != 0 || sample.standby_audio_dropped_events != 0 ||
                sample.standby_audio_discontinuities != 0 ||
@@ -1475,7 +1552,7 @@ int Run(int argument_count, char **arguments) {
             break;
           }
           if (sample.valid && sample.phase == "monitoring" && sample.mode == "shadow" &&
-              sample.configured_delegate == "gpu_preferred" && sample.armed &&
+              sample.configured_delegate == delegate_policy && sample.armed &&
               sample.successful_inferences > 0 && sample.standby_audio_ready &&
               sample.standby_audio_end_frame_position > 0) {
             if (!first.has_value()) {
@@ -1516,6 +1593,30 @@ int Run(int argument_count, char **arguments) {
     }
     const Json &last_status = report["status_samples"].back();
     report["actual_delegate"] = last_status.at("pose").at("metrics").at("delegate");
+    report["actual_model_variant"] = last_status.at("pose").at("model_variant");
+    report["actual_standby_width"] = last_status.at("pose").at("actual_standby_width");
+    report["actual_standby_height"] = last_status.at("pose").at("actual_standby_height");
+    const pose_hil::PoseStatusSample last_sample = pose_hil::InspectPoseStatus(last_status.dump());
+    const pose_hil::PoseLatencyAcceptance latency = pose_hil::EvaluatePoseLatency(last_sample);
+    report["latency_acceptance"].update(
+        {{"passed", latency.passed},
+         {"diagnostic", latency.diagnostic},
+         {"successful_warmup_inferences", last_sample.successful_warmup_inferences},
+         {"failed_warmup_inferences", last_sample.failed_warmup_inferences},
+         {"warmup_duration_ns", last_sample.total_warmup_duration_ns},
+         {"successful_inferences", last_sample.successful_inferences},
+         {"inference_duration_p50_ns", last_sample.inference_duration_p50_ns},
+         {"inference_duration_p90_ns", last_sample.inference_duration_p90_ns},
+         {"inference_duration_p95_ns", last_sample.inference_duration_p95_ns},
+         {"inference_duration_p99_ns", last_sample.inference_duration_p99_ns},
+         {"maximum_inference_duration_ns", last_sample.maximum_inference_duration_ns},
+         {"inference_deadline_misses", last_sample.inference_deadline_misses},
+         {"inference_outliers", last_sample.inference_outliers},
+         {"decision_age_p95_ns", last_sample.decision_age_p95_ns},
+         {"maximum_decision_age_ns", last_sample.maximum_decision_age_ns}});
+    if (require_latency_qualification && !latency.passed) {
+      throw std::runtime_error("pose latency qualification failed: " + latency.diagnostic);
+    }
 
     const pose_hil::DeviceTelemetry after = CollectTelemetry(adb, serial, deadline);
     report["telemetry_after"] = TelemetryJson(after);

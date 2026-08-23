@@ -1,4 +1,5 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 
 exports_files(
@@ -32,4 +33,282 @@ py_test(
     srcs = ["unattended_hil_test.py"],
     legacy_create_init = False,
     deps = [":run_unattended_hil"],
+)
+
+py_binary(
+    name = "bazel_bep_summary",
+    srcs = ["bazel_bep_summary.py"],
+    legacy_create_init = False,
+)
+
+py_test(
+    name = "bazel_bep_summary_test",
+    size = "small",
+    srcs = ["bazel_bep_summary_test.py"],
+    legacy_create_init = False,
+    deps = [":bazel_bep_summary"],
+)
+
+py_binary(
+    name = "bazel_iteration_profile",
+    srcs = ["bazel_iteration_profile.py"],
+    legacy_create_init = False,
+)
+
+py_test(
+    name = "bazel_iteration_profile_test",
+    size = "small",
+    srcs = ["bazel_iteration_profile_test.py"],
+    legacy_create_init = False,
+    deps = [":bazel_iteration_profile"],
+)
+
+py_binary(
+    name = "android_pair_doctor",
+    srcs = ["android_pair_doctor.py"],
+    args = ["$(rootpath //tools/android:adb)"],
+    data = ["//tools/android:adb"],
+    deps = [":android_apk_installer_lib"],
+    legacy_create_init = False,
+)
+
+py_binary(
+    name = "android_pair_doctor_current_apk",
+    srcs = ["android_pair_doctor.py"],
+    main = "android_pair_doctor.py",
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "--expected-apk",
+        "$(rootpath //android/app:swing_capture.apk)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    deps = [":android_apk_installer_lib"],
+    legacy_create_init = False,
+    visibility = ["//tools/field_preflight:__pkg__"],
+)
+
+py_test(
+    name = "android_pair_doctor_test",
+    size = "small",
+    srcs = ["android_pair_doctor_test.py"],
+    legacy_create_init = False,
+    deps = [
+        ":android_apk_installer_lib",
+        ":android_pair_doctor",
+    ],
+)
+
+py_library(
+    name = "android_capability_report_lib",
+    srcs = ["android_capability_report.py"],
+    deps = [":android_apk_installer_lib"],
+)
+
+py_binary(
+    name = "android_capability_report",
+    srcs = ["android_capability_report_main.py"],
+    main = "android_capability_report_main.py",
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "--expected-apk",
+        "$(rootpath //android/app:swing_capture.apk)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    deps = [":android_capability_report_lib"],
+    legacy_create_init = False,
+)
+
+py_test(
+    name = "android_capability_report_test",
+    size = "small",
+    srcs = ["android_capability_report_test.py"],
+    legacy_create_init = False,
+    deps = [
+        ":android_capability_report_lib",
+    ],
+)
+
+py_binary(
+    name = "pair_clock_operational_summary",
+    srcs = ["pair_clock_operational_summary.py"],
+    legacy_create_init = False,
+)
+
+py_test(
+    name = "pair_clock_operational_summary_test",
+    size = "small",
+    srcs = ["pair_clock_operational_summary_test.py"],
+    legacy_create_init = False,
+    deps = [":pair_clock_operational_summary"],
+)
+
+# One hermetic checkpoint for the contracts that previously failed only after
+# moving the phones into the hitting area. Physical admission remains the
+# separate //tools:android_pair_doctor invocation documented in docs/testing.md.
+test_suite(
+    name = "pre_field_integration_tests",
+    tests = [
+        ":android_capability_report_test",
+        ":android_apk_installer_test",
+        ":android_pair_doctor_test",
+        ":pair_clock_operational_summary_test",
+        "//android/app:android_manifest_policy_test",
+        "//android/app:boot_recovery_marker_test",
+        "//android/app:autonomous_pair_durable_store_test",
+        "//android/app:automatic_trigger_readiness_gate_test",
+        "//android/app:autonomous_pair_peer_client_test",
+        "//android/app:camera_encoder_timestamp_alignment_test",
+        "//android/app:capture_startup_timing_manifest_test",
+        "//android/app:capture_startup_timing_test",
+        "//android/app:continuous_capture_continuity_diagnostic_test",
+        "//android/app:control_credential_rotation_policy_test",
+        "//android/app:coordination_http_endpoint_test",
+        "//android/app:device_capability_policy_test",
+        "//android/app:diagnostic_export_workspace_manager_test",
+        "//android/app:field_recording_manifest_test",
+        "//android/app:field_recording_publisher_test",
+        "//android/app:field_recording_start_fault_test",
+        "//android/app:field_recording_stop_policy_test",
+        "//android/app:lan_discovery_address_test",
+        "//android/app:lan_node_discovery_registry_test",
+        "//android/app:node_configuration_process_lock_test",
+        "//android/app:node_http_protocol_test",
+        "//android/app:node_http_request_parser_test",
+        "//android/app:node_setup_policy_test",
+        "//android/app:peer_arm_status_tracker_test",
+        "//android/app:peer_audio_impact_selection_test",
+        "//android/app:peer_clock_client_test",
+        "//android/app:peer_clock_synchronizer_test",
+        "//android/app:peer_credential_status_policy_test",
+        "//android/app:peer_impact_mapping_manifest_test",
+        "//android/app:peer_pairing_binding_test",
+        "//android/app:peer_setup_verification_retrier_test",
+        "//android/app:peer_transport_security_policy_test",
+        "//android/app:pose_external_arm_lifecycle_test",
+        "//android/app:pose_high_speed_no_impact_deadline_test",
+        "//android/app:pose_high_speed_timeout_lifecycle_test",
+        "//android/app:pose_peer_arm_client_test",
+        "//android/app:pose_standby_metrics_test",
+        "//android/app:session_diagnostic_archive_test",
+        "//android/app:session_diagnostic_store_test",
+        "//android/app:session_staging_cleanup_test",
+        "//android/app:setup_preview_provider_test",
+        "//android/app:standby_diagnostic_session_publisher_test",
+        "//android/app:standby_diagnostic_session_registry_test",
+        "//android/app:standby_diagnostic_telemetry_test",
+        "//android/app:static_web_asset_route_test",
+        "//android/app:streaming_timestamp_calibrator_test",
+        "//android/app:unattended_recovery_policy_test",
+        "//android/app:warm_capture_transition_timing_test",
+        "//android/core/audio:audio_timestamp_mapper_test",
+        "//android/core/audio:continuous_audio_impact_detector_test",
+        "//android/core/coordination:autonomous_pair_lifecycle_test",
+        "//android/core/coordination:clock_exchange_estimator_test",
+        "//android/core/coordination:coordination_record_store_test",
+        "//android/core/coordination:dual_node_swing_associator_test",
+        "//android/core/diagnostics:diagnostic_incident_test",
+        "//android/core/diagnostics:preview_evidence_ring_test",
+        "//android/core/node:node_core_test",
+        "//android/core/pose:pose_field_session_replay_test",
+        "//android/core/pose:pose_trigger_controller_test",
+        "//android/core/pose:pose_trigger_replay_test",
+        "//android/core/retention:encoded_access_unit_retention_test",
+        "//android/core/standby_diagnostics:standby_diagnostic_coordinator_test",
+        "//android/core/trigger:combined_trigger_lifecycle_test",
+        "//android/dual_hil:android_apk_install_test",
+        "//android/dual_hil:audio_evidence_validation_test",
+        "//android/dual_hil:autonomous_recovery_validation_test",
+        "//android/dual_hil:concurrent_hil_validation_test",
+        "//android/dual_hil:configuration_recovery_journal_test",
+        "//android/dual_hil:dual_session_validation_test",
+        "//android/dual_hil:field_recording_async_start_failure_validation_test",
+        "//android/dual_hil:field_recording_smoke_validation_test",
+        "//android/dual_hil:field_recording_hil_transport_test",
+        "//android/dual_hil:field_recording_partial_start_validation_test",
+        "//android/dual_hil:hil_artifact_validation_test",
+        "//android/dual_hil:hil_cleanup_evidence_test",
+        "//android/dual_hil:hil_command_test",
+        "//android/dual_hil:hil_http_client_test",
+        "//android/dual_hil:os_reboot_ceremony_validation_test",
+        "//android/dual_hil:paired_pose_qualification_policy_test",
+        "//android/dual_hil:pcm_replay_case_test",
+        "//android/dual_hil:retained_media_analysis_test",
+        "//android/dual_hil:timing_calibration_evidence_test",
+        "//android/hil:android_probe_hil_support_test",
+        "//android/hil:pose_replay_report_validation_test",
+        "//android/pose_hil:pose_experiment_hil_support_test",
+        "//android/pose_hil:pose_qualification_performance_test",
+        "//android/pose_hil:pose_replay_hil_support_test",
+        "//android/pose_hil:pose_standby_validation_test",
+        "//android/pose_hil:standby_missed_validation_test",
+        "//android/pose_hil:warm_retained_validation_test",
+        "//android/pose_inference:pose_inference_core_test",
+        "//capture/offline/experiments/envelope:streaming_envelope_detector_test",
+        "//tools/field_feedback:collector_test",
+        "//tools/field_evidence:audio_holdout_executable_test",
+        "//tools/field_evidence:audio_holdout_compare_test",
+        "//tools/field_evidence:audio_holdout_test",
+        "//tools/field_evidence:audio_policy_lock_test",
+        "//tools/field_evidence:envelope_audio_predictions_test",
+        "//tools/field_evidence:manifest_test",
+        "//tools/field_evidence:output_test",
+        "//tools/field_evidence:production_audio_predictions_test",
+        "//tools/field_preflight:admission_test",
+        "//tools/field_preflight:executable_smoke_test",
+        "//web:android_browser_hil_credentials_test",
+        "//web:android_field_recording_browser_hil_report_validation_test",
+        "//web:android_field_recording_browser_hil_typescript_typecheck_test",
+        "//web:android_field_recording_hil_contract_test",
+        "//web:browser_test",
+        "//web:control_credential_bootstrap_test",
+        "//web:dual_node_review_api_test",
+        "//web:live_status_test",
+        "//web:node_pairing_test",
+        "//web:node_setup_pairing_test",
+        "//web:node_setup_preview_test",
+        "//web:review_component_test",
+        "//web:typescript_typecheck_test",
+    ],
+)
+
+py_library(
+    name = "android_apk_installer_lib",
+    srcs = ["android_apk_installer.py"],
+    visibility = ["//visibility:private"],
+)
+
+py_binary(
+    name = "android_apk_installer",
+    srcs = ["android_apk_installer_main.py"],
+    main = "android_apk_installer_main.py",
+    args = [
+        "$(rootpath //tools/android:adb)",
+        "--apk",
+        "$(rootpath //android/app:swing_capture.apk)",
+    ],
+    data = [
+        "//android/app:swing_capture.apk",
+        "//tools/android:adb",
+    ],
+    legacy_create_init = False,
+    tags = ["manual"],
+    visibility = [
+        "//android/dual_hil:__pkg__",
+        "//web:__pkg__",
+    ],
+    deps = [":android_apk_installer_lib"],
+)
+
+py_test(
+    name = "android_apk_installer_test",
+    size = "small",
+    srcs = ["android_apk_installer_test.py"],
+    legacy_create_init = False,
+    deps = [":android_apk_installer_lib"],
 )

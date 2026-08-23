@@ -12,6 +12,11 @@ java_library(
     ],
 )
 
+filegroup(
+    name = "impact_detector_source",
+    srcs = ["java/com/agoessling/swingcapture/audio/ImpactDetector.java"],
+)
+
 java_library(
     name = "pcm16_evidence_ring",
     srcs = ["java/com/agoessling/swingcapture/audio/Pcm16EvidenceRing.java"],

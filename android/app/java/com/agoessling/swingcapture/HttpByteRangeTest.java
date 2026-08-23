@@ -10,11 +10,23 @@ public final class HttpByteRangeTest {
     checkRange(HttpByteRange.parse("bytes=90-", 100), 90, 99);
     checkRange(HttpByteRange.parse("bytes=-8", 100), 92, 99);
     checkRange(HttpByteRange.parse("bytes=95-500", 100), 95, 99);
+    checkRange(HttpByteRange.parse("bytes=10-", 100).limitLength(16), 10, 25);
+    checkRange(HttpByteRange.parse("bytes=90-", 100).limitLength(16), 90, 99);
+    expectInvalidLimit(0);
     expectInvalid("bytes=100-", 100);
     expectInvalid("bytes=20-10", 100);
     expectInvalid("bytes=0-1,4-5", 100);
     expectInvalid("items=0-1", 100);
     expectInvalid("bytes=-0", 100);
+  }
+
+  private static void expectInvalidLimit(long maximumLength) {
+    try {
+      HttpByteRange.entireFile(100).limitLength(maximumLength);
+      throw new AssertionError("invalid range response limit accepted");
+    } catch (IllegalArgumentException expected) {
+      // Expected.
+    }
   }
 
   private static void checkRange(HttpByteRange range, long start, long end) {

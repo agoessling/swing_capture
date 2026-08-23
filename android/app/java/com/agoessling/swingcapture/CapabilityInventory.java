@@ -32,13 +32,16 @@ public final class CapabilityInventory {
 
   public static JSONObject collect(Context context, NodeConfiguration configuration)
       throws Exception {
+    CaptureProfile selectedProfile = configuration.captureProfile();
+    DeviceCapabilityPolicy.HardwareSnapshot productHardware =
+        AndroidDeviceCapabilityProbe.collectOrUnavailable(context);
     JSONObject report = new JSONObject();
     report.put("schema_version", 1);
     report.put("report_type", "android_capability_inventory");
     report.put("created_at_utc", Instant.now().toString());
     report.put("node_id", configuration.nodeId());
     report.put("role", configuration.role().wireName());
-    report.put("capture_profile", configuration.captureProfile().wireName());
+    report.put("capture_profile", selectedProfile.wireName());
     report.put("device", deviceJson());
     report.put("permissions", permissionJson(context));
     report.put("power", powerJson(context));
@@ -46,7 +49,55 @@ public final class CapabilityInventory {
     report.put("audio", audioJson());
     report.put("encoders", encoderJson());
     report.put("cameras", cameraJson(context));
+    report.put("product_floor_assessment", productFloorJson(productHardware, selectedProfile));
     return report;
+  }
+
+  private static JSONObject productFloorJson(
+      DeviceCapabilityPolicy.HardwareSnapshot hardware, CaptureProfile profile) throws Exception {
+    DeviceCapabilityPolicy.Assessment assessment = DeviceCapabilityPolicy.assess(hardware, profile);
+    DeviceCapabilityPolicy.InferenceContract inference =
+        DeviceCapabilityPolicy.inferenceContract();
+    JSONArray issues = new JSONArray();
+    for (DeviceCapabilityPolicy.Issue issue : assessment.issues()) {
+      issues.put(
+          new JSONObject()
+              .put("code", issue.code().name().toLowerCase(java.util.Locale.ROOT))
+              .put("message", issue.message()));
+    }
+    return new JSONObject()
+        .put("schema_version", 1)
+        .put("minimum_api_level", DeviceCapabilityPolicy.MINIMUM_API_LEVEL)
+        .put("selected_profile", profile.wireName())
+        .put("ready", assessment.ready())
+        .put("probe_succeeded", hardware.probeSucceeded())
+        .put("probe_diagnostic", hardware.probeSucceeded() ? JSONObject.NULL : hardware.probeFailure())
+        .put(
+            "measured",
+            new JSONObject()
+                .put("api_level", hardware.apiLevel())
+                .put("camera_permission", hardware.cameraPermission())
+                .put("audio_permission", hardware.audioPermission())
+                .put("rear_realtime_camera_720p240", hardware.rearRealtimeCamera720p240())
+                .put("rear_realtime_camera_1080p240", hardware.rearRealtimeCamera1080p240())
+                .put("hardware_avc_720p240", hardware.hardwareAvc720p240())
+                .put("hardware_avc_1080p240", hardware.hardwareAvc1080p240())
+                .put("pcm16_mono_48khz", hardware.pcm16Mono48Khz())
+                .put(
+                    "required_opengl_es_version_hex",
+                    String.format("0x%08x", hardware.requiredOpenGlEsVersion())))
+        .put(
+            "production_pose",
+            new JSONObject()
+                .put("model", inference.model())
+                .put("input_width", inference.inputWidth())
+                .put("input_height", inference.inputHeight())
+                .put("cadence_hz", inference.cadenceHz())
+                .put("delegate_selection_scope", inference.delegateSelectionScope())
+                .put(
+                    "device_fallback_can_affect_peer",
+                    inference.deviceFallbackCanAffectPeer()))
+        .put("issues", issues);
   }
 
   private static JSONObject deviceJson() throws JSONException {

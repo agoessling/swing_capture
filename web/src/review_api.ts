@@ -1,8 +1,21 @@
+import { controlCredentialValue, type ControlCredential } from "./control_credential.js";
+import {
+  LiveStatusCursor,
+  parseLiveStatusVersion,
+  subscribeToReconnectableStatus,
+  type LiveStatusVersion,
+  type StatusSubscriptionOptions,
+} from "./live_status.js";
+import { parseOperationalHealth, type OperationalHealth } from "./operational_health.js";
+
 export const REVIEW_SCHEMA_VERSION = 1 as const;
 export const PIPELINE_PROFILE_SCHEMA_VERSION = 3 as const;
 export const CAPTURE_SCHEMA_VERSION = 2 as const;
 export const DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION = 1 as const;
 export const MAX_DIAGNOSTIC_NOTE_LENGTH = 500;
+
+const MEDIA_ACCESS_RESPONSE_HEADER = "X-Swing-Capture-Media-Access";
+const MEDIA_ACCESS_QUERY_PATTERN = /^media_access=[A-Za-z0-9_-]{43}$/;
 
 export const DIAGNOSTIC_CLASSIFICATIONS = [
   "good_capture",
@@ -78,6 +91,8 @@ export interface CaptureStatus {
   error: string;
   hil: SyntheticSwingHilStatus;
   pose?: PoseCaptureStatus;
+  operational_health?: OperationalHealth;
+  live_status?: LiveStatusVersion;
 }
 
 export const PEER_ARM_STATES = [
@@ -117,6 +132,16 @@ export interface SessionSummary {
   created_at_utc: string;
   error: string;
   session_kind?: SessionKind;
+  android_capture?: AndroidSessionSummaryMetadata;
+}
+
+/** Pairing metadata Android can expose without sending the full clip manifest. */
+export interface AndroidSessionSummaryMetadata {
+  node_id: string;
+  shared_session_id: string | null;
+  role: ReviewRole;
+  /** Present on current nodes; omitted by legacy fixtures/nodes that require lazy fallback. */
+  coordination_available?: boolean;
 }
 
 export interface SessionList {
@@ -295,6 +320,55 @@ export interface AndroidCaptureMetadata {
   peer_arm?: PeerArmStatus;
 }
 
+export const FIELD_RECORDING_STATES = [
+  "idle",
+  "starting",
+  "recording",
+  "stopping",
+  "ready",
+  "error",
+] as const;
+
+export type FieldRecordingState = (typeof FIELD_RECORDING_STATES)[number];
+
+export interface FieldRecordingNodeStatus {
+  schema_version: 1;
+  role: ReviewRole;
+  origin: string;
+  state: FieldRecordingState;
+  active_recording_id: string | null;
+  shared_recording_id: string | null;
+  started_at_utc: string | null;
+  started_elapsed_realtime_ns: string | null;
+  elapsed_ms: number;
+  video_bytes: string;
+  audio_frames: string;
+  max_duration_seconds: number;
+  error: string;
+}
+
+export interface DualFieldRecordingStatus {
+  nodes: readonly FieldRecordingNodeStatus[];
+}
+
+export interface FieldRecording {
+  recording_id: string;
+  shared_recording_id: string;
+  created_at_utc: string;
+  role: ReviewRole;
+  origin: string;
+  duration_us: string;
+  video_bytes: string;
+  audio_frames: string;
+  video_url: string;
+  audio_url: string;
+  manifest_url: string;
+}
+
+export interface FieldRecordingList {
+  recordings: readonly FieldRecording[];
+}
+
 export interface ReviewApi {
   getCaptureStatus(): Promise<CaptureStatus>;
   setArmed(armed: boolean): Promise<CaptureStatus>;
@@ -305,6 +379,11 @@ export interface ReviewApi {
   getManifest(sessionId: string): Promise<ClipManifest>;
   submitDiagnosticFeedback(sessionId: string, feedback: DiagnosticFeedback): Promise<void>;
   getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]>;
+  /** Available when one browser coordinates the two Android field-recording nodes. */
+  getFieldRecordingStatus?(): Promise<DualFieldRecordingStatus>;
+  startFieldRecording?(): Promise<DualFieldRecordingStatus>;
+  stopFieldRecording?(): Promise<DualFieldRecordingStatus>;
+  getFieldRecordings?(): Promise<FieldRecordingList>;
   /**
    * Maximum time a node-local standby diagnostic may remain pending before catalog publication.
    * Coordinators omit this because their synthetic shared ID has no diagnostic artifact route.
@@ -322,25 +401,34 @@ export class HttpReviewApi implements ReviewApi {
   readonly #baseUrl: string;
   readonly #fetcher: Fetcher;
   readonly #now: HighResolutionNow;
-  readonly #controlToken: string;
+  readonly #controlCredential: ControlCredential;
   readonly #eventsSupported: boolean;
+  readonly #statusSubscriptionOptions: StatusSubscriptionOptions;
+  readonly #liveStatusCursor = new LiveStatusCursor();
+  #liveStatusAvailable = true;
 
   constructor(
     baseUrl = "",
     fetcher: Fetcher = globalThis.fetch.bind(globalThis),
     now: HighResolutionNow = highResolutionNow,
-    controlToken = "",
+    controlCredential: ControlCredential = "",
     eventsSupported = baseUrl.length === 0,
+    statusSubscriptionOptions: StatusSubscriptionOptions = {},
   ) {
     this.#baseUrl = baseUrl.replace(/\/$/, "");
     this.#fetcher = fetcher;
     this.#now = now;
-    this.#controlToken = controlToken;
+    this.#controlCredential = controlCredential;
     this.#eventsSupported = eventsSupported;
+    this.#statusSubscriptionOptions = statusSubscriptionOptions;
   }
 
   async getCaptureStatus(): Promise<CaptureStatus> {
-    return this.#get("/api/v1/capture/status", parseCaptureStatus);
+    const status = await this.#get("/api/v1/capture/status", parseCaptureStatus);
+    if (!this.#liveStatusAvailable) {
+      throw new Error("Android live status is disconnected or stale");
+    }
+    return status;
   }
 
   async setArmed(armed: boolean): Promise<CaptureStatus> {
@@ -383,7 +471,7 @@ export class HttpReviewApi implements ReviewApi {
     const requestStarted = this.#now();
     const response = await this.#fetcher(
       this.#absoluteUrl(`/api/v1/sessions/${encodedId}/manifest`),
-      { headers: { Accept: "application/json" } },
+      { headers: this.#authorizedHeaders({ Accept: "application/json" }) },
     );
     const responseReceived = this.#now();
     if (!response.ok) {
@@ -401,7 +489,11 @@ export class HttpReviewApi implements ReviewApi {
         ? null
         : asDecimalString(serverMonotonicHeader, "X-Swing-Capture-Server-Monotonic-Ns");
     return {
-      ...resolveManifestMedia(manifest, this.#absoluteUrl(`/api/v1/sessions/${encodedId}/`)),
+      ...resolveManifestMedia(
+        manifest,
+        this.#absoluteUrl(`/api/v1/sessions/${encodedId}/`),
+        mediaAccessQuery(response),
+      ),
       client_delivery_profile: {
         manifest_fetch_duration_ms: nonnegativeDuration(
           responseReceived - requestStarted,
@@ -444,7 +536,26 @@ export class HttpReviewApi implements ReviewApi {
   }
 
   subscribeToChanges(onChange: () => void): (() => void) | undefined {
-    if (!this.#eventsSupported || typeof EventSource === "undefined") {
+    if (!this.#eventsSupported) {
+      return subscribeToReconnectableStatus(
+        async () => {
+          try {
+            const status = await this.#get("/api/v1/capture/status", parseCaptureStatus);
+            if (!this.#liveStatusCursor.accept(status.live_status)) {
+              throw new Error("Android node returned stale live status data");
+            }
+            this.#liveStatusAvailable = true;
+            return status.live_status;
+          } catch (caught) {
+            this.#liveStatusAvailable = false;
+            throw caught;
+          }
+        },
+        onChange,
+        this.#statusSubscriptionOptions,
+      );
+    }
+    if (typeof EventSource === "undefined") {
       return undefined;
     }
     const events = new EventSource(this.#absoluteUrl("/api/v1/events"));
@@ -487,8 +598,9 @@ export class HttpReviewApi implements ReviewApi {
 
   #authorizedHeaders(init: HeadersInit | undefined): Headers {
     const headers = new Headers(init);
-    if (this.#controlToken.length > 0) {
-      headers.set("Authorization", `Bearer ${this.#controlToken}`);
+    const controlToken = controlCredentialValue(this.#controlCredential);
+    if (controlToken.length > 0) {
+      headers.set("Authorization", `Bearer ${controlToken}`);
     }
     return headers;
   }
@@ -550,6 +662,8 @@ export function parseCaptureStatus(value: unknown): CaptureStatus {
     throw new Error(`Unsupported capture schema: ${String(object.schema_version)}`);
   }
   const pose = parsePoseCaptureStatus(object.pose);
+  const operationalHealth = parseOperationalHealth(object.operational_health);
+  const liveStatus = parseLiveStatusVersion(object.live_status);
   return {
     schema_version: CAPTURE_SCHEMA_VERSION,
     state: parseState(object.state, "capture state"),
@@ -558,6 +672,8 @@ export function parseCaptureStatus(value: unknown): CaptureStatus {
     error: asString(object.error, "capture error"),
     hil: parseSyntheticSwingHilStatus(object.hil),
     ...(pose === undefined ? {} : { pose }),
+    ...(operationalHealth === undefined ? {} : { operational_health: operationalHealth }),
+    ...(liveStatus === undefined ? {} : { live_status: liveStatus }),
   };
 }
 
@@ -583,12 +699,40 @@ export function parseSessionSummary(value: unknown): SessionSummary {
   ) {
     throw new Error(`Unsupported session_kind: ${String(sessionKind)}`);
   }
+  const androidCapture = parseAndroidSessionSummaryMetadata(object.android_capture);
   return {
     session_id: asNonemptyString(object.session_id, "session_id"),
     state: parseState(object.state, "session state"),
     created_at_utc: parseTimestamp(object.created_at_utc, "session created_at_utc"),
     error: asString(object.error, "session error"),
     ...(sessionKind === undefined ? {} : { session_kind: sessionKind }),
+    ...(androidCapture === undefined ? {} : { android_capture: androidCapture }),
+  };
+}
+
+function parseAndroidSessionSummaryMetadata(
+  value: unknown,
+): AndroidSessionSummaryMetadata | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const object = asObject(value, "session summary android_capture");
+  const coordinationAvailable = object.coordination_available;
+  return {
+    node_id: asNonemptyString(object.node_id, "session summary android_capture.node_id"),
+    shared_session_id: asNullableString(
+      object.shared_session_id,
+      "session summary android_capture.shared_session_id",
+    ),
+    role: parseRole(object.role),
+    ...(coordinationAvailable === undefined
+      ? {}
+      : {
+          coordination_available: asBoolean(
+            coordinationAvailable,
+            "session summary android_capture.coordination_available",
+          ),
+        }),
   };
 }
 
@@ -1151,7 +1295,11 @@ function parseGeometry(value: unknown, label: string): ClipImageGeometry {
   };
 }
 
-function resolveManifestMedia(manifest: ClipManifest, baseUrl: string): ClipManifest {
+function resolveManifestMedia(
+  manifest: ClipManifest,
+  baseUrl: string,
+  accessQuery: string | null,
+): ClipManifest {
   const absoluteBase = new URL(baseUrl, globalThis.location?.href ?? "http://station.invalid/");
   return {
     ...manifest,
@@ -1159,10 +1307,32 @@ function resolveManifestMedia(manifest: ClipManifest, baseUrl: string): ClipMani
       ...track,
       media: {
         ...track.media,
-        url: new URL(track.media.url ?? track.media.path, absoluteBase).toString(),
+        url: authorizedMediaUrl(track.media.url ?? track.media.path, absoluteBase, accessQuery),
       },
     })),
   };
+}
+
+function mediaAccessQuery(response: Response): string | null {
+  const value = response.headers.get(MEDIA_ACCESS_RESPONSE_HEADER);
+  if (value === null) {
+    return null;
+  }
+  if (!MEDIA_ACCESS_QUERY_PATTERN.test(value)) {
+    throw new Error("Android node returned an invalid scoped media capability");
+  }
+  return value;
+}
+
+function authorizedMediaUrl(path: string, baseUrl: URL, accessQuery: string | null): string {
+  const url = new URL(path, baseUrl);
+  if (accessQuery !== null) {
+    if (url.search.length !== 0) {
+      throw new Error("Persisted media paths cannot contain a query");
+    }
+    url.search = accessQuery;
+  }
+  return url.toString();
 }
 
 async function reviewRequestError(response: Response): Promise<Error> {

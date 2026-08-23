@@ -23,8 +23,16 @@ public record CaptureStartupTiming(
     return Math.subtractExact(firstCameraFrameNs, armRequestedNs);
   }
 
+  public long engineStartToFirstCameraFrameNs() {
+    return Math.subtractExact(firstCameraFrameNs, engineStartedNs);
+  }
+
   public long armToFirstUsableEncodedFrameNs() {
     return Math.subtractExact(firstUsableEncodedFrameNs, armRequestedNs);
+  }
+
+  public long firstCameraFrameToFirstUsableEncodedFrameNs() {
+    return Math.subtractExact(firstUsableEncodedFrameNs, firstCameraFrameNs);
   }
 
   public long armToFullPreRollReadyNs() {

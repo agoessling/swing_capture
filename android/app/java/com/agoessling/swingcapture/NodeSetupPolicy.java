@@ -1,13 +1,16 @@
 package com.agoessling.swingcapture;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 
 /** Pure setup-contract policy shared by strict HTTP parsing and persistence validation. */
 final class NodeSetupPolicy {
   static final int SCHEMA_VERSION = 1;
+  static final int THERMAL_STATUS_SEVERE = 3;
 
   enum PeerTopologyIssue {
     NONE,
@@ -28,6 +31,10 @@ final class NodeSetupPolicy {
       if (origin.isEmpty() != controlToken.isEmpty()) {
         throw new IllegalArgumentException("peer origin and control token must be configured together");
       }
+      if (!origin.isEmpty()) {
+        PeerTransportSecurityPolicy.validateOrigin(
+            origin, PeerTransportSecurityPolicy.Requirement.TRUSTED_LAN_DEMO_ALLOWED);
+      }
     }
   }
 
@@ -37,6 +44,54 @@ final class NodeSetupPolicy {
       if (origin == null || origin.isBlank()) {
         throw new IllegalArgumentException("redacted peer origin cannot be blank");
       }
+    }
+
+    String transportSecurity() {
+      return PeerTransportSecurityPolicy.classify(origin).wireName();
+    }
+  }
+
+  /** Pure status/readiness view of the Android power and app-private storage measurements. */
+  record OperationalHealth(
+      int thermalStatus,
+      OptionalDouble thermalHeadroom,
+      boolean powerSaveMode,
+      long storageUsableBytes,
+      long storageMinimumFreeBytes) {
+    OperationalHealth {
+      Objects.requireNonNull(thermalHeadroom, "thermalHeadroom");
+      if (thermalStatus < -1 || thermalStatus > 6) {
+        throw new IllegalArgumentException("thermalStatus must be unavailable or an Android status");
+      }
+      if (thermalHeadroom.isPresent() && !Double.isFinite(thermalHeadroom.orElseThrow())) {
+        throw new IllegalArgumentException("thermalHeadroom must be finite when available");
+      }
+      if (storageUsableBytes < 0 || storageMinimumFreeBytes <= 0) {
+        throw new IllegalArgumentException("storage readiness byte counts are invalid");
+      }
+    }
+
+    boolean thermalReady() {
+      return thermalStatus < 0 || thermalStatus < THERMAL_STATUS_SEVERE;
+    }
+
+    boolean storageReady() {
+      return storageUsableBytes >= storageMinimumFreeBytes;
+    }
+
+    boolean readyForCapture() {
+      return thermalReady() && storageReady();
+    }
+
+    List<String> readinessIssues() {
+      ArrayList<String> issues = new ArrayList<>();
+      if (!thermalReady()) {
+        issues.add("Let this phone cool below Android thermal status SEVERE before capture.");
+      }
+      if (!storageReady()) {
+        issues.add("Free at least 2 GiB of app storage before capture.");
+      }
+      return List.copyOf(issues);
     }
   }
 
@@ -58,6 +113,22 @@ final class NodeSetupPolicy {
     return credentials.origin().isEmpty()
         ? Optional.empty()
         : Optional.of(new RedactedPeer(credentials.origin()));
+  }
+
+  static OperationalHealth operationalHealth(
+      int thermalStatus,
+      double thermalHeadroom,
+      boolean powerSaveMode,
+      long storageUsableBytes,
+      long storageMinimumFreeBytes) {
+    return new OperationalHealth(
+        thermalStatus,
+        Double.isFinite(thermalHeadroom)
+            ? OptionalDouble.of(thermalHeadroom)
+            : OptionalDouble.empty(),
+        powerSaveMode,
+        storageUsableBytes,
+        storageMinimumFreeBytes);
   }
 
   static boolean revisionMatches(long expected, long current) {

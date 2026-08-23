@@ -21,7 +21,7 @@ swing_hil_parser_event FeedLine(swing_hil_line_parser *parser, std::string_view 
 }
 
 void ParsesEveryCommand() {
-  static_assert(std::string_view(SWING_HIL_FIRMWARE_VERSION) == "prop-maker-hil-5");
+  static_assert(std::string_view(SWING_HIL_FIRMWARE_VERSION) == "prop-maker-hil-9");
   static_assert(SWING_HIL_PREPARE_TIMEOUT_US == 10'000'000ULL);
   swing_hil_line_parser parser{};
   swing_hil_line_parser_init(&parser);
@@ -44,6 +44,40 @@ void ParsesEveryCommand() {
   assert(event.command.parameters.tone.duration_us == 20000U);
   assert(event.command.parameters.tone.frequency_hz == 2000U);
   assert(event.command.parameters.tone.level_permille == 125U);
+
+  event = FeedLine(&parser, "SC-HIL/1 91 PCM_BEGIN 4 138745022\n");
+  assert(event.status == SWING_HIL_FEED_COMMAND);
+  assert(event.command.kind == SWING_HIL_COMMAND_PCM_BEGIN);
+  assert(event.command.parameters.pcm_begin.sample_count == 4U);
+  assert(event.command.parameters.pcm_begin.crc32 == 138745022U);
+
+  event = FeedLine(&parser, "SC-HIL/1 91 PCM_CHUNK 0 0000ff7f00803412\n");
+  assert(event.status == SWING_HIL_FEED_COMMAND);
+  assert(event.command.kind == SWING_HIL_COMMAND_PCM_CHUNK);
+  assert(event.command.parameters.pcm_chunk.byte_offset == 0U);
+  assert(event.command.parameters.pcm_chunk.byte_count == 8U);
+  assert(event.command.parameters.pcm_chunk.bytes[3] == 0x7fU);
+
+  event = FeedLine(&parser, "SC-HIL/1 91 PCM_COMMIT\n");
+  assert(event.status == SWING_HIL_FEED_COMMAND);
+  assert(event.command.kind == SWING_HIL_COMMAND_PCM_COMMIT);
+
+  event = FeedLine(&parser, "SC-HIL/1 91 PCM_ABORT\n");
+  assert(event.status == SWING_HIL_FEED_COMMAND);
+  assert(event.command.kind == SWING_HIL_COMMAND_PCM_ABORT);
+
+  event = FeedLine(&parser, "SC-HIL/1 92 PCM_PLAY 100000 125 12 480\n");
+  assert(event.status == SWING_HIL_FEED_COMMAND);
+  assert(event.command.kind == SWING_HIL_COMMAND_PCM_PLAY);
+  assert(event.command.parameters.pcm_play.lead_us == 100000U);
+  assert(event.command.parameters.pcm_play.gain_permille == 125U);
+  assert(event.command.parameters.pcm_play.brightness == 12U);
+  assert(event.command.parameters.pcm_play.marker_sample == 480U);
+
+  event = FeedLine(&parser, "SC-HIL/1 93 PCM_PLAY 100000 1000 12 480\n");
+  assert(event.status == SWING_HIL_FEED_COMMAND);
+  assert(event.command.kind == SWING_HIL_COMMAND_PCM_PLAY);
+  assert(event.command.parameters.pcm_play.gain_permille == 1000U);
 
   event = FeedLine(&parser, "SC-HIL/1 10 CALIBRATE\n");
   assert(event.status == SWING_HIL_FEED_COMMAND);
@@ -72,6 +106,10 @@ void EnforcesStimulusSafetyBounds() {
   assert(event.status == SWING_HIL_FEED_ERROR);
   assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
 
+  event = FeedLine(&parser, "SC-HIL/1 30 PCM_PLAY 20000 1001 12 0\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
+
   event = FeedLine(&parser, "SC-HIL/1 4 LED 2000001 44053\n");
   assert(event.status == SWING_HIL_FEED_ERROR);
   assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
@@ -83,6 +121,34 @@ void EnforcesStimulusSafetyBounds() {
   event = FeedLine(&parser, "SC-HIL/1 6 CALIBRATE extra\n");
   assert(event.status == SWING_HIL_FEED_ERROR);
   assert(event.error == SWING_HIL_ERROR_ARGUMENT_COUNT);
+
+  event = FeedLine(&parser, "SC-HIL/1 7 PCM_BEGIN 0 0\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
+
+  event = FeedLine(&parser, "SC-HIL/1 7 PCM_BEGIN 12001 0\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
+
+  event = FeedLine(&parser, "SC-HIL/1 7 PCM_CHUNK 0 000\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_MALFORMED);
+
+  event = FeedLine(&parser, "SC-HIL/1 7 PCM_CHUNK 23999 0000\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
+
+  event = FeedLine(&parser, "SC-HIL/1 7 PCM_PLAY 19999 125 12 0\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
+
+  event = FeedLine(&parser, "SC-HIL/1 7 PCM_PLAY 20000 1001 12 0\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
+
+  event = FeedLine(&parser, "SC-HIL/1 7 PCM_PLAY 20000 125 12 12000\n");
+  assert(event.status == SWING_HIL_FEED_ERROR);
+  assert(event.error == SWING_HIL_ERROR_OUT_OF_RANGE);
 }
 
 void AcceptsExactlyTheV5CalibrationCandidates() {
