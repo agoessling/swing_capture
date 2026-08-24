@@ -1,5 +1,6 @@
 import { MutableControlCredential } from "./control_credential.js";
 import { parseOperationalHealth, type OperationalHealth } from "./operational_health.js";
+import { parsePairNetworkHealth, type PairNetworkHealth } from "./pair_network_health.js";
 
 export const NODE_SETUP_SCHEMA_VERSION = 1 as const;
 
@@ -53,6 +54,7 @@ export interface NodeSetupSnapshot {
     issues: string[];
   };
   operational_health?: OperationalHealth;
+  pair_network_health?: PairNetworkHealth;
   preview: {
     available: boolean;
     url: string | null;
@@ -298,6 +300,7 @@ export function parseNodeSetupSnapshot(value: unknown): NodeSetupSnapshot {
   const preview = asObject(object.preview, "node setup preview");
   const pairing = parseServerPairing(object.pairing);
   const operationalHealth = parseOperationalHealth(object.operational_health);
+  const pairNetworkHealth = parsePairNetworkHealth(object.pair_network_health);
   const peer = pose.peer;
   const parsedPeer =
     peer === null
@@ -379,6 +382,7 @@ export function parseNodeSetupSnapshot(value: unknown): NodeSetupSnapshot {
     },
     pairing,
     ...(operationalHealth === undefined ? {} : { operational_health: operationalHealth }),
+    ...(pairNetworkHealth === undefined ? {} : { pair_network_health: pairNetworkHealth }),
   };
 }
 

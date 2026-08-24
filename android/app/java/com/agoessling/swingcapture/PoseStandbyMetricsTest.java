@@ -6,6 +6,7 @@ public final class PoseStandbyMetricsTest {
   public static void main(String[] args) {
     recordsCountersDeadlinesAndDecisionAge();
     reportsNearestRankPercentilesWithBoundedStorage();
+    reportsRecentInferenceWindowWithoutDilutingLifetimeMetrics();
   }
 
   private static void recordsCountersDeadlinesAndDecisionAge() {
@@ -53,6 +54,10 @@ public final class PoseStandbyMetricsTest {
     check(snapshot.inferenceDurationP99Ns() == 401_000_000, "duration p99 mismatch");
     check(snapshot.inferenceDeadlineMisses() == 2, "deadline misses mismatch");
     check(snapshot.inferenceOutliers() == 1, "outliers mismatch");
+    check(snapshot.recentInferenceSampleCount() == 3, "recent sample count mismatch");
+    check(snapshot.recentInferenceDurationP95Ns() == 401_000_000, "recent p95 mismatch");
+    check(snapshot.recentMaximumInferenceDurationNs() == 401_000_000, "recent max mismatch");
+    check(snapshot.recentInferenceDeadlineMisses() == 2, "recent deadline misses mismatch");
     check(snapshot.decisionAgeSamples() == 2, "decision age sample count mismatch");
     check(snapshot.rejectedDecisionTimestamps() == 1, "timestamp rejection mismatch");
     check(snapshot.totalDecisionAgeNs() == 500_000_000, "decision age sum mismatch");
@@ -118,6 +123,35 @@ public final class PoseStandbyMetricsTest {
     check(
         rounded.snapshot().inferenceDurationP50Ns() == 2_000_000,
         "sub-millisecond remainder must round to an inclusive bucket upper bound");
+  }
+
+  private static void reportsRecentInferenceWindowWithoutDilutingLifetimeMetrics() {
+    PoseStandbyMetrics metrics = new PoseStandbyMetrics(PoseInferenceDelegate.GPU);
+    for (int index = 0; index < 100; ++index) {
+      metrics.recordInference(350_000_000, true);
+    }
+    for (int index = 0; index < 50; ++index) {
+      metrics.recordInference(150_000_000, true);
+    }
+    PoseStandbyMetrics.Snapshot slowWindow = metrics.snapshot();
+    check(
+        slowWindow.recentInferenceSampleCount()
+            == PoseStandbyMetrics.RECENT_INFERENCE_WINDOW_CAPACITY,
+        "recent window should fill to its fixed capacity");
+    check(slowWindow.recentInferenceDurationP95Ns() == 350_000_000, "slow recent p95");
+    check(slowWindow.recentMaximumInferenceDurationNs() == 350_000_000, "slow recent max");
+    check(slowWindow.recentInferenceDeadlineMisses() == 100, "slow recent misses");
+
+    for (int index = 0; index < 100; ++index) {
+      metrics.recordInference(150_000_000, true);
+    }
+    PoseStandbyMetrics.Snapshot recovered = metrics.snapshot();
+    check(recovered.inferenceDurationP95Ns() == 350_000_000, "lifetime p95 remains cumulative");
+    check(recovered.inferenceDeadlineMisses() == 100, "lifetime misses remain cumulative");
+    check(recovered.recentInferenceSampleCount() == 150, "recent sample count remains bounded");
+    check(recovered.recentInferenceDurationP95Ns() == 150_000_000, "recent p95 recovers");
+    check(recovered.recentMaximumInferenceDurationNs() == 150_000_000, "recent max recovers");
+    check(recovered.recentInferenceDeadlineMisses() == 0, "recent misses evict old values");
   }
 
   private static void check(boolean condition, String message) {

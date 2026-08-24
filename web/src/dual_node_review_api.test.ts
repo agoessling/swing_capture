@@ -11,6 +11,7 @@ import {
   type NodeTriggerReport,
 } from "./dual_node_review_api.js";
 import { FIXTURE_MANIFEST } from "./fake_review_api.js";
+import type { PairNetworkHealth } from "./pair_network_health.js";
 import {
   type ClipManifest,
   DIAGNOSTIC_FEEDBACK_SCHEMA_VERSION,
@@ -48,6 +49,7 @@ async function main() {
   await rejectsReplacedBrowserSessionBeforeEitherManualMutation();
   await rejectsOneStaleCredentialBeforeEitherMissedShotMutation();
   await preservesPeerArmFailureInCombinedStatus();
+  await preservesConfiguredLeaderNetworkHealthAndDegradedOverride();
   await coordinatesAuthenticatedFieldRecording();
   await loadsRichAndroidCatalogWithoutHistoricalManifestRequests();
   await prioritizesFieldControlOverHistoricalManifestHydration();
@@ -430,6 +432,81 @@ async function provisionsOneSharedSessionAndRollsBackPartialArm() {
   assert.ok(
     partial.mutationRequests.every((request) => request.authorization === request.expected),
     "every dual-node mutation carries the bearer credential for its destination origin",
+  );
+}
+
+async function preservesConfiguredLeaderNetworkHealthAndDegradedOverride() {
+  const nodes = fakeDualNodes(null, false, false, true);
+  const leaderHealth = pairNetworkHealthFixture(true, "degraded");
+  nodes.setPairNetworkHealth("dtl.test", leaderHealth);
+  nodes.setPairNetworkHealth("face.test", pairNetworkHealthFixture(false, "unusable"));
+  const api = new DualNodeReviewApi(
+    endpoints(),
+    nodes.fetcher,
+    nodes.now,
+    () => "shared-degraded-network",
+    null,
+  );
+
+  assert.deepEqual((await api.getCaptureStatus()).pair_network_health, leaderHealth);
+  await api.setArmed(true, { allowDegradedNetwork: true });
+  const armedBodies = nodes.armBodies.filter((body) => body.armed === true);
+  assert.equal(armedBodies.length, 2);
+  assert.ok(armedBodies.every((body) => body.allow_degraded_network === true));
+
+  await api.setArmed(false);
+  const disarmBodies = nodes.armBodies.filter((body) => body.armed === false);
+  assert.ok(disarmBodies.length >= 2);
+  assert.ok(
+    disarmBodies.every((body) => !("allow_degraded_network" in body)),
+    "the one-shot degraded acknowledgement must never leak into disarm",
+  );
+
+  nodes.setPairNetworkHealth("face.test", pairNetworkHealthFixture(true, "good"));
+  assert.equal(
+    (await api.getCaptureStatus()).pair_network_health,
+    undefined,
+    "ambiguous duplicate configured health is not presented as the leader contract",
+  );
+
+  nodes.setPairNetworkHealth("dtl.test", pairNetworkHealthFixture(false, "unusable"));
+  nodes.setPairNetworkHealth("face.test", pairNetworkHealthFixture(true, "good"));
+  assert.equal(
+    (await api.getCaptureStatus()).pair_network_health,
+    undefined,
+    "a configured shadow snapshot is not presented as leader health",
+  );
+
+  const nodesWithoutLeader = fakeDualNodes();
+  nodesWithoutLeader.setPairNetworkHealth("dtl.test", leaderHealth);
+  nodesWithoutLeader.setPairNetworkHealth("face.test", pairNetworkHealthFixture(false, "unusable"));
+  const apiWithoutLeader = new DualNodeReviewApi(
+    endpoints(),
+    nodesWithoutLeader.fetcher,
+    nodesWithoutLeader.now,
+    () => "shared-missing-leader-network",
+    null,
+  );
+  assert.equal(
+    (await apiWithoutLeader.getCaptureStatus()).pair_network_health,
+    undefined,
+    "configured health without a sole reported pose leader fails closed",
+  );
+
+  const duplicateLeaders = fakeDualNodes(null, false, false, true, false, true);
+  duplicateLeaders.setPairNetworkHealth("dtl.test", leaderHealth);
+  duplicateLeaders.setPairNetworkHealth("face.test", pairNetworkHealthFixture(false, "unusable"));
+  const duplicateLeaderApi = new DualNodeReviewApi(
+    endpoints(),
+    duplicateLeaders.fetcher,
+    duplicateLeaders.now,
+    () => "shared-duplicate-leader-network",
+    null,
+  );
+  assert.equal(
+    (await duplicateLeaderApi.getCaptureStatus()).pair_network_health,
+    undefined,
+    "configured health with duplicate reported pose leaders fails closed",
   );
 }
 
@@ -1269,6 +1346,7 @@ function fakeDualNodes(
   standbyMissedShot = false,
   includePeerFailure = false,
   externallyArmed = false,
+  duplicatePoseLeaders = false,
 ) {
   let coordinatorNow = 0n;
   let activeSharedSessionId: string | null = null;
@@ -1276,6 +1354,7 @@ function fakeDualNodes(
   let rolesSwapped = false;
   let forcedDisarmedHost: string | null = null;
   const forcedSharedSessions = new Map<string, string | null>();
+  const pairNetworkHealth = new Map<string, PairNetworkHealth>();
   const controlTokens = new Map([
     ["dtl.test", "dtl-token"],
     ["face.test", "face-token"],
@@ -1429,7 +1508,7 @@ function fakeDualNodes(
         ...(includePeerFailure
           ? {
               pose: {
-                mode: role === "down_the_line" ? "leader" : "shadow",
+                mode: duplicatePoseLeaders || role === "down_the_line" ? "leader" : "shadow",
                 phase: role === "down_the_line" ? "high_speed" : "monitoring",
                 transition_requested: role === "down_the_line",
                 peer_arm:
@@ -1448,6 +1527,9 @@ function fakeDualNodes(
                       },
               },
             }
+          : {}),
+        ...(pairNetworkHealth.has(url.hostname)
+          ? { pair_network_health: pairNetworkHealth.get(url.hostname) }
           : {}),
       });
     }
@@ -1642,6 +1724,9 @@ function fakeDualNodes(
       assert.ok(controlTokens.has(host));
       controlTokens.set(host, token);
     },
+    setPairNetworkHealth(host: string, health: PairNetworkHealth) {
+      pairNetworkHealth.set(host, structuredClone(health));
+    },
     failNextFieldRecordingStartAsynchronously(host: string) {
       assert.ok(fieldStates.has(host));
       asynchronousStartFailures.add(host);
@@ -1650,6 +1735,61 @@ function fakeDualNodes(
       assert.ok(fieldStates.has(host));
       asynchronousStopFailures.add(host);
     },
+  };
+}
+
+function pairNetworkHealthFixture(
+  configured: boolean,
+  state: "good" | "degraded" | "unusable",
+): PairNetworkHealth {
+  if (!configured) {
+    return {
+      schema_version: 1,
+      configured: false,
+      state: "unusable",
+      raw_state: "unusable",
+      measured: false,
+      stale: false,
+      transition_pending: false,
+      age_ns: "0",
+      issues: ["A peer is not configured for network-health measurement."],
+      peer: null,
+      measured_at_elapsed_realtime_ns: null,
+      local_to_peer: null,
+      peer_to_local: null,
+    };
+  }
+  const direction = {
+    schema_version: 1 as const,
+    attempts: 3,
+    successes: state === "good" ? 3 : 2,
+    timeouts: state === "good" ? 0 : 1,
+    round_trip_ns: state === "good" ? ["8000000", "9000000", "10000000"] : ["8000000", "12000000"],
+    transfer_bytes: "262144",
+    transfer_duration_ns: "100000000",
+    transfer_complete: true,
+    minimum_round_trip_ns: "8000000",
+    median_round_trip_ns: state === "good" ? "9000000" : "8000000",
+    p95_round_trip_ns: state === "good" ? "10000000" : "12000000",
+    maximum_round_trip_ns: state === "good" ? "10000000" : "12000000",
+    jitter_ns: state === "good" ? "2000000" : "4000000",
+    transfer_bits_per_second: 20_971_520,
+  };
+  return {
+    schema_version: 1,
+    configured: true,
+    state,
+    raw_state: state,
+    measured: true,
+    stale: false,
+    transition_pending: false,
+    age_ns: "1000000000",
+    issues:
+      state === "good" ? [] : ["Some phone-to-phone application requests failed or timed out."],
+    peer: { origin: "http://face.test", node_id: "node-face" },
+    measured_at_elapsed_realtime_ns: "1000000000",
+    local_to_peer: direction,
+    peer_to_local: direction,
   };
 }
 

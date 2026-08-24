@@ -73,6 +73,44 @@ Json StartupTiming(std::size_t index, bool face_on) {
   };
 }
 
+Json PairNetworkDirection() {
+  return {
+      {"schema_version", 1},
+      {"attempts", 3},
+      {"successes", 3},
+      {"timeouts", 0},
+      {"round_trip_ns", Json::array({"1000000", "2000000", "3000000"})},
+      {"transfer_bytes", "1048576"},
+      {"transfer_duration_ns", "100000000"},
+      {"transfer_complete", true},
+      {"minimum_round_trip_ns", "1000000"},
+      {"median_round_trip_ns", "2000000"},
+      {"p95_round_trip_ns", "3000000"},
+      {"maximum_round_trip_ns", "3000000"},
+      {"jitter_ns", "2000000"},
+      {"transfer_bits_per_second", 83'886'080.0},
+  };
+}
+
+Json PairNetworkHealth(std::string_view state = "good") {
+  return {
+      {"schema_version", 1},
+      {"configured", true},
+      {"state", state},
+      {"raw_state", state},
+      {"measured", true},
+      {"stale", false},
+      {"transition_pending", false},
+      {"age_ns", "1000000"},
+      {"issues",
+       state == "good" ? Json::array() : Json::array({"pair network health is not good"})},
+      {"peer", {{"origin", "http://10.0.0.5:8088"}, {"node_id", "shadow-node"}}},
+      {"measured_at_elapsed_realtime_ns", "9000000"},
+      {"local_to_peer", PairNetworkDirection()},
+      {"peer_to_local", PairNetworkDirection()},
+  };
+}
+
 Json PassingReport(std::string_view mode) {
   const auto &policy = PairedPoseQualificationPolicyForMode(mode);
   Json cycles = Json::array();
@@ -186,6 +224,32 @@ Json PassingReport(std::string_view mode) {
       {"standby_inference", "real_5hz_on_device"},
       {"peer_transport", "wifi_lan_direct"},
       {"artifact_path_scope", "undeclared_output_root"},
+      {"setup",
+       {{"leader_role", "face_on"},
+        {"shadow_role", "down_the_line"},
+        {"leader_node_id", "leader-node"},
+        {"shadow_node_id", "shadow-node"},
+        {"lan_endpoint_validation",
+         {{"face_on",
+           {{"role", "face_on"},
+            {"pose_mode", "leader"},
+            {"origin", "http://10.0.0.6:8088"},
+            {"peer_origin", "http://10.0.0.5:8088"}}},
+          {"down_the_line",
+           {{"role", "down_the_line"},
+            {"pose_mode", "shadow"},
+            {"origin", "http://10.0.0.5:8088"},
+            {"peer_origin", nullptr}}}}},
+        {"pair_network_health_admission",
+         {{"schema_version", 1},
+          {"passed", true},
+          {"poll_count", 3},
+          {"elapsed_milliseconds", 500},
+          {"accepted_state", "good"},
+          {"degraded_override", false},
+          {"expected_peer_origin", "http://10.0.0.5:8088"},
+          {"expected_peer_node_id", "shadow-node"},
+          {"snapshot", PairNetworkHealth()}}}}},
       {"cycles", std::move(cycles)},
       {"telemetry_samples", std::move(samples)},
       {"artifacts", {{"cycles", std::move(cycle_artifacts)}}},
@@ -328,6 +392,47 @@ void TestCycleArtifactPathsMustBeRootRelativeAndIndexed() {
   CheckRejected(report, "paired-pose-qualify-5m");
 }
 
+void TestPairNetworkHealthAdmissionIsFailClosed() {
+  Json report = PassingReport("paired-pose-qualify-5m");
+  report["setup"]["pair_network_health_admission"]["accepted_state"] = "degraded";
+  report["setup"]["pair_network_health_admission"]["degraded_override"] = true;
+  report["setup"]["pair_network_health_admission"]["snapshot"] = PairNetworkHealth("degraded");
+  assert(ValidatePairedPoseQualificationReport(report.dump(), "paired-pose-qualify-5m").passed);
+
+  report = PassingReport("paired-pose-qualify-5m");
+  report["setup"].erase("pair_network_health_admission");
+  CheckRejected(report, "paired-pose-qualify-5m");
+
+  report = PassingReport("paired-pose-qualify-5m");
+  report["setup"]["pair_network_health_admission"] = "malformed";
+  CheckRejected(report, "paired-pose-qualify-5m");
+
+  report = PassingReport("paired-pose-qualify-5m");
+  Json &stale = report["setup"]["pair_network_health_admission"]["snapshot"];
+  stale["state"] = "unusable";
+  stale["raw_state"] = "unusable";
+  stale["stale"] = true;
+  stale["issues"] = Json::array({"pair network health evidence is stale"});
+  CheckRejected(report, "paired-pose-qualify-5m");
+
+  report = PassingReport("paired-pose-qualify-5m");
+  report["setup"]["pair_network_health_admission"]["expected_peer_node_id"] = "other-node";
+  CheckRejected(report, "paired-pose-qualify-5m");
+
+  report = PassingReport("paired-pose-qualify-5m");
+  report["setup"]["pair_network_health_admission"]["snapshot"]["peer"]["origin"] =
+      "http://10.0.0.7:8088";
+  CheckRejected(report, "paired-pose-qualify-5m");
+
+  report = PassingReport("paired-pose-qualify-5m");
+  report["setup"]["pair_network_health_admission"]["degraded_override"] = true;
+  CheckRejected(report, "paired-pose-qualify-5m");
+
+  report = PassingReport("paired-pose-qualify-5m");
+  report["setup"]["lan_endpoint_validation"]["face_on"]["peer_origin"] = "http://10.0.0.7:8088";
+  CheckRejected(report, "paired-pose-qualify-5m");
+}
+
 }  // namespace
 
 int main() {
@@ -338,4 +443,5 @@ int main() {
   TestThermalCadenceDropAndLatencyFailuresFail();
   TestMetricGenerationResetsAreBoundToCaptureIntervals();
   TestCycleArtifactPathsMustBeRootRelativeAndIndexed();
+  TestPairNetworkHealthAdmissionIsFailClosed();
 }

@@ -27,6 +27,7 @@ bazel run //tools/field_preflight:android_field_preflight -- \
   --expected-role 10.168.168.241=down_the_line \
   --launch-after-unlock \
   --sleep-screen-after-launch \
+  --require-stopped-clean \
   --evidence-dir artifacts/field_preflight_before_arm
 ```
 
@@ -63,7 +64,17 @@ strict doctor's `lan_diagnostics`: both current BSSIDs and the required directed
 phone-to-peer reachability matrix. All matrix edges must pass; wireless or USB ADB health, a
 host-side USB forward, and one-sided ARP evidence are diagnostic context rather than LAN admission.
 Each underlying
-credential-redacted pair-doctor report is retained alongside it.
+credential-redacted pair-doctor report is retained alongside it. Every node row in those reports
+also retains a recursively credential-redacted `capture_status` diagnostic snapshot, including
+numeric pair-network, pose/audio, thermal/storage, capture-ring, and autonomous-publication state.
+The same row retains the complete authenticated `field_recording_status`, so an active recorder or
+its stop-and-publish transition cannot be hidden by an otherwise stopped capture engine.
+
+`--require-stopped-clean` and `--require-monitoring` are mutually exclusive. The stopped-clean gate
+requires both nodes to be unarmed in a stopped/setup-ready state, with no active local/shared
+session, no autonomous replication backlog, no pending trigger/publication flags, and no active or
+fault-injected field recorder. Use it for pre-session and terminal evidence; a generic doctor pass
+deliberately remains non-mutating.
 
 Before mDNS or phone operations begin, the wrapper durably publishes a failing `report.json`.
 Every later checkpoint and sanitized child artifact is written through a unique temporary file,

@@ -37,6 +37,7 @@ class _Arguments(argparse.Namespace):
         self.launch_after_unlock: bool = False
         self.sleep_screen_after_launch: bool = False
         self.require_monitoring: bool = False
+        self.require_stopped_clean: bool = False
         self.maximum_attempts: int = 3
         self.retry_seconds: float = 2.0
 
@@ -79,10 +80,16 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="send KEYCODE_SLEEP after launch and require a non-interactive/dozing power state",
     )
-    parser.add_argument(
+    state_group = parser.add_mutually_exclusive_group()
+    state_group.add_argument(
         "--require-monitoring",
         action="store_true",
         help="require both phones armed with live pose/audio and recovered peer timing",
+    )
+    state_group.add_argument(
+        "--require-stopped-clean",
+        action="store_true",
+        help="require both phones stopped with no active session or autonomous publication work",
     )
     parser.add_argument("--maximum-attempts", type=int, default=3)
     parser.add_argument("--retry-seconds", type=float, default=2.0)
@@ -110,6 +117,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             launch_after_unlock=options.launch_after_unlock,
             sleep_screen_after_launch=options.sleep_screen_after_launch,
             require_monitoring=options.require_monitoring,
+            require_stopped_clean=options.require_stopped_clean,
             maximum_attempts=options.maximum_attempts,
             retry_seconds=options.retry_seconds,
             expected_apk=options.expected_apk,

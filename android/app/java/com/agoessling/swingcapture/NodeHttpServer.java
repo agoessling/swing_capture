@@ -42,6 +42,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -121,7 +122,8 @@ public final class NodeHttpServer {
       }
     }
 
-    void setArmed(boolean armed, String sharedSessionId);
+    void setArmed(
+        boolean armed, String sharedSessionId, boolean allowDegradedNetwork);
 
     String triggerManual();
 
@@ -140,6 +142,11 @@ public final class NodeHttpServer {
     SetupPreview setupPreview();
 
     JSONObject fieldRecordingStatus();
+
+    PairNetworkHealthPolicy.DirectionEvidence measurePairNetworkDirection(
+        String callbackOrigin, String callbackNodeId);
+
+    PairNetworkHealthPolicy.Snapshot pairNetworkHealthStatus();
 
     JSONObject startFieldRecording(String sharedRecordingId);
 
@@ -302,7 +309,7 @@ public final class NodeHttpServer {
       NodeHttpRequest request =
           NodeHttpRequestParser.read(
               input, MAXIMUM_REQUEST_HEADER_BYTES, MAXIMUM_REQUEST_BODY_BYTES);
-      route(request, output);
+      route(request, client.getInetAddress(), output);
     } catch (Throwable failure) {
       // A malformed or disconnected client must not terminate the listener, but retain enough
       // evidence to diagnose device-specific failures without logging request contents or tokens.
@@ -310,7 +317,8 @@ public final class NodeHttpServer {
     }
   }
 
-  private void route(NodeHttpRequest request, OutputStream output) throws Exception {
+  private void route(NodeHttpRequest request, InetAddress acceptedSocketPeer, OutputStream output)
+      throws Exception {
     long requestReceivedElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
     boolean head = request.method.equals("HEAD");
     if (request.method.equals("OPTIONS")) {
@@ -322,7 +330,7 @@ public final class NodeHttpServer {
       return;
     }
     if (request.method.equals("POST")) {
-      routeControl(request, output);
+      routeControl(request, acceptedSocketPeer, output);
       return;
     }
     if (request.method.equals("PUT")) {
@@ -1211,7 +1219,10 @@ public final class NodeHttpServer {
             .put("pairing", pairingResponse(station.pairing(), pose, peer));
     response
         .put("device_admission", deviceAdmissionJson(capture.profile()))
-        .put("reboot_recovery", unattendedRecoveryJson());
+        .put("reboot_recovery", unattendedRecoveryJson())
+        .put(
+            "pair_network_health",
+            PairNetworkHealthJson.snapshotJson(captureControl.pairNetworkHealthStatus()));
 
     CaptureRuntime.Snapshot runtimeSnapshot = runtime.snapshot();
     boolean editable = CaptureConfigurationPolicy.mayChange(runtimeSnapshot.state());
@@ -1606,12 +1617,36 @@ public final class NodeHttpServer {
     return number.doubleValue();
   }
 
-  private void routeControl(NodeHttpRequest request, OutputStream output) throws Exception {
+  private void routeControl(
+      NodeHttpRequest request, InetAddress acceptedSocketPeer, OutputStream output)
+      throws Exception {
     if (request.path.equals("/api/v1/control-credential/rotate")) {
       routeControlCredentialRotation(request, output);
       return;
     }
     try {
+      if (request.path.equals(NodeHttpProtocol.NETWORK_HEALTH_REVERSE_PATH)) {
+        PairNetworkHealthWireJson.ReverseRequest reverseRequest;
+        try {
+          reverseRequest = PairNetworkHealthJson.parseReverseRequest(request.body);
+        } catch (IOException malformed) {
+          throw new IllegalArgumentException(malformed.getMessage(), malformed);
+        }
+        URI callbackOrigin =
+            PairNetworkHealthCallbackPolicy.validate(
+                reverseRequest.callbackOrigin(), acceptedSocketPeer, port);
+        PairNetworkHealthPolicy.DirectionEvidence direction =
+            captureControl.measurePairNetworkDirection(
+                callbackOrigin.toString(), reverseRequest.callbackNodeId());
+        writeRawJson(
+            output,
+            200,
+            "OK",
+            new String(PairNetworkHealthJson.directionBytes(direction), StandardCharsets.UTF_8),
+            false,
+            Map.of("Cache-Control", "no-store, max-age=0"));
+        return;
+      }
       if (isCoordinationPath(request.path)) {
         routeCoordinationAuthenticated(request, output, false);
         return;
@@ -1641,12 +1676,25 @@ public final class NodeHttpServer {
         if (!body.has("armed")) {
           throw new IllegalArgumentException("armed is required");
         }
-        boolean armed = body.getBoolean("armed");
+        for (Iterator<String> fields = body.keys(); fields.hasNext(); ) {
+          String field = fields.next();
+          if (!Set.of("armed", "shared_session_id", "allow_degraded_network").contains(field)) {
+            throw new IllegalArgumentException("capture arm fields do not match schema 1");
+          }
+        }
+        boolean armed = strictBoolean(body, "armed");
         String sharedSessionId =
             body.has("shared_session_id") && !body.isNull("shared_session_id")
                 ? body.getString("shared_session_id")
                 : null;
-        captureControl.setArmed(armed, sharedSessionId);
+        boolean allowDegradedNetwork =
+            body.has("allow_degraded_network")
+                && strictBoolean(body, "allow_degraded_network");
+        if (!armed && body.has("allow_degraded_network")) {
+          throw new IllegalArgumentException(
+              "allow_degraded_network is valid only while arming");
+        }
+        captureControl.setArmed(armed, sharedSessionId, allowDegradedNetwork);
         writeJson(output, captureRoute.successStatus(), "Accepted", captureStatus(), false);
         return;
       }
@@ -2054,6 +2102,9 @@ public final class NodeHttpServer {
     status.put("hil", hil);
     status.put("pose", captureControl.poseStatus());
     status.put("operational_health", operationalHealthJson(operationalHealth()));
+    status.put(
+        "pair_network_health",
+        PairNetworkHealthJson.snapshotJson(captureControl.pairNetworkHealthStatus()));
     status.put("device_admission", deviceAdmissionJson(configuration.captureProfile()));
     status.put("reboot_recovery", unattendedRecoveryJson());
     status.put(

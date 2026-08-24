@@ -355,7 +355,8 @@ test("keeps paired-phone arm failures prominent after review media is ready", as
   await expect(page.getByRole("heading", { name: "Watching for address" })).toBeVisible();
   await expect(page.getByText("Address trigger")).toBeVisible();
   await expect(page.getByText("Paired phone rejected arm")).toHaveCount(2);
-  await expect(page.getByRole("alert")).toHaveCount(2);
+  await expect(page.getByRole("alert")).toHaveCount(3);
+  await expect(page.getByText("Pair network: Unknown")).toBeVisible();
   await expect(page.getByText(/HTTP 409.*only one view/)).toHaveCount(2);
   await expect(page.getByText("Frame 46 of 90")).toBeVisible();
 

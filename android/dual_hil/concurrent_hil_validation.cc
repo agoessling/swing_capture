@@ -1,6 +1,7 @@
 #include "android/dual_hil/concurrent_hil_validation.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -11,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "android/dual_coordination_hil/dual_coordination.h"
 
@@ -49,6 +51,82 @@ std::int64_t SignedInteger(const Json &object, std::string_view field) {
     Invalid(std::string(field) + " must be an integer");
   }
   return value->get<std::int64_t>();
+}
+
+std::int64_t CanonicalNonnegativeDecimalString(const Json &value, std::string_view field) {
+  const std::int64_t parsed = DecimalString(value, field);
+  if (parsed < 0 || value.get_ref<const std::string &>() != std::to_string(parsed)) {
+    Invalid(std::string(field) + " must be a canonical nonnegative decimal string");
+  }
+  return parsed;
+}
+
+void ValidatePairNetworkDirection(const Json &direction, std::string_view field) {
+  if (!direction.is_object() || direction.size() != 14 ||
+      direction.value("schema_version", 0) != 1) {
+    Invalid(std::string(field) + " has an invalid directed-evidence schema");
+  }
+  const std::int64_t attempts = SignedInteger(direction, "attempts");
+  const std::int64_t successes = SignedInteger(direction, "successes");
+  const std::int64_t timeouts = SignedInteger(direction, "timeouts");
+  const Json &round_trips = direction.at("round_trip_ns");
+  if (attempts <= 0 || successes < 0 || successes > attempts || timeouts < 0 ||
+      timeouts > attempts - successes || !round_trips.is_array() ||
+      round_trips.size() != static_cast<std::size_t>(successes) ||
+      !direction.at("transfer_complete").is_boolean() ||
+      !direction.at("transfer_bits_per_second").is_number() ||
+      !std::isfinite(direction.at("transfer_bits_per_second").get<double>()) ||
+      direction.at("transfer_bits_per_second").get<double>() < 0.0) {
+    Invalid(std::string(field) + " has inconsistent directed evidence");
+  }
+  std::vector<std::int64_t> parsed_round_trips;
+  parsed_round_trips.reserve(round_trips.size());
+  for (const Json &round_trip : round_trips) {
+    parsed_round_trips.push_back(CanonicalNonnegativeDecimalString(round_trip, "round_trip_ns"));
+  }
+  if (!std::ranges::is_sorted(parsed_round_trips)) {
+    Invalid(std::string(field) + " round-trip evidence is not sorted");
+  }
+  const std::int64_t transfer_bytes =
+      CanonicalNonnegativeDecimalString(direction.at("transfer_bytes"), "transfer_bytes");
+  const std::int64_t transfer_duration = CanonicalNonnegativeDecimalString(
+      direction.at("transfer_duration_ns"), "transfer_duration_ns");
+  if (direction.at("transfer_complete").get<bool>() &&
+      (transfer_bytes == 0 || transfer_duration == 0)) {
+    Invalid(std::string(field) + " marks an empty transfer complete");
+  }
+
+  const auto nearest_rank = [&](std::int64_t percentile) {
+    if (parsed_round_trips.empty()) {
+      return std::int64_t{0};
+    }
+    const auto rank = static_cast<std::size_t>(
+        (percentile * static_cast<std::int64_t>(parsed_round_trips.size()) + 99) / 100);
+    return parsed_round_trips.at(rank - 1);
+  };
+  const std::int64_t minimum = parsed_round_trips.empty() ? 0 : parsed_round_trips.front();
+  const std::int64_t maximum = parsed_round_trips.empty() ? 0 : parsed_round_trips.back();
+  const std::int64_t jitter = parsed_round_trips.size() < 2 ? 0 : maximum - minimum;
+  const auto require_derived = [&](std::string_view metric, std::int64_t expected) {
+    if (CanonicalNonnegativeDecimalString(direction.at(metric), metric) != expected) {
+      Invalid(std::string(field) + " has inconsistent derived " + std::string(metric));
+    }
+  };
+  require_derived("minimum_round_trip_ns", minimum);
+  require_derived("median_round_trip_ns", nearest_rank(50));
+  require_derived("p95_round_trip_ns", nearest_rank(95));
+  require_derived("maximum_round_trip_ns", maximum);
+  require_derived("jitter_ns", jitter);
+
+  const double expected_bits_per_second =
+      transfer_duration == 0 ? 0.0
+                             : static_cast<double>(transfer_bytes) * 8.0 * 1'000'000'000.0 /
+                                   static_cast<double>(transfer_duration);
+  const double actual_bits_per_second = direction.at("transfer_bits_per_second").get<double>();
+  const double tolerance = std::abs(expected_bits_per_second) * 1e-12;
+  if (std::abs(actual_bits_per_second - expected_bits_per_second) > tolerance) {
+    Invalid(std::string(field) + " has inconsistent derived transfer rate");
+  }
 }
 
 coordination::CaptureRole ParseRole(std::string_view role) {
@@ -187,6 +265,20 @@ void ValidateLanPairedPoseReportEvidence(const Json &report) {
       leader_endpoint.value("origin", "") == shadow_endpoint.value("origin", "")) {
     Invalid("LAN paired pose report does not prove the exact leader-to-shadow topology");
   }
+
+  std::string shadow_node_id;
+  for (const Json &node : report.at("nodes")) {
+    if (node.value("role", "") == "down_the_line") {
+      shadow_node_id = node.value("node_id", "");
+    }
+  }
+  static_cast<void>(InspectPairNetworkHealthAdmission(
+      {.admission_json = report.at("pair_network_health_admission").dump(),
+       .expected_peer_origin = shadow_endpoint.value("origin", ""),
+       .expected_peer_node_id = shadow_node_id}));
+  RequireArtifactPath(artifacts, {.role = "face_on",
+                                  .field = "pair_network_health_accepted",
+                                  .filename = "pair-network-health-accepted.json"});
 }
 
 void ValidateSetupPreviewReportEvidence(const Json &report) {
@@ -300,6 +392,34 @@ void ValidatePcmTimingCorrelation(const Json &node) {
       SignedInteger(timing, "total_bound_us") != expected_total_bound_us) {
     Invalid("paired pose HIL timing result is missing or not derived from retained evidence");
   }
+}
+
+struct PairNetworkHealthStates {
+  std::string state;
+  std::string raw_state;
+};
+
+PairNetworkHealthStates ValidatePairNetworkHealthSchema(const Json &status, const Json &health) {
+  if (status.value("schema_version", 0) != 2 || !health.is_object() || health.size() != 13 ||
+      health.value("schema_version", 0) != 1 || !health.at("configured").is_boolean() ||
+      !health.at("measured").is_boolean() || !health.at("stale").is_boolean() ||
+      !health.at("transition_pending").is_boolean() || !health.at("issues").is_array()) {
+    Invalid("capture status has an invalid pair-network-health schema");
+  }
+  for (const Json &issue : health.at("issues")) {
+    if (!issue.is_string() || issue.get_ref<const std::string &>().empty()) {
+      Invalid("pair-network-health issues must be nonempty strings");
+    }
+  }
+  PairNetworkHealthStates result{.state = health.value("state", ""),
+                                 .raw_state = health.value("raw_state", "")};
+  const auto valid_state = [](std::string_view value) {
+    return value == "good" || value == "degraded" || value == "unusable";
+  };
+  if (!valid_state(result.state) || !valid_state(result.raw_state)) {
+    Invalid("pair-network-health state is invalid");
+  }
+  return result;
 }
 
 }  // namespace
@@ -578,6 +698,115 @@ void ValidateLanEndpoint(const LanEndpointInspection &inspection) {
   }
 }
 
+PairNetworkHealthArmDecision InspectPairNetworkHealthForArm(
+    const PairNetworkHealthStatusInspection &inspection) {
+  try {
+    const Json status = Json::parse(inspection.status_json);
+    const Json &health = status.at("pair_network_health");
+    const PairNetworkHealthStates states = ValidatePairNetworkHealthSchema(status, health);
+    const std::string &state = states.state;
+    const std::string &raw_state = states.raw_state;
+
+    const bool measured = health.at("measured").get<bool>();
+    const bool stale = health.at("stale").get<bool>();
+    const bool transition_pending = health.at("transition_pending").get<bool>();
+    if (transition_pending != (!stale && state != raw_state)) {
+      Invalid("pair-network-health transition flag disagrees with stable and raw state");
+    }
+    const std::int64_t age =
+        CanonicalNonnegativeDecimalString(health.at("age_ns"), "pair_network_health.age_ns");
+    if (measured) {
+      static_cast<void>(
+          CanonicalNonnegativeDecimalString(health.at("measured_at_elapsed_realtime_ns"),
+                                            "pair_network_health.measured_at_elapsed_realtime_ns"));
+      ValidatePairNetworkDirection(health.at("local_to_peer"), "local_to_peer");
+      ValidatePairNetworkDirection(health.at("peer_to_local"), "peer_to_local");
+    } else if (age != 0 || stale || state != "unusable" || raw_state != "unusable" ||
+               transition_pending || !health.at("measured_at_elapsed_realtime_ns").is_null() ||
+               !health.at("local_to_peer").is_null() || !health.at("peer_to_local").is_null()) {
+      Invalid("unmeasured pair-network-health snapshot fields disagree");
+    }
+    if (stale &&
+        (!measured || state != "unusable" || raw_state != "unusable" || transition_pending)) {
+      Invalid("stale pair-network-health snapshot fields disagree");
+    }
+    const bool has_issues = !health.at("issues").empty();
+    if ((state == "good" && raw_state == "good") == has_issues) {
+      Invalid("pair-network-health issues disagree with stable and raw state");
+    }
+
+    const bool configured = health.at("configured").get<bool>();
+    const Json &peer = health.at("peer");
+    if (!configured) {
+      if (!peer.is_null()) {
+        Invalid("unconfigured pair-network-health snapshot names a peer");
+      }
+      Invalid("paired pose leader lacks a configured network-health peer");
+    }
+    if (!peer.is_object() || peer.size() != 2 || !peer.at("origin").is_string() ||
+        !peer.at("node_id").is_string() ||
+        peer.at("origin").get_ref<const std::string &>().empty() ||
+        peer.at("node_id").get_ref<const std::string &>().empty()) {
+      Invalid("configured pair-network-health snapshot has invalid peer identity");
+    }
+    if (peer.at("origin").get_ref<const std::string &>() != inspection.expected_peer_origin ||
+        peer.at("node_id").get_ref<const std::string &>() != inspection.expected_peer_node_id ||
+        !measured || stale || state == "unusable") {
+      return PairNetworkHealthArmDecision::kNotReady;
+    }
+    return state == "good" ? PairNetworkHealthArmDecision::kGood
+                           : PairNetworkHealthArmDecision::kDegraded;
+  } catch (const nlohmann::json::exception &failure) {
+    throw std::runtime_error(std::string("cannot parse pair-network-health capture status: ") +
+                             failure.what());
+  }
+}
+
+PairNetworkHealthArmDecision InspectPairNetworkHealthAdmission(
+    const PairNetworkHealthAdmissionInspection &inspection) {
+  try {
+    const Json admission = Json::parse(inspection.admission_json);
+    const std::string accepted_state = admission.value("accepted_state", "");
+    if (inspection.expected_peer_origin.empty() || inspection.expected_peer_node_id.empty() ||
+        !admission.is_object() || admission.size() != 9 ||
+        admission.value("schema_version", 0) != 1 || !admission.value("passed", false) ||
+        SignedInteger(admission, "poll_count") <= 0 ||
+        SignedInteger(admission, "elapsed_milliseconds") < 0 ||
+        (accepted_state != "good" && accepted_state != "degraded") ||
+        !admission.at("degraded_override").is_boolean() ||
+        admission.at("degraded_override").get<bool>() != (accepted_state == "degraded") ||
+        admission.value("expected_peer_origin", "") != inspection.expected_peer_origin ||
+        admission.value("expected_peer_node_id", "") != inspection.expected_peer_node_id) {
+      Invalid("pair-network-health admission evidence is invalid or belongs to another peer");
+    }
+    const PairNetworkHealthArmDecision decision = InspectPairNetworkHealthForArm(
+        {.status_json =
+             Json{{"schema_version", 2}, {"pair_network_health", admission.at("snapshot")}}.dump(),
+         .expected_peer_origin = inspection.expected_peer_origin,
+         .expected_peer_node_id = inspection.expected_peer_node_id});
+    if (decision == PairNetworkHealthArmDecision::kNotReady ||
+        (decision == PairNetworkHealthArmDecision::kGood ? "good" : "degraded") != accepted_state) {
+      Invalid("pair-network-health admission decision disagrees with its snapshot");
+    }
+    return decision;
+  } catch (const nlohmann::json::exception &failure) {
+    throw std::runtime_error(std::string("cannot parse pair-network-health admission evidence: ") +
+                             failure.what());
+  }
+}
+
+std::string PairNetworkHealthArmRequestBody(PairNetworkHealthArmDecision decision) {
+  switch (decision) {
+    case PairNetworkHealthArmDecision::kGood:
+      return Json{{"armed", true}}.dump();
+    case PairNetworkHealthArmDecision::kDegraded:
+      return Json{{"armed", true}, {"allow_degraded_network", true}}.dump();
+    case PairNetworkHealthArmDecision::kNotReady:
+      Invalid("unusable pair-network-health evidence cannot be overridden for arming");
+  }
+  Invalid("unknown pair-network-health arm decision");
+}
+
 DiscoveryPairingFixtureInspection InspectDiscoveryPairingFixture(std::string_view setup_json) {
   try {
     const Json setup = Json::parse(setup_json);
@@ -702,20 +931,18 @@ void ValidatePairedPoseHilReport(std::string_view report_json) {
     const Json report = Json::parse(report_json);
     const std::string shared_session_id = report.value("shared_session_id", "");
     const std::string report_type = report.value("report_type", "");
-    const bool lan_only = report_type == "android_dual_phone_paired_pose_arm_lan_hil";
     const Json &transition = report.at("pose_transition");
     const Json &peer_arm = transition.at("persisted_peer_arm");
     const Json &restore = report.at("configuration_restore");
     if (report.value("schema_version", 0) != 1 ||
-        (report_type != "android_dual_phone_paired_pose_arm_hil" && !lan_only) ||
+        report_type != "android_dual_phone_paired_pose_arm_lan_hil" ||
         !report.value("passed", false) || !report.value("camera_jobs_concurrent", false) ||
         report.value("single_pcm_replay_count", 0) != 1 || shared_session_id.empty() ||
         !transition.value("passed", false) || transition.value("leader_role", "") != "face_on" ||
         transition.value("shadow_role", "") != "down_the_line" ||
         transition.value("peer_dispatch", "") != "production_pose_peer_arm_client" ||
-        transition.value("peer_transport", "") !=
-            (lan_only ? "wifi_lan_direct" : "adb_reverse_to_shadow_http_api") ||
-        transition.value("adb_reverse_used", lan_only) != !lan_only ||
+        transition.value("peer_transport", "") != "wifi_lan_direct" ||
+        transition.value("adb_reverse_used", true) ||
         transition.value("host_control_transport", "") != "adb_forward" ||
         transition.value("high_speed_profile", "") != "720p240" ||
         transition.value("leader_trigger_source", "") != "local_audio" ||
@@ -741,11 +968,7 @@ void ValidatePairedPoseHilReport(std::string_view report_json) {
     ValidateUncalibratedTimingClaim(report);
     ValidateStandbyInferenceReportEvidence(report);
     ValidateSetupPreviewReportEvidence(report);
-    if (lan_only) {
-      ValidateLanPairedPoseReportEvidence(report);
-    } else if (!report.at("lan_endpoint_validation").is_null()) {
-      Invalid("ADB-reverse paired pose report unexpectedly claims LAN endpoint evidence");
-    }
+    ValidateLanPairedPoseReportEvidence(report);
     for (const std::string_view role : {"down_the_line", "face_on"}) {
       RequireArtifactPath(artifacts, {.role = role,
                                       .field = "initial_node_descriptor",

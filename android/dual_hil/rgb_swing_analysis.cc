@@ -226,7 +226,6 @@ RgbSwingAnalysis RgbSwingSequenceAnalyzer::Finish() {
       .minimum_white_duration_us = kMinimumWhiteDurationUs,
       .maximum_white_duration_us = kMaximumWhiteDurationUs,
       .maximum_absolute_optical_audio_offset_us = kMaximumOpticalAudioOffsetUs,
-      .maximum_localized_response_tile_count = 12U,
       .minimum_white_delta_passed =
           std::isfinite(maximum_delta) && maximum_delta >= kMinimumWhiteDelta,
   };
@@ -284,11 +283,9 @@ RgbSwingAnalysis RgbSwingSequenceAnalyzer::Finish() {
                                             result.white_duration_us <= kMaximumWhiteDurationUs;
   result.acceptance.optical_audio_offset_passed =
       std::abs(result.optical_to_audio_offset_us) <= kMaximumOpticalAudioOffsetUs;
-  result.acceptance.localized_response_passed = result.localized_response_tile_count <= 12U;
   result.detected =
       result.acceptance.minimum_white_delta_passed && result.acceptance.white_frame_count_passed &&
-      result.acceptance.white_duration_passed && result.acceptance.optical_audio_offset_passed &&
-      result.acceptance.localized_response_passed;
+      result.acceptance.white_duration_passed && result.acceptance.optical_audio_offset_passed;
   std::ostringstream diagnostic;
   diagnostic << "white LED tile=(" << result.tile_x << ',' << result.tile_y
              << ") delta=" << result.maximum_white_delta << " frames=" << support_frames

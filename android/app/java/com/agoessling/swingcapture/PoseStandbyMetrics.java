@@ -1,6 +1,7 @@
 package com.agoessling.swingcapture;
 
 import com.agoessling.swingcapture.pose.inference.PoseInferenceDelegate;
+import java.util.Arrays;
 import java.util.Objects;
 
 /** Thread-safe measurements for the continuously running pose standby path. */
@@ -8,6 +9,7 @@ public final class PoseStandbyMetrics {
   private static final long LATENCY_BUCKET_WIDTH_NS = 1_000_000L;
   private static final int LATENCY_REGULAR_BUCKET_COUNT = 10_000;
   private static final int LATENCY_BUCKET_COUNT = LATENCY_REGULAR_BUCKET_COUNT + 1;
+  static final int RECENT_INFERENCE_WINDOW_CAPACITY = 150;
   static final long INFERENCE_DEADLINE_NS = 200_000_000L;
   static final long INFERENCE_OUTLIER_BOUND_NS = 400_000_000L;
 
@@ -30,6 +32,10 @@ public final class PoseStandbyMetrics {
       long inferenceDurationP99Ns,
       long inferenceDeadlineMisses,
       long inferenceOutliers,
+      long recentInferenceSampleCount,
+      long recentInferenceDurationP95Ns,
+      long recentMaximumInferenceDurationNs,
+      long recentInferenceDeadlineMisses,
       long decisionAgeSamples,
       long rejectedDecisionTimestamps,
       long totalDecisionAgeNs,
@@ -85,6 +91,7 @@ public final class PoseStandbyMetrics {
   private long totalInferenceDurationNs;
   private long maximumInferenceDurationNs;
   private final LatencyHistogram inferenceDuration = new LatencyHistogram();
+  private final RecentInferenceWindow recentInferenceDuration = new RecentInferenceWindow();
   private long inferenceDeadlineMisses;
   private long inferenceOutliers;
   private long decisionAgeSamples;
@@ -146,6 +153,7 @@ public final class PoseStandbyMetrics {
     totalInferenceDurationNs = Math.addExact(totalInferenceDurationNs, durationNs);
     maximumInferenceDurationNs = Math.max(maximumInferenceDurationNs, durationNs);
     inferenceDuration.record(durationNs);
+    recentInferenceDuration.record(durationNs);
     if (durationNs > INFERENCE_DEADLINE_NS) {
       inferenceDeadlineMisses++;
     }
@@ -205,6 +213,7 @@ public final class PoseStandbyMetrics {
   }
 
   public synchronized Snapshot snapshot() {
+    RecentInferenceWindow.Snapshot recent = recentInferenceDuration.snapshot();
     return new Snapshot(
         delegate,
         offeredImages,
@@ -224,6 +233,10 @@ public final class PoseStandbyMetrics {
         inferenceDuration.percentileUpperBoundNs(99),
         inferenceDeadlineMisses,
         inferenceOutliers,
+        recent.sampleCount(),
+        recent.p95Ns(),
+        recent.maximumNs(),
+        recent.deadlineMisses(),
         decisionAgeSamples,
         rejectedDecisionTimestamps,
         totalDecisionAgeNs,
@@ -241,6 +254,50 @@ public final class PoseStandbyMetrics {
         armEvidenceFlushPresent,
         armEvidenceFlushFailed,
         armEvidenceFlushTimedOut);
+  }
+
+  /** Latest 30 seconds at the nominal five-Hz cadence, independent of lifetime dilution. */
+  private static final class RecentInferenceWindow {
+    record Snapshot(long sampleCount, long p95Ns, long maximumNs, long deadlineMisses) {}
+
+    private final long[] durationsNs = new long[RECENT_INFERENCE_WINDOW_CAPACITY];
+    private int nextIndex;
+    private int sampleCount;
+    private long deadlineMisses;
+
+    void record(long durationNs) {
+      if (sampleCount == durationsNs.length) {
+        if (durationsNs[nextIndex] > INFERENCE_DEADLINE_NS) {
+          deadlineMisses--;
+        }
+      } else {
+        sampleCount++;
+      }
+      durationsNs[nextIndex] = durationNs;
+      nextIndex = (nextIndex + 1) % durationsNs.length;
+      if (durationNs > INFERENCE_DEADLINE_NS) {
+        deadlineMisses++;
+      }
+    }
+
+    Snapshot snapshot() {
+      if (sampleCount == 0) {
+        return new Snapshot(0, 0, 0, 0);
+      }
+      long[] sorted = Arrays.copyOf(durationsNs, sampleCount);
+      Arrays.sort(sorted);
+      long maximumNs = sorted[sampleCount - 1];
+      int p95Index = (sampleCount * 95 + 99) / 100 - 1;
+      long p95Ns = sorted[p95Index];
+      long regularMaximumNs = LATENCY_REGULAR_BUCKET_COUNT * LATENCY_BUCKET_WIDTH_NS;
+      long p95UpperBoundNs =
+          p95Ns > regularMaximumNs
+              ? maximumNs
+              : p95Ns == 0
+                  ? LATENCY_BUCKET_WIDTH_NS
+                  : ((p95Ns - 1) / LATENCY_BUCKET_WIDTH_NS + 1) * LATENCY_BUCKET_WIDTH_NS;
+      return new Snapshot(sampleCount, p95UpperBoundNs, maximumNs, deadlineMisses);
+    }
   }
 
   /** Fixed-memory, one-millisecond histogram; percentile values are inclusive upper bounds. */

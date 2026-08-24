@@ -48,6 +48,8 @@ APP_SRCS = [
     "src/node_setup_app.tsx",
     "src/node_pairing.ts",
     "src/operational_health.ts",
+    "src/pair_network_health.ts",
+    "src/pair_network_health_notice.tsx",
     "src/paired_preview.ts",
     "src/review_api.ts",
     "src/review_app.tsx",
@@ -83,6 +85,8 @@ ts_project(
         "src/node_pairing.test.ts",
         "src/node_setup_pairing.test.tsx",
         "src/node_setup_preview.test.tsx",
+        "src/pair_network_health.test.ts",
+        "src/pair_network_health_component.test.tsx",
         "src/production_integration.e2e.spec.ts",
         "src/review_app.test.tsx",
         "src/review.e2e.spec.ts",
@@ -161,6 +165,59 @@ js_test(
     name = "live_status_test",
     size = "small",
     entry_point = ":live_status_test.js",
+)
+
+esbuild(
+    name = "pair_network_health_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/pair_network_health.test.ts"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/pair_network_health.test.ts",
+    external = [
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "pair_network_health_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "pair_network_health_test",
+    size = "small",
+    entry_point = ":pair_network_health_test.js",
+)
+
+esbuild(
+    name = "pair_network_health_component_test_bundle",
+    testonly = True,
+    srcs = APP_SRCS + ["src/pair_network_health_component.test.tsx"],
+    deps = NPM_TEST_DEPS,
+    entry_point = "src/pair_network_health_component.test.tsx",
+    external = [
+        "@testing-library/react",
+        "jsdom",
+        "react",
+        "react-dom",
+        "react-dom/*",
+        "react/*",
+    ],
+    output = "pair_network_health_component_test.js",
+    platform = "node",
+    sourcemap = "inline",
+    target = "node22",
+    tsconfig = ":tsconfig_esbuild",
+)
+
+js_test(
+    name = "pair_network_health_component_test",
+    size = "small",
+    data = NPM_TEST_DEPS,
+    entry_point = ":pair_network_health_component_test.js",
 )
 
 esbuild(
@@ -402,6 +459,7 @@ playwright_bin.playwright_test(
         "src/dual_node_review_api.ts",
         "src/live_status.ts",
         "src/operational_health.ts",
+        "src/pair_network_health.ts",
         "src/production_integration.e2e.spec.ts",
         "src/review_api.ts",
         "src/review.e2e.spec.ts",

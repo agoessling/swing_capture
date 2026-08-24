@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+#include "android/dual_hil/concurrent_hil_validation.h"
 #include "android/pose_hil/pose_qualification_performance.h"
 
 namespace swing_capture::android::dual_hil {
@@ -238,6 +239,31 @@ void ValidateTelemetry(const Json &samples, const PairedPoseQualificationPolicy 
   }
 }
 
+void ValidatePairNetworkHealthAdmission(const Json &report) {
+  const Json &setup = report.at("setup");
+  const Json &lan = setup.at("lan_endpoint_validation");
+  const Json &leader = lan.at("face_on");
+  const Json &shadow = lan.at("down_the_line");
+  const std::string leader_node_id = setup.value("leader_node_id", "");
+  const std::string shadow_node_id = setup.value("shadow_node_id", "");
+  const std::string leader_origin = leader.value("origin", "");
+  const std::string shadow_origin = shadow.value("origin", "");
+  if (!setup.is_object() || setup.value("leader_role", "") != "face_on" ||
+      setup.value("shadow_role", "") != "down_the_line" || leader_node_id.empty() ||
+      shadow_node_id.empty() || leader_node_id == shadow_node_id || !lan.is_object() ||
+      !leader.is_object() || !shadow.is_object() || leader.value("role", "") != "face_on" ||
+      leader.value("pose_mode", "") != "leader" || shadow.value("role", "") != "down_the_line" ||
+      shadow.value("pose_mode", "") != "shadow" || leader_origin.empty() || shadow_origin.empty() ||
+      leader_origin == shadow_origin || leader.value("peer_origin", "") != shadow_origin ||
+      !shadow.at("peer_origin").is_null()) {
+    Invalid("qualification setup does not prove the exact direct-LAN leader-to-shadow topology");
+  }
+  static_cast<void>(InspectPairNetworkHealthAdmission(
+      {.admission_json = setup.at("pair_network_health_admission").dump(),
+       .expected_peer_origin = shadow_origin,
+       .expected_peer_node_id = shadow_node_id}));
+}
+
 }  // namespace
 
 const PairedPoseQualificationPolicy &PairedPoseQualificationPolicyForMode(std::string_view mode) {
@@ -285,6 +311,7 @@ PairedPoseQualificationReportValidation ValidatePairedPoseQualificationReport(
     if (report.value("artifact_path_scope", "") != "undeclared_output_root") {
       Invalid("qualification report artifact path scope is invalid");
     }
+    ValidatePairNetworkHealthAdmission(report);
     ValidateCycles(report.at("cycles"), report.at("artifacts").at("cycles"), policy);
     ValidateTelemetry(report.at("telemetry_samples"), policy);
     const auto performance = pose_hil::ValidatePoseQualificationPerformanceSummary(report_json);

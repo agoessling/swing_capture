@@ -397,7 +397,8 @@ async function main() {
       />,
     );
     assert.equal((await screen.findAllByText(heading)).length, 2);
-    assert.equal(screen.getAllByRole("alert").length, 2);
+    assert.equal(screen.getAllByRole("alert").length, 3);
+    assert.ok(screen.getByText("Pair network: Unknown"));
     assert.equal(screen.getAllByText(new RegExp(detail)).length, 2);
     const peerFailureAccessibility = await axe.run(peerFailure.container, {
       rules: { "color-contrast": { enabled: false } },
@@ -1254,6 +1255,17 @@ async function testHttpContract() {
       `http://station.test/api/v1/sessions/${session.session_id}/feedback`,
       `http://station.test/api/v1/sessions/${session.session_id}/diagnostics.zip`,
     ],
+  );
+  await api.setArmed(true, { allowDegradedNetwork: true });
+  assert.deepEqual(JSON.parse(String(calls.at(-1)?.init?.body)), {
+    armed: true,
+    allow_degraded_network: true,
+  });
+  await api.setArmed(true, { allowDegradedNetwork: false });
+  assert.deepEqual(
+    JSON.parse(String(calls.at(-1)?.init?.body)),
+    { armed: true },
+    "the optional degraded acknowledgement is omitted unless explicitly true",
   );
 
   const malformedCapabilityApi = new HttpReviewApi(

@@ -11,6 +11,7 @@ final class NodeHttpProtocol {
   static final String CAPTURE_ARM_PATH = "/api/v1/capture/arm";
   static final String MISSED_SHOT_PATH = "/api/v1/capture/missed-shot";
   static final String PUBLIC_CLOCK_HINT_PATH = "/api/v1/clock";
+  static final String NETWORK_HEALTH_REVERSE_PATH = "/api/v1/network-health/reverse-probe";
 
   enum ControlOperation {
     CAPTURE_ARM,

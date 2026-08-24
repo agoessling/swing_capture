@@ -333,6 +333,137 @@ java_test(
 )
 
 java_library(
+    name = "pair_network_health_policy",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthPolicy.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "pair_network_health_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.PairNetworkHealthPolicyTest",
+    use_testrunner = False,
+    deps = [":pair_network_health_policy"],
+)
+
+java_library(
+    name = "pair_network_arm_policy",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkArmPolicy.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":pair_network_health_policy",
+        ":pose_node_mode",
+    ],
+)
+
+java_test(
+    name = "pair_network_arm_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkArmPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.PairNetworkArmPolicyTest",
+    use_testrunner = False,
+    deps = [
+        ":pair_network_arm_policy",
+        ":pair_network_health_policy",
+        ":pose_node_mode",
+    ],
+)
+
+java_library(
+    name = "pair_network_health_poll_task",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthPollTask.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "pair_network_health_poll_task_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthPollTaskTest.java"],
+    main_class = "com.agoessling.swingcapture.PairNetworkHealthPollTaskTest",
+    use_testrunner = False,
+    deps = [":pair_network_health_poll_task"],
+)
+
+java_library(
+    name = "pair_network_health_immediate_poll",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthImmediatePoll.java"],
+    visibility = ["//visibility:private"],
+)
+
+java_test(
+    name = "pair_network_health_immediate_poll_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthImmediatePollTest.java"],
+    main_class = "com.agoessling.swingcapture.PairNetworkHealthImmediatePollTest",
+    use_testrunner = False,
+    deps = [":pair_network_health_immediate_poll"],
+)
+
+java_library(
+    name = "pair_network_health_wire_json",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthWireJson.java"],
+    visibility = ["//visibility:private"],
+    deps = [":pair_network_health_policy"],
+)
+
+java_test(
+    name = "pair_network_health_wire_json_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthWireJsonTest.java"],
+    main_class = "com.agoessling.swingcapture.PairNetworkHealthWireJsonTest",
+    use_testrunner = False,
+    deps = [
+        ":pair_network_health_policy",
+        ":pair_network_health_wire_json",
+    ],
+)
+
+java_library(
+    name = "pair_network_health_callback_policy",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthCallbackPolicy.java"],
+    visibility = ["//visibility:private"],
+    deps = [":peer_transport_security_policy"],
+)
+
+java_test(
+    name = "pair_network_health_callback_policy_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthCallbackPolicyTest.java"],
+    main_class = "com.agoessling.swingcapture.PairNetworkHealthCallbackPolicyTest",
+    use_testrunner = False,
+    deps = [":pair_network_health_callback_policy"],
+)
+
+java_library(
+    name = "pair_network_health_client",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthClient.java"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":node_http_protocol",
+        ":pair_network_health_policy",
+        ":pair_network_health_wire_json",
+        ":peer_clock_client",
+        ":peer_transport_security_policy",
+    ],
+)
+
+java_test(
+    name = "pair_network_health_client_test",
+    size = "small",
+    srcs = ["java/com/agoessling/swingcapture/PairNetworkHealthClientTest.java"],
+    main_class = "com.agoessling.swingcapture.PairNetworkHealthClientTest",
+    use_testrunner = False,
+    deps = [
+        ":node_http_protocol",
+        ":pair_network_health_client",
+        ":pair_network_health_policy",
+        ":pair_network_health_wire_json",
+        ":peer_clock_client",
+    ],
+)
+
+java_library(
     name = "pose_station_configuration_snapshot",
     srcs = ["java/com/agoessling/swingcapture/PoseStationConfigurationSnapshot.java"],
     visibility = ["//visibility:private"],
@@ -1622,6 +1753,18 @@ android_library(
             "java/com/agoessling/swingcapture/LanNodeDiscoveryRegistryTest.java",
             "java/com/agoessling/swingcapture/MonitorCandidateWait.java",
             "java/com/agoessling/swingcapture/MonitorCandidateWaitTest.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthPolicy.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthPolicyTest.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthImmediatePoll.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthImmediatePollTest.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthPollTask.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthPollTaskTest.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthWireJson.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthWireJsonTest.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthCallbackPolicy.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthCallbackPolicyTest.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthClient.java",
+            "java/com/agoessling/swingcapture/PairNetworkHealthClientTest.java",
             "java/com/agoessling/swingcapture/SessionBoundValue.java",
             "java/com/agoessling/swingcapture/SessionBoundValueTest.java",
             "java/com/agoessling/swingcapture/LatestFrameSlot.java",
@@ -1784,6 +1927,13 @@ android_library(
         ":peer_clock_client",
         ":peer_clock_json_response_parser",
         ":peer_clock_synchronizer",
+        ":pair_network_health_callback_policy",
+        ":pair_network_health_immediate_poll",
+        ":pair_network_arm_policy",
+        ":pair_network_health_client",
+        ":pair_network_health_policy",
+        ":pair_network_health_poll_task",
+        ":pair_network_health_wire_json",
         ":pose_peer_arm_client",
         ":latest_frame_slot",
         ":pose_standby_metrics",

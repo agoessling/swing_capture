@@ -243,7 +243,7 @@ videos; this standby target isolates the new low-power missed-impact recorder.
 
 ## Paired pose-arm production transition
 
-`//android/dual_hil:dual_phone_paired_pose_arm_hil_test` configures the Pixel 6
+`//android/dual_hil:dual_phone_paired_pose_arm_lan_hil_test` configures the Pixel 6
 face-on/across-the-line node as the leader and the Pixel 5a down-the-line node as its shadow.
 Both phones run the real on-device 5 Hz standby inference and standby audio.
 The test invokes a launch-gated deterministic candidate endpoint on the leader;
@@ -256,9 +256,12 @@ as the concurrent capture HIL.
 The deterministic `POST /api/v1/hil/pose-arm` route is unavailable after a
 normal application launch. The HIL starts each app with the explicit
 `enable_pose_arm_hil=true` activity extra, and force-stop cleanup removes that
-process-local permission. The leader reaches the shadow through a test-owned
-ADB reverse tunnel, while the actual bearer-authenticated peer protocol is
-unchanged. Before installation/configuration the target snapshots each phone's
+process-local permission. The leader reaches the shadow directly through the
+two configured Wi-Fi origins. The runner requires
+`SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN` and
+`SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN`, verifies both endpoints, and creates no
+ADB reverse; ADB is used only for host orchestration. Before
+installation/configuration the target snapshots each phone's
 complete private `node_configuration` generation (including the write-only
 peer credential). Successful runs require byte-for-byte restoration after force-stop and record
 that result in the aggregate report. Every dual-phone target initializes `cleanup.json` before its
@@ -268,9 +271,11 @@ fail, the original physical diagnostic and exit code remain authoritative while 
 cleanup object retains the unwind failure.
 
 ```bash
-bazel test //android/dual_hil:dual_phone_paired_pose_arm_hil_test \
+bazel test //android/dual_hil:dual_phone_paired_pose_arm_lan_hil_test \
   --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=<pixel-5a-adb-serial> \
   --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=<pixel-6-adb-serial> \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN=http://<pixel-6-ip>:8088 \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN=http://<pixel-5a-ip>:8088 \
   --test_env=SWING_CAPTURE_PCM_REPLAY_MANIFEST="$PWD/android/dual_hil/field_pcm_replay_cases.json" \
   --test_env=SWING_CAPTURE_PCM_REPLAY_WAV="$PWD/artifacts/<field-session>/face_on_pixel6_audio.wav" \
   --test_env=SWING_CAPTURE_PCM_REPLAY_CASE=S06-representative \
@@ -279,13 +284,15 @@ bazel test //android/dual_hil:dual_phone_paired_pose_arm_hil_test \
 
 The target is `manual`, `local`, and `exclusive`; it requires two Android
 phones and the RP2040. Every camera-owning stage is bounded to 15 seconds.
-The latest passing evidence is preserved at
+The earlier pre-direct-LAN passing milestone is preserved at
 `artifacts/android_pose_field_readiness_20260821/dual_paired_passed_000604`.
 It retained 588 Pixel 6 frames at 238.876 fps and 582 Pixel 5a frames at
 239.353 fps, passed exact decode, audio, optical, and AprilTag checks on both
 phones, and persisted a paired record with 10.890 ms maximum mapped trigger
 separation and 7.359 ms combined uncertainty. Configuration restoration was
 checked byte-for-byte and no credential was retained in the artifact tree.
+That artifact remains historical evidence for the earlier relay ceremony; use
+the LAN-specific command above for current acceptance.
 
 ### Explicit long production-workload qualification
 
@@ -301,9 +308,11 @@ bazel test //android/dual_hil:dual_phone_paired_pose_soak_30m_hil_test \
   --test_output=streamed --nocache_test_results
 ```
 
-Both targets require the same two serials, LAN origins, station configuration,
-PCM manifest/WAV, and required-positive case environment as the short LAN
-target. Their durations are closed in code at exactly 300 and 1,800 seconds;
+Both targets require the same two serials,
+`SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN`,
+`SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN`, station configuration, PCM
+manifest/WAV, and required-positive case environment as the short LAN command
+above. Their durations are closed in code at exactly 300 and 1,800 seconds;
 there is no free-form duration override. Both displays are put to sleep and
 verified off after monitoring starts, then restored during structured cleanup.
 Once per minute the runner exercises the production leader-to-shadow arm,

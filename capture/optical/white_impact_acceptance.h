@@ -8,7 +8,8 @@ namespace swing_capture::optical {
 // Camera-SDK-independent qualification policy shared by the optical analyzer,
 // session publisher, and serialized-artifact validator. Keep this deliberately
 // limited to the metrics that determine white-impact acceptance; color distance
-// remains a diagnostic behind matching_frame_count/matching_fraction.
+// remains a diagnostic behind matching_frame_count/matching_fraction. Peak location and response
+// footprint are likewise diagnostic telemetry, not acceptance inputs.
 struct WhiteImpactAcceptancePolicy {
   std::size_t minimum_stable_frames;
   double minimum_matching_fraction;

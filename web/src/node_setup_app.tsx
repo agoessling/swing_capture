@@ -25,6 +25,7 @@ import {
   type PeerPairingBinding,
 } from "./node_pairing.js";
 import { operationalHealthDescription, type OperationalHealth } from "./operational_health.js";
+import { PairNetworkHealthNotice } from "./pair_network_health_notice.js";
 import type { ObjectUrlFactory } from "./paired_preview.js";
 
 const FULL_FRAME_HITTING_REGION = { left: 0, top: 0, right: 1, bottom: 1 } as const;
@@ -805,6 +806,13 @@ function NodeSetupCard({
         <OperationalHealthNotice
           health={setup.operational_health}
           phoneLabel={roleLabel(draft.role)}
+        />
+      )}
+
+      {setup.pair_network_health?.configured !== true ? null : (
+        <PairNetworkHealthNotice
+          health={setup.pair_network_health}
+          label={`Pair network health for ${roleLabel(draft.role)}`}
         />
       )}
 

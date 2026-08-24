@@ -55,6 +55,7 @@ cc_library(
     hdrs = ["paired_pose_qualification_policy.h"],
     visibility = ["//visibility:private"],
     deps = [
+        ":concurrent_hil_validation",
         "//android/pose_hil:pose_qualification_performance",
         "@nlohmann_json//:json",
     ],
@@ -472,7 +473,7 @@ cc_test(
     args = [
         "$(rootpath //tools/android:adb)",
         "$(rootpath //android/app:swing_capture.apk)",
-        "paired-pose",
+        "paired-pose-lan",
         "$(rootpath //tools:android_apk_installer)",
     ],
     data = [
@@ -488,6 +489,7 @@ cc_test(
         "manual",
         "no-sandbox",
         "requires-android-phone",
+        "requires-lan",
         "requires-rp2040",
     ],
     timeout = "short",

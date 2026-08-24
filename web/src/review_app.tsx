@@ -2,6 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DiagnosticFeedbackPanel } from "./diagnostic_feedback.js";
 import { FieldRecordingPanel, supportsFieldRecording } from "./field_recording.js";
 import { operationalHealthDescription, type OperationalHealth } from "./operational_health.js";
+import {
+  PairNetworkHealthNotice,
+  UnknownPairNetworkHealthNotice,
+} from "./pair_network_health_notice.js";
 import type {
   CaptureStatus,
   ClipManifest,
@@ -28,6 +32,7 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
+  const [allowDegradedNetwork, setAllowDegradedNetwork] = useState(false);
   const [refreshRevision, setRefreshRevision] = useState(0);
   const latestSeenRef = useRef<string | null>(null);
   const manifestRequestRef = useRef<string | null>(null);
@@ -189,9 +194,20 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
   }, [api, pollIntervalMs, refresh]);
 
   const setArmed = async (armed: boolean) => {
+    const allowDegradedNetworkForAttempt = armed && allowDegradedNetwork;
+    if (armed) {
+      // The acknowledgement authorizes exactly this attempt, including when one node rejects and
+      // the dual-node coordinator rolls the other node back.
+      setAllowDegradedNetwork(false);
+    }
     setActionPending(true);
     try {
-      setCapture(await api.setArmed(armed));
+      setCapture(
+        await api.setArmed(
+          armed,
+          allowDegradedNetworkForAttempt ? { allowDegradedNetwork: true } : undefined,
+        ),
+      );
       setActionError(null);
     } catch (caught) {
       setActionError(errorMessage(caught));
@@ -250,6 +266,19 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
     capture?.state === "waiting_post_roll" ||
     capture?.state === "encoding";
   const captureOperationBusy = captureBusy || capture?.hil.busy === true;
+  const networkHealth = capture?.pair_network_health;
+  const configuredNetworkHealth = networkHealth?.configured === true ? networkHealth : undefined;
+  const configuredNetworkUnknown = capture?.pose?.mode === "leader" && networkHealth === undefined;
+  const degradedNetworkOverrideRequired =
+    configuredNetworkHealth !== undefined &&
+    !configuredNetworkHealth.stale &&
+    configuredNetworkHealth.state === "degraded";
+  const networkPreventsArm =
+    capture?.armed !== true &&
+    (configuredNetworkUnknown ||
+      configuredNetworkHealth?.stale === true ||
+      configuredNetworkHealth?.state === "unusable" ||
+      (degradedNetworkOverrideRequired && !allowDegradedNetwork));
   const hilCompatible =
     capture !== null && !capture.armed && (capture.state === "setup" || capture.state === "ready");
   const sortedSessions = useMemo(
@@ -258,6 +287,12 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
     [sessions],
   );
   const error = actionError ?? refreshError;
+
+  useEffect(() => {
+    if (capture?.armed === true || !degradedNetworkOverrideRequired) {
+      setAllowDegradedNetwork(false);
+    }
+  }, [capture?.armed, degradedNetworkOverrideRequired]);
 
   return (
     <div className="app-shell review-shell">
@@ -285,7 +320,9 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
           </div>
           <div className="capture-actions">
             <button
-              disabled={capture === null || actionPending || captureOperationBusy}
+              disabled={
+                capture === null || actionPending || captureOperationBusy || networkPreventsArm
+              }
               onClick={() => void setArmed(!capture?.armed)}
               type="button"
             >
@@ -317,6 +354,24 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
           ) : null}
           {capture?.operational_health === undefined ? null : (
             <OperationalHealthNotice health={capture.operational_health} />
+          )}
+          {configuredNetworkHealth === undefined ? null : (
+            <PairNetworkHealthNotice health={configuredNetworkHealth} />
+          )}
+          {configuredNetworkUnknown ? <UnknownPairNetworkHealthNotice /> : null}
+          {!degradedNetworkOverrideRequired || capture?.armed === true ? null : (
+            <label className="degraded-network-override">
+              <input
+                checked={allowDegradedNetwork}
+                onChange={(event) => setAllowDegradedNetwork(event.currentTarget.checked)}
+                type="checkbox"
+              />
+              Arm once using degraded pair network
+              <small>
+                This acknowledgement is not saved. Recheck phone-to-phone reliability before every
+                arm attempt.
+              </small>
+            </label>
           )}
           {capture?.pose === undefined ? null : (
             <PeerArmNotice context="live" status={capture.pose.peer_arm} />

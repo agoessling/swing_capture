@@ -26,12 +26,10 @@ struct RgbSwingAcceptanceEvidence {
   double minimum_white_duration_us = 0.0;
   double maximum_white_duration_us = 0.0;
   std::int64_t maximum_absolute_optical_audio_offset_us = 0;
-  std::size_t maximum_localized_response_tile_count = 0;
   bool minimum_white_delta_passed = false;
   bool white_frame_count_passed = false;
   bool white_duration_passed = false;
   bool optical_audio_offset_passed = false;
-  bool localized_response_passed = false;
 };
 
 struct RgbSwingAnalysis {
@@ -52,6 +50,9 @@ struct RgbSwingAnalysis {
   std::int64_t optical_onset_upper_bound_us = 0;
   std::vector<std::byte> representative_luminance;
   std::vector<RetainedLuminanceFrame> diagnostic_luminance_frames;
+  // Diagnostic only. Reflections can broaden the response without invalidating an otherwise
+  // temporally isolated white marker, so neither the peak location nor its footprint is an
+  // acceptance condition.
   std::size_t localized_response_tile_count = 0;
   // Diagnostic only: the fixture intentionally emits colored post-impact states for the entire
   // retained post-roll, so their brightness is not an "off" acceptance baseline.

@@ -7,6 +7,7 @@ import concurrent.futures
 import dataclasses
 import ipaddress
 import json
+import math
 import os
 import re
 import subprocess
@@ -29,6 +30,10 @@ if TYPE_CHECKING:
 PACKAGE_NAME = "com.agoessling.swingcapture"
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32}$")
 TOKEN_XML_PATTERN = re.compile(r'<string name="control_token">([^<]+)</string>')
+CREDENTIAL_TOKEN_IN_TEXT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{32}(?![A-Za-z0-9_-])"
+)
+BEARER_CREDENTIAL_PATTERN = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+")
 BATTERY_FIELD_PATTERN = re.compile(r"^\s*(level|scale|temperature|voltage):\s*(-?\d+)\s*$")
 THERMAL_STATUS_PATTERN = re.compile(r"Thermal [Ss]tatus:\s*(\d+)")
 BSSID_PREFIX_PATTERN = r"(?im)^\s*(?:m)?WifiInfo:.*?\bBSSID:\s*"
@@ -43,6 +48,11 @@ MAXIMUM_BATTERY_TEMPERATURE_CELSIUS = 100.0
 MAXIMUM_ANDROID_THERMAL_STATUS = 6
 MAXIMUM_POSE_INFERENCE_P95_NS = 200_000_000
 MAXIMUM_POSE_INFERENCE_OUTLIER_NS = 400_000_000
+MINIMUM_RECENT_POSE_INFERENCE_SAMPLES = 100
+MAXIMUM_RECENT_POSE_INFERENCE_SAMPLES = 150
+PRODUCTION_POSE_STANDBY_WIDTH = 640
+PRODUCTION_POSE_STANDBY_HEIGHT = 360
+MINIMUM_JITTER_SAMPLE_COUNT = 2
 MAXIMUM_WEB_ASSET_BYTES = 2 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 5
 PAIR_NODE_COUNT = 2
@@ -57,11 +67,96 @@ _INVALID_ORIGIN_PORT = "direct-LAN origin has an invalid port"
 _INVALID_ORIGIN = "direct-LAN origin must be an uncredentialed HTTP origin"
 _LOOPBACK_HOST = "loopback origin could be an ADB USB forward"
 _LOOPBACK_ADDRESS = "loopback or unspecified origin is not direct LAN"
+_MAXIMUM_SIGNED_64_BIT_INTEGER = 2**63 - 1
+_STOPPED_CAPTURE_STATES = frozenset(("ready", "setup", "stopped"))
+_FIELD_RECORDING_STATES = frozenset(("idle", "starting", "recording", "stopping", "ready", "error"))
+_TERMINAL_FIELD_RECORDING_STATES = frozenset(("idle", "ready", "error"))
+_CLEAN_FIELD_RECORDING_STATES = frozenset(("idle", "ready"))
+_FIELD_RECORDING_STATUS_FIELDS = frozenset(
+    (
+        "schema_version",
+        "state",
+        "active_recording_id",
+        "shared_recording_id",
+        "started_at_utc",
+        "started_elapsed_realtime_ns",
+        "elapsed_ms",
+        "video_bytes",
+        "audio_frames",
+        "max_duration_seconds",
+        "error",
+        "hil_reject_next_start",
+        "hil_fail_next_accepted_start",
+        "hil_accepted_start_waiting",
+    )
+)
+_SENSITIVE_STATUS_KEY_FRAGMENTS = (
+    "authorization",
+    "capability",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
+_STATUS_DIAGNOSTIC_FIELDS = (
+    "schema_version",
+    "state",
+    "armed",
+    "active_session_id",
+    "error",
+    "video_frames",
+    "audio_frames",
+    "ring_bytes",
+    "ring_duration_us",
+    "shared_session_id",
+    "server_elapsed_realtime_ns",
+    "last_trigger_elapsed_realtime_ns",
+    "pose",
+    "operational_health",
+    "pair_network_health",
+    "device_admission",
+    "reboot_recovery",
+    "live_status",
+)
 
 
 def _message(*parts: str) -> str:
     """Join diagnostic fragments without relying on implicit literal concatenation."""
     return "".join(parts)
+
+
+def _credential_free_status_value(value: object) -> object:
+    """Recursively retain JSON telemetry while redacting credential-shaped values."""
+    if isinstance(value, str):
+        redacted = BEARER_CREDENTIAL_PATTERN.sub(r"\1[REDACTED]", value)
+        return CREDENTIAL_TOKEN_IN_TEXT_PATTERN.sub("[REDACTED]", redacted)
+    if isinstance(value, list):
+        return [_credential_free_status_value(item) for item in cast("list[object]", value)]
+    if isinstance(value, Mapping):
+        mapping = cast("Mapping[object, object]", value)
+        retained: dict[str, object] = {}
+        for raw_key, item in mapping.items():
+            key = str(raw_key)
+            if any(fragment in key.casefold() for fragment in _SENSITIVE_STATUS_KEY_FRAGMENTS):
+                retained[key] = "[REDACTED]"
+            else:
+                retained[key] = _credential_free_status_value(item)
+        return retained
+    return value
+
+
+def capture_status_diagnostics(status: Mapping[str, object]) -> dict[str, object]:
+    """Return the rich, credential-free status subset retained in every doctor attempt."""
+    return {
+        field: _credential_free_status_value(status[field])
+        for field in _STATUS_DIAGNOSTIC_FIELDS
+        if field in status
+    }
+
+
+def field_recording_status_diagnostics(status: Mapping[str, object]) -> dict[str, object]:
+    """Retain the full credential-free field-recorder status response."""
+    return cast("dict[str, object]", _credential_free_status_value(status))
 
 
 @final
@@ -168,6 +263,7 @@ class NodeEvidence:
     descriptor: Mapping[str, object]
     setup: Mapping[str, object]
     status: Mapping[str, object]
+    field_recording_status: Mapping[str, object]
     clock: Mapping[str, object]
     unauthenticated_setup_status: int
     web_assets: tuple[HostedWebAsset, ...]
@@ -325,6 +421,253 @@ def _optional_mapping(value: object) -> Mapping[str, object]:
     return cast("Mapping[str, object]", value) if isinstance(value, Mapping) else {}
 
 
+@dataclasses.dataclass(frozen=True)
+class _PairNetworkHealthAssessment:
+    valid: bool
+    diagnostic: str
+    state: str = ""
+    measured: bool = False
+    stale: bool = False
+    peer_origin: str = ""
+    peer_node_id: str = ""
+    issues: tuple[str, ...] = ()
+
+
+def _invalid_pair_network_health(diagnostic: str) -> _PairNetworkHealthAssessment:
+    return _PairNetworkHealthAssessment(valid=False, diagnostic=diagnostic)
+
+
+def _canonical_nonnegative_integer(value: object) -> int | None:
+    if not isinstance(value, str) or re.fullmatch(r"0|[1-9]\d*", value) is None:
+        return None
+    parsed = int(value)
+    return parsed if parsed <= _MAXIMUM_SIGNED_64_BIT_INTEGER else None
+
+
+def _strict_json_integer(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _pair_network_direction_valid(value: object) -> bool:  # noqa: PLR0911
+    if not isinstance(value, Mapping):
+        return False
+    value = cast("Mapping[str, object]", value)
+    expected_fields = {
+        "schema_version",
+        "attempts",
+        "successes",
+        "timeouts",
+        "round_trip_ns",
+        "transfer_bytes",
+        "transfer_duration_ns",
+        "transfer_complete",
+        "minimum_round_trip_ns",
+        "median_round_trip_ns",
+        "p95_round_trip_ns",
+        "maximum_round_trip_ns",
+        "jitter_ns",
+        "transfer_bits_per_second",
+    }
+    if set(value) != expected_fields or _strict_json_integer(value.get("schema_version")) != 1:
+        return False
+    attempts = _strict_json_integer(value.get("attempts"))
+    successes = _strict_json_integer(value.get("successes"))
+    timeouts = _strict_json_integer(value.get("timeouts"))
+    if (
+        attempts is None
+        or attempts <= 0
+        or successes is None
+        or not 0 <= successes <= attempts
+        or timeouts is None
+        or not 0 <= timeouts <= attempts - successes
+    ):
+        return False
+    round_trips_value = value.get("round_trip_ns")
+    if not isinstance(round_trips_value, list):
+        return False
+    round_trips = [
+        _canonical_nonnegative_integer(item) for item in cast("list[object]", round_trips_value)
+    ]
+    if any(item is None for item in round_trips) or len(round_trips) != successes:
+        return False
+    parsed_round_trips = cast("list[int]", round_trips)
+    if parsed_round_trips != sorted(parsed_round_trips):
+        return False
+    transfer_bytes = _canonical_nonnegative_integer(value.get("transfer_bytes"))
+    transfer_duration = _canonical_nonnegative_integer(value.get("transfer_duration_ns"))
+    transfer_complete = value.get("transfer_complete")
+    if (
+        transfer_bytes is None
+        or transfer_duration is None
+        or not isinstance(transfer_complete, bool)
+        or (transfer_complete and (transfer_bytes == 0 or transfer_duration == 0))
+    ):
+        return False
+    derived = {
+        "minimum_round_trip_ns": parsed_round_trips[0] if parsed_round_trips else 0,
+        "median_round_trip_ns": (
+            parsed_round_trips[(50 * len(parsed_round_trips) + 99) // 100 - 1]
+            if parsed_round_trips
+            else 0
+        ),
+        "p95_round_trip_ns": (
+            parsed_round_trips[(95 * len(parsed_round_trips) + 99) // 100 - 1]
+            if parsed_round_trips
+            else 0
+        ),
+        "maximum_round_trip_ns": parsed_round_trips[-1] if parsed_round_trips else 0,
+        "jitter_ns": (
+            parsed_round_trips[-1] - parsed_round_trips[0]
+            if len(parsed_round_trips) >= MINIMUM_JITTER_SAMPLE_COUNT
+            else 0
+        ),
+    }
+    if any(
+        _canonical_nonnegative_integer(value.get(field)) != expected
+        for field, expected in derived.items()
+    ):
+        return False
+    bits_per_second = value.get("transfer_bits_per_second")
+    if (
+        not isinstance(bits_per_second, (int, float))
+        or isinstance(bits_per_second, bool)
+        or not math.isfinite(bits_per_second)
+        or bits_per_second < 0
+    ):
+        return False
+    expected_bits_per_second = (
+        0.0
+        if transfer_duration == 0
+        else transfer_bytes * 8.0 * 1_000_000_000.0 / transfer_duration
+    )
+    return math.isclose(bits_per_second, expected_bits_per_second, rel_tol=1e-12, abs_tol=0.0)
+
+
+def _pair_network_health_assessment(  # noqa: C901, PLR0911, PLR0912
+    value: object, pose_mode: str
+) -> _PairNetworkHealthAssessment:
+    if pose_mode not in {"leader", "shadow", "disabled"}:
+        return _invalid_pair_network_health("pose mode is unsupported for network health")
+    if not isinstance(value, Mapping):
+        return _invalid_pair_network_health("pair network health is missing or not an object")
+    value = cast("Mapping[str, object]", value)
+    expected_fields = {
+        "schema_version",
+        "configured",
+        "state",
+        "raw_state",
+        "measured",
+        "stale",
+        "transition_pending",
+        "age_ns",
+        "issues",
+        "peer",
+        "measured_at_elapsed_realtime_ns",
+        "local_to_peer",
+        "peer_to_local",
+    }
+    if set(value) != expected_fields or _strict_json_integer(value.get("schema_version")) != 1:
+        return _invalid_pair_network_health("pair network-health fields do not match schema 1")
+    configured = value.get("configured")
+    measured = value.get("measured")
+    stale = value.get("stale")
+    transition_pending = value.get("transition_pending")
+    if not all(
+        isinstance(field, bool) for field in (configured, measured, stale, transition_pending)
+    ):
+        return _invalid_pair_network_health("pair network-health flags must be booleans")
+    state = value.get("state")
+    raw_state = value.get("raw_state")
+    if state not in {"good", "degraded", "unusable"} or raw_state not in {
+        "good",
+        "degraded",
+        "unusable",
+    }:
+        return _invalid_pair_network_health("pair network-health state is unsupported")
+    age = _canonical_nonnegative_integer(value.get("age_ns"))
+    issues_value = value.get("issues")
+    issues_list = cast("list[object]", issues_value) if isinstance(issues_value, list) else []
+    if (
+        age is None
+        or not isinstance(issues_value, list)
+        or not all(isinstance(issue, str) and bool(issue) for issue in issues_list)
+    ):
+        return _invalid_pair_network_health("pair network-health age or issues are malformed")
+    issues = tuple(cast("list[str]", issues_list))
+
+    peer_value = value.get("peer")
+    peer_origin = ""
+    peer_node_id = ""
+    if peer_value is not None:
+        if not isinstance(peer_value, Mapping):
+            return _invalid_pair_network_health("pair network-health peer is malformed")
+        peer = cast("Mapping[str, object]", peer_value)
+        if set(peer) != {"origin", "node_id"}:
+            return _invalid_pair_network_health("pair network-health peer is malformed")
+        peer_origin = _string(peer.get("origin"))
+        peer_node_id = _string(peer.get("node_id"))
+        if not peer_origin or not peer_node_id:
+            return _invalid_pair_network_health("pair network-health peer identity is empty")
+    if cast("bool", configured) != (peer_value is not None):
+        return _invalid_pair_network_health("pair network-health configured flag contradicts peer")
+    if pose_mode == "leader" and configured is not True:
+        return _invalid_pair_network_health("pose leader lacks configured network-health peer")
+    if pose_mode in {"shadow", "disabled"} and configured is not False:
+        return _invalid_pair_network_health(f"pose {pose_mode} unexpectedly measures a peer")
+
+    measured_at = value.get("measured_at_elapsed_realtime_ns")
+    local_to_peer = value.get("local_to_peer")
+    peer_to_local = value.get("peer_to_local")
+    measurement_present = (
+        _canonical_nonnegative_integer(measured_at) is not None
+        and local_to_peer is not None
+        and peer_to_local is not None
+    )
+    if cast("bool", measured) != measurement_present:
+        return _invalid_pair_network_health(
+            "pair network-health measured flag contradicts evidence"
+        )
+    if measured is True and not (
+        _pair_network_direction_valid(local_to_peer)
+        and _pair_network_direction_valid(peer_to_local)
+    ):
+        return _invalid_pair_network_health("pair network-health direction evidence is malformed")
+    if measured is False and (
+        age != 0
+        or stale is not False
+        or state != "unusable"
+        or raw_state != "unusable"
+        or transition_pending is not False
+        or measured_at is not None
+        or local_to_peer is not None
+        or peer_to_local is not None
+    ):
+        return _invalid_pair_network_health("unmeasured pair network-health fields disagree")
+    if stale is True and (
+        measured is not True
+        or state != "unusable"
+        or raw_state != "unusable"
+        or transition_pending is not False
+    ):
+        return _invalid_pair_network_health("stale pair network-health fields disagree")
+    if cast("bool", transition_pending) != (stale is False and state != raw_state):
+        return _invalid_pair_network_health("pair network-health transition flag disagrees")
+    if state == "good" and raw_state == "good" and issues:
+        return _invalid_pair_network_health("good pair network health unexpectedly reports issues")
+    if (state != "good" or raw_state != "good") and not issues:
+        return _invalid_pair_network_health("non-good pair network health lacks an issue")
+    return _PairNetworkHealthAssessment(
+        valid=True,
+        diagnostic=f"pair network-health contract is valid for pose {pose_mode}",
+        state=cast("str", state),
+        measured=cast("bool", measured),
+        stale=cast("bool", stale),
+        peer_origin=peer_origin,
+        peer_node_id=peer_node_id,
+        issues=issues,
+    )
+
+
 def _web_hosting_status(assets: Sequence[HostedWebAsset]) -> tuple[bool, str]:  # noqa: C901
     expected = {
         "/": ("text/html; charset=utf-8", "no-store"),
@@ -384,14 +727,142 @@ def _browser_cors_status(evidence: BrowserCorsEvidence) -> tuple[bool, str]:
     )
 
 
-def evaluate_pair(  # noqa: PLR0915
+def _nullable_nonempty_string(value: object) -> bool:
+    return value is None or (isinstance(value, str) and bool(value))
+
+
+def _field_recording_status_assessment(  # noqa: PLR0911 -- fail-closed schema diagnostics.
+    value: object,
+) -> tuple[bool, bool, str]:
+    """Validate the recorder schema and determine whether no recording work remains."""
+    if not isinstance(value, Mapping):
+        return False, False, "field-recording status is missing or not an object"
+    status = cast("Mapping[str, object]", value)
+    if len(status) != len(_FIELD_RECORDING_STATUS_FIELDS) or any(
+        field not in status for field in _FIELD_RECORDING_STATUS_FIELDS
+    ):
+        return False, False, "field-recording status fields do not match schema 1"
+    state = status.get("state")
+    active_recording_id = status.get("active_recording_id")
+    shared_recording_id = status.get("shared_recording_id")
+    started_at = status.get("started_at_utc")
+    started_elapsed = status.get("started_elapsed_realtime_ns")
+    elapsed_ms = _strict_json_integer(status.get("elapsed_ms"))
+    max_duration_seconds = _strict_json_integer(status.get("max_duration_seconds"))
+    error = status.get("error")
+    fault_flags = {
+        name: status.get(name)
+        for name in (
+            "hil_reject_next_start",
+            "hil_fail_next_accepted_start",
+            "hil_accepted_start_waiting",
+        )
+    }
+    schema_valid = (
+        _strict_json_integer(status.get("schema_version")) == 1
+        and isinstance(state, str)
+        and state in _FIELD_RECORDING_STATES
+        and _nullable_nonempty_string(active_recording_id)
+        and _nullable_nonempty_string(shared_recording_id)
+        and _nullable_nonempty_string(started_at)
+        and (started_elapsed is None or _canonical_nonnegative_integer(started_elapsed) is not None)
+        and elapsed_ms is not None
+        and elapsed_ms >= 0
+        and _canonical_nonnegative_integer(status.get("video_bytes")) is not None
+        and _canonical_nonnegative_integer(status.get("audio_frames")) is not None
+        and max_duration_seconds is not None
+        and max_duration_seconds > 0
+        and isinstance(error, str)
+        and all(isinstance(flag, bool) for flag in fault_flags.values())
+    )
+    if not schema_valid:
+        return False, False, "field-recording status values are malformed"
+    if state == "idle" and (
+        active_recording_id is not None
+        or shared_recording_id is not None
+        or started_at is not None
+        or started_elapsed is not None
+        or elapsed_ms != 0
+        or status.get("video_bytes") != "0"
+        or status.get("audio_frames") != "0"
+        or error != ""
+    ):
+        return False, False, "idle field-recording status retains active recording evidence"
+    if state in _TERMINAL_FIELD_RECORDING_STATES and active_recording_id is not None:
+        return False, False, "terminal field-recording status retains an active recording ID"
+    if state in {"starting", "recording", "stopping"} and (
+        active_recording_id is None or shared_recording_id is None
+    ):
+        return False, False, "active field-recording status lacks recording identifiers"
+    if status.get("hil_accepted_start_waiting") is True and (
+        status.get("hil_fail_next_accepted_start") is not True or state != "starting"
+    ):
+        return False, False, "field-recording injected-fault waiting state is contradictory"
+    identifiers_clean = active_recording_id is None and (
+        state == "ready" or shared_recording_id is None
+    )
+    clean = (
+        state in _CLEAN_FIELD_RECORDING_STATES
+        and identifiers_clean
+        and all(flag is False for flag in fault_flags.values())
+    )
+    diagnostic = _message(
+        f"field-recording state={state!r} active_recording_id={active_recording_id!r} ",
+        f"shared_recording_id={shared_recording_id!r} fault_flags={fault_flags!r}",
+    )
+    return True, clean, diagnostic
+
+
+def _stopped_clean_status(status: Mapping[str, object]) -> tuple[bool, str]:
+    """Require one node to be fully stopped with no pending autonomous publication work."""
+    state = _string(status.get("state"))
+    armed = status.get("armed")
+    active_session_id = status.get("active_session_id")
+    pose = _optional_mapping(status.get("pose"))
+    autonomous = _optional_mapping(pose.get("autonomous_pair"))
+    autonomous_state = _string(autonomous.get("state"))
+    autonomous_session_id = autonomous.get("active_shared_session_id")
+    replication_backlog_size = _integer(autonomous.get("replication_backlog_size"))
+    publication_flags = {
+        name: autonomous.get(name)
+        for name in ("local_triggered", "peer_triggered", "local_published", "peer_published")
+    }
+    stopped = (
+        state in _STOPPED_CAPTURE_STATES
+        and armed is False
+        and "active_session_id" in status
+        and active_session_id is None
+    )
+    autonomous_clean = (
+        autonomous_state == "stopped"
+        and "active_shared_session_id" in autonomous
+        and autonomous_session_id is None
+        and replication_backlog_size == 0
+        and all(value is False for value in publication_flags.values())
+    )
+    passed = stopped and autonomous_clean
+    diagnostic = _message(
+        f"capture state={state!r} armed={armed!s} active_session_id={active_session_id!r}; ",
+        f"autonomous_state={autonomous_state!r} ",
+        f"active_shared_session_id={autonomous_session_id!r} ",
+        f"replication_backlog_size={replication_backlog_size!r} ",
+        f"publication_flags={publication_flags!r}",
+    )
+    return passed, diagnostic
+
+
+def evaluate_pair(  # noqa: C901, PLR0912, PLR0915
     nodes: Sequence[NodeEvidence],
     *,
     require_monitoring: bool = False,
+    require_stopped_clean: bool = False,
     require_wireless_adb: bool = False,
     expected_apk_sha256: str | None = None,
 ) -> list[Check]:
     """Evaluate the field-session contract using already-collected evidence."""
+    if require_monitoring and require_stopped_clean:
+        message = "monitoring and stopped-clean admission are mutually exclusive"
+        raise ValueError(message)
     checks: list[Check] = []
     if len(nodes) != PAIR_NODE_COUNT:
         return [
@@ -407,6 +878,7 @@ def evaluate_pair(  # noqa: PLR0915
     modes: list[str] = []
     leader: NodeEvidence | None = None
     shadow: NodeEvidence | None = None
+    leader_network_health: _PairNetworkHealthAssessment | None = None
     for index, evidence in enumerate(nodes):
         prefix = f"node.{index + 1}"
         descriptor = evidence.descriptor
@@ -434,6 +906,13 @@ def evaluate_pair(  # noqa: PLR0915
         elif mode == "shadow":
             shadow = evidence
 
+        network_health = _pair_network_health_assessment(status.get("pair_network_health"), mode)
+        if mode == "leader":
+            leader_network_health = network_health
+        field_recording_valid, field_recording_clean, field_recording_message = (
+            _field_recording_status_assessment(evidence.field_recording_status)
+        )
+
         identity_ok = (
             descriptor.get("schema_version") == 1
             and setup.get("schema_version") == 1
@@ -446,6 +925,20 @@ def evaluate_pair(  # noqa: PLR0915
             and configuration.get("role") == role
         )
         checks.append(Check(f"{prefix}.identity", identity_ok, "stable identity and schema agree"))
+        checks.append(
+            Check(
+                f"{prefix}.pair_network_health_contract",
+                network_health.valid,
+                network_health.diagnostic,
+            )
+        )
+        checks.append(
+            Check(
+                f"{prefix}.field_recording_contract",
+                field_recording_valid,
+                field_recording_message,
+            )
+        )
         checks.append(
             Check(
                 f"{prefix}.lan_origin",
@@ -562,24 +1055,75 @@ def evaluate_pair(  # noqa: PLR0915
                 "station is armed" if monitoring else "station is not armed (allowed by this run)",
             )
         )
+        stopped_clean, stopped_clean_message = _stopped_clean_status(status)
+        checks.append(
+            Check(
+                f"{prefix}.stopped_clean",
+                stopped_clean or not require_stopped_clean,
+                stopped_clean_message,
+            )
+        )
+        checks.append(
+            Check(
+                f"{prefix}.field_recording_stopped_clean",
+                field_recording_clean or not require_stopped_clean,
+                field_recording_message,
+            )
+        )
         if require_monitoring:
             pose_status = _optional_mapping(status.get("pose"))
             metrics = _optional_mapping(pose_status.get("metrics"))
+            configured_delegate = _string(pose_status.get("configured_delegate"))
+            actual_delegate = _string(metrics.get("delegate"))
             successful_inferences = _integer(metrics.get("successful_inferences"))
             failed_inferences = _integer(metrics.get("failed_inferences"))
             inference_p95 = _integer(metrics.get("inference_duration_p95_ns"))
             maximum_inference = _integer(metrics.get("maximum_inference_duration_ns"))
+            recent_samples = _integer(metrics.get("recent_inference_sample_count"))
+            recent_inference_p95 = _integer(metrics.get("recent_inference_duration_p95_ns"))
+            recent_maximum_inference = _integer(metrics.get("recent_maximum_inference_duration_ns"))
+            recent_deadline_misses = _integer(metrics.get("recent_inference_deadline_misses"))
             rejected_decision_timestamps = _integer(metrics.get("rejected_decision_timestamps"))
+            production_runtime = (
+                pose_status.get("experiment_enabled") is False
+                and _string(pose_status.get("model_variant")) == "lite"
+                and _string(pose_status.get("model_asset_path")) == "pose_landmarker_lite.task"
+                and pose_status.get("actual_standby_width") == PRODUCTION_POSE_STANDBY_WIDTH
+                and pose_status.get("actual_standby_height") == PRODUCTION_POSE_STANDBY_HEIGHT
+                and configured_delegate == _string(pose.get("inference_delegate"))
+                and (
+                    (configured_delegate == "gpu_preferred" and actual_delegate == "gpu")
+                    or (configured_delegate == "gpu_required" and actual_delegate == "gpu")
+                    or (configured_delegate == "cpu_only" and actual_delegate == "cpu")
+                    or (configured_delegate == "npu_required" and actual_delegate == "npu")
+                    or (
+                        configured_delegate == "npu_preferred"
+                        and actual_delegate in {"cpu", "gpu", "npu"}
+                    )
+                )
+            )
             pose_monitoring = (
                 _string(pose_status.get("mode")) == mode
                 and _string(pose_status.get("phase")) == "monitoring"
+                and production_runtime
                 and successful_inferences is not None
                 and successful_inferences > 0
                 and failed_inferences == 0
                 and inference_p95 is not None
-                and 0 < inference_p95 <= MAXIMUM_POSE_INFERENCE_P95_NS
+                and inference_p95 > 0
                 and maximum_inference is not None
-                and 0 < maximum_inference <= MAXIMUM_POSE_INFERENCE_OUTLIER_NS
+                and maximum_inference > 0
+                and recent_samples is not None
+                and MINIMUM_RECENT_POSE_INFERENCE_SAMPLES
+                <= recent_samples
+                <= MAXIMUM_RECENT_POSE_INFERENCE_SAMPLES
+                and recent_samples <= successful_inferences + failed_inferences
+                and recent_inference_p95 is not None
+                and 0 < recent_inference_p95 <= MAXIMUM_POSE_INFERENCE_P95_NS
+                and recent_maximum_inference is not None
+                and 0 < recent_maximum_inference <= MAXIMUM_POSE_INFERENCE_OUTLIER_NS
+                and recent_deadline_misses is not None
+                and 0 <= recent_deadline_misses <= recent_samples
                 and rejected_decision_timestamps == 0
             )
             checks.append(
@@ -588,8 +1132,20 @@ def evaluate_pair(  # noqa: PLR0915
                     pose_monitoring,
                     _message(
                         "pose monitoring metrics ",
+                        f"configured_delegate={configured_delegate!r} ",
+                        f"actual_delegate={actual_delegate!r} ",
+                        f"model={_string(pose_status.get('model_variant'))!r} ",
+                        _message(
+                            "standby_size=",
+                            f"{pose_status.get('actual_standby_width')}x",
+                            f"{pose_status.get('actual_standby_height')} ",
+                        ),
                         f"successful={successful_inferences} failed={failed_inferences} ",
-                        f"p95_ns={inference_p95} max_ns={maximum_inference} ",
+                        f"recent_samples={recent_samples} ",
+                        f"recent_p95_ns={recent_inference_p95} ",
+                        f"recent_max_ns={recent_maximum_inference} ",
+                        f"recent_deadline_misses={recent_deadline_misses} ",
+                        f"lifetime_p95_ns={inference_p95} lifetime_max_ns={maximum_inference} ",
                         f"rejected_timestamps={rejected_decision_timestamps}",
                     ),
                 )
@@ -714,6 +1270,45 @@ def evaluate_pair(  # noqa: PLR0915
                 binding_message,
             )
         )
+        network_peer_matches = (
+            leader_network_health is not None
+            and leader_network_health.peer_origin == shadow.origin
+            and leader_network_health.peer_node_id == shadow.descriptor.get("node_id")
+        )
+        network_viable = (
+            leader_network_health is not None
+            and leader_network_health.valid
+            and network_peer_matches
+            and leader_network_health.measured
+            and not leader_network_health.stale
+            and leader_network_health.state in {"good", "degraded"}
+        )
+        if leader_network_health is None:
+            network_message = "leader pair network-health evidence is absent"
+        elif not leader_network_health.valid:
+            network_message = leader_network_health.diagnostic
+        elif not network_peer_matches:
+            network_message = (
+                "leader pair network-health peer does not match the authenticated shadow"
+            )
+        elif leader_network_health.state == "degraded" and network_viable:
+            network_message = _message(
+                "WARNING: degraded pair network health; arming requires explicit operator ",
+                "override; ",
+                "; ".join(leader_network_health.issues),
+            )
+        elif network_viable:
+            network_message = "bidirectional application-level pair network health is good"
+        else:
+            network_message = _message(
+                "pair network health is not viable: ",
+                leader_network_health.diagnostic,
+                f" state={leader_network_health.state!r}",
+                f" measured={leader_network_health.measured}",
+                f" stale={leader_network_health.stale}",
+                f" issues={list(leader_network_health.issues)!r}",
+            )
+        checks.append(Check("pair.network_health", network_viable, network_message))
         if require_monitoring:
             leader_status_pose = _optional_mapping(leader.status.get("pose"))
             autonomous_pair = _optional_mapping(leader_status_pose.get("autonomous_pair"))
@@ -1013,6 +1608,12 @@ class EvidenceCollector:
         status_status, status = self._json_endpoint(
             origin, "/api/v1/capture/status", token, "authenticated capture status"
         )
+        field_recording_status_code, field_recording_status = self._json_endpoint(
+            origin,
+            "/api/v1/field-recording/status",
+            token,
+            "authenticated field-recording status",
+        )
         package_path = self._adb_command(serial, "shell", "pm", "path", PACKAGE_NAME)
         try:
             installed_apk_path = parse_package_path(package_path)
@@ -1033,8 +1634,14 @@ class EvidenceCollector:
         unauthenticated_setup_status, _ = self._json_endpoint(
             origin, "/api/v1/setup", None, "unauthenticated setup rejection"
         )
-        expected_statuses = (HTTP_OK,) * 4
-        if (descriptor_status, setup_status, status_status, clock_status) != expected_statuses:
+        expected_statuses = (HTTP_OK,) * 5
+        if (
+            descriptor_status,
+            setup_status,
+            status_status,
+            field_recording_status_code,
+            clock_status,
+        ) != expected_statuses:
             message = f"one or more direct LAN APIs on {origin} are unavailable"
             raise RuntimeError(message)
         try:
@@ -1090,6 +1697,7 @@ class EvidenceCollector:
             descriptor=descriptor,
             setup=setup,
             status=status,
+            field_recording_status=field_recording_status,
             clock=clock,
             unauthenticated_setup_status=unauthenticated_setup_status,
             web_assets=web_assets,
@@ -1203,6 +1811,7 @@ class _Arguments(argparse.Namespace):
         self.node: list[tuple[str, str]] = []
         self.json: Path | None = None
         self.require_monitoring: bool = False
+        self.require_stopped_clean: bool = False
         self.require_wireless_adb: bool = False
         self.expected_apk: Path | None = None
 
@@ -1219,7 +1828,9 @@ def _parser() -> argparse.ArgumentParser:
         help="phone adb serial and direct-LAN origin; specify exactly twice",
     )
     parser.add_argument("--json", type=Path, help="write redacted machine-readable evidence")
-    parser.add_argument("--require-monitoring", action="store_true")
+    state_group = parser.add_mutually_exclusive_group()
+    state_group.add_argument("--require-monitoring", action="store_true")
+    state_group.add_argument("--require-stopped-clean", action="store_true")
     parser.add_argument("--require-wireless-adb", action="store_true")
     parser.add_argument(
         "--expected-apk",
@@ -1229,11 +1840,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def collect_pair_evidence(
+def collect_pair_evidence(  # noqa: PLR0913 -- explicit collection policy boundary.
     collector: EvidenceCollector,
     nodes: Sequence[tuple[str, str]],
     *,
     require_monitoring: bool = False,
+    require_stopped_clean: bool = False,
     require_wireless_adb: bool = False,
     expected_apk_sha256: str | None = None,
 ) -> tuple[list[NodeEvidence], list[LanNodeDiagnostics], list[Check]]:
@@ -1276,6 +1888,7 @@ def collect_pair_evidence(
                 evaluate_pair(
                     evidence,
                     require_monitoring=require_monitoring,
+                    require_stopped_clean=require_stopped_clean,
                     require_wireless_adb=require_wireless_adb,
                     expected_apk_sha256=expected_apk_sha256,
                 )
@@ -1293,6 +1906,7 @@ def collect_pair_evidence(
             evaluate_pair(
                 evidence,
                 require_monitoring=require_monitoring,
+                require_stopped_clean=require_stopped_clean,
                 require_wireless_adb=require_wireless_adb,
                 expected_apk_sha256=expected_apk_sha256,
             )
@@ -1355,6 +1969,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         EvidenceCollector(options.adb),
         options.node,
         require_monitoring=options.require_monitoring,
+        require_stopped_clean=options.require_stopped_clean,
         require_wireless_adb=options.require_wireless_adb,
         expected_apk_sha256=expected_apk_sha256,
     )
@@ -1364,6 +1979,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "report_type": "android_pair_preflight",
         "passed": passed,
         "credentials_redacted": True,
+        "require_monitoring": options.require_monitoring,
+        "require_stopped_clean": options.require_stopped_clean,
         "lan_diagnostics": lan_diagnostics_json(diagnostics),
         "nodes": [
             {
@@ -1381,6 +1998,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
                         if diagnostic.serial == node.serial
                     ),
                     None,
+                ),
+                "capture_status": capture_status_diagnostics(node.status),
+                "field_recording_status": field_recording_status_diagnostics(
+                    node.field_recording_status
                 ),
             }
             for node in evidence

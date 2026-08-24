@@ -81,7 +81,7 @@ void ColoredPostSequenceIsNotTreatedAsAnOffBaseline() {
   assert(result.post_sequence_baseline_shift > 50.0);
 }
 
-void GlobalFlashIsNotAStableLocalizedLed() {
+void DiffuseWhiteResponseRetainsSpatialTelemetryWithoutFailing() {
   const auto timings = Timings();
   RgbSwingSequenceAnalyzer analyzer(
       RgbSwingSequenceConfiguration{.width = kWidth, .height = kHeight, .timings = timings});
@@ -90,7 +90,11 @@ void GlobalFlashIsNotAStableLocalizedLed() {
     analyzer.Append(Frame(false, flash));
   }
   const auto result = analyzer.Finish();
-  assert(!result.detected);
+  assert(result.detected);
+  assert(result.acceptance.minimum_white_delta_passed);
+  assert(result.acceptance.white_frame_count_passed);
+  assert(result.acceptance.white_duration_passed);
+  assert(result.acceptance.optical_audio_offset_passed);
   assert(result.localized_response_tile_count > 12U);
 }
 
@@ -101,7 +105,9 @@ void MissingAndLateImpactFail() {
   for (std::size_t index = 0; index < timings.size(); ++index) {
     missing.Append(Frame(false));
   }
-  assert(!missing.Finish().detected);
+  const auto missing_result = missing.Finish();
+  assert(!missing_result.detected);
+  assert(!missing_result.acceptance.minimum_white_delta_passed);
 
   const auto late_timings = Timings(25000);
   RgbSwingSequenceAnalyzer late(
@@ -110,7 +116,41 @@ void MissingAndLateImpactFail() {
     const bool white = timing.time_from_impact_us >= 25000 && timing.time_from_impact_us < 45000;
     late.Append(Frame(white));
   }
-  assert(!late.Finish().detected);
+  const auto late_result = late.Finish();
+  assert(!late_result.detected);
+  assert(late_result.acceptance.minimum_white_delta_passed);
+  assert(late_result.acceptance.white_frame_count_passed);
+  assert(late_result.acceptance.white_duration_passed);
+  assert(!late_result.acceptance.optical_audio_offset_passed);
+}
+
+void WhiteFrameCountAndDurationRemainAcceptanceGates() {
+  const auto timings = Timings();
+  RgbSwingSequenceAnalyzer short_response(
+      RgbSwingSequenceConfiguration{.width = kWidth, .height = kHeight, .timings = timings});
+  for (const auto &timing : timings) {
+    short_response.Append(
+        Frame(timing.time_from_impact_us >= 0 && timing.time_from_impact_us < 1000));
+  }
+  const auto short_result = short_response.Finish();
+  assert(!short_result.detected);
+  assert(short_result.acceptance.minimum_white_delta_passed);
+  assert(!short_result.acceptance.white_frame_count_passed);
+  assert(!short_result.acceptance.white_duration_passed);
+  assert(short_result.acceptance.optical_audio_offset_passed);
+
+  RgbSwingSequenceAnalyzer long_response(
+      RgbSwingSequenceConfiguration{.width = kWidth, .height = kHeight, .timings = timings});
+  for (const auto &timing : timings) {
+    long_response.Append(
+        Frame(timing.time_from_impact_us >= 0 && timing.time_from_impact_us < 45000));
+  }
+  const auto long_result = long_response.Finish();
+  assert(!long_result.detected);
+  assert(long_result.acceptance.minimum_white_delta_passed);
+  assert(!long_result.acceptance.white_frame_count_passed);
+  assert(!long_result.acceptance.white_duration_passed);
+  assert(long_result.acceptance.optical_audio_offset_passed);
 }
 
 void RetainedBoundaryFailureIdentifiesOnlyTheStrictPointGate() {
@@ -136,7 +176,6 @@ void RetainedBoundaryFailureIdentifiesOnlyTheStrictPointGate() {
   assert(result.acceptance.white_frame_count_passed);
   assert(result.acceptance.white_duration_passed);
   assert(!result.acceptance.optical_audio_offset_passed);
-  assert(result.acceptance.localized_response_passed);
   assert(result.acceptance.maximum_absolute_optical_audio_offset_us == 20000L);
 }
 
@@ -159,7 +198,8 @@ int main() {
   NominalWhiteImpactPasses();
   ColoredPostSequenceIsNotTreatedAsAnOffBaseline();
   MissingAndLateImpactFail();
+  WhiteFrameCountAndDurationRemainAcceptanceGates();
   RetainedBoundaryFailureIdentifiesOnlyTheStrictPointGate();
-  GlobalFlashIsNotAStableLocalizedLed();
+  DiffuseWhiteResponseRetainsSpatialTelemetryWithoutFailing();
   IncompleteDecodeFails();
 }

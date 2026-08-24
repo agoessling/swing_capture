@@ -93,6 +93,7 @@ using swing_capture::android::dual_hil::HilCleanupEvidence;
 using swing_capture::android::dual_hil::HilCommandResult;
 using swing_capture::android::dual_hil::HilPrimaryOutcome;
 using swing_capture::android::dual_hil::InspectDiscoveryPairingFixture;
+using swing_capture::android::dual_hil::InspectPairNetworkHealthForArm;
 using swing_capture::android::dual_hil::InstallAndroidApk;
 using swing_capture::android::dual_hil::IsPairedPoseQualificationMode;
 using swing_capture::android::dual_hil::LanEndpointInspection;
@@ -104,6 +105,9 @@ using swing_capture::android::dual_hil::PairedPoseClockStatusInspection;
 using swing_capture::android::dual_hil::PairedPoseQualificationPolicy;
 using swing_capture::android::dual_hil::PairedPoseQualificationPolicyForMode;
 using swing_capture::android::dual_hil::PairedPoseSessionStateInspection;
+using swing_capture::android::dual_hil::PairNetworkHealthArmDecision;
+using swing_capture::android::dual_hil::PairNetworkHealthArmRequestBody;
+using swing_capture::android::dual_hil::PairNetworkHealthStatusInspection;
 using swing_capture::android::dual_hil::ParsePcmReplayManifest;
 using swing_capture::android::dual_hil::PcmReplayExpectation;
 using swing_capture::android::dual_hil::PcmReplayObservation;
@@ -158,7 +162,6 @@ static_assert(kPcmPeerImpactQuiescence < kStageDeadline);
 constexpr std::string_view kPackageName = "com.agoessling.swingcapture";
 constexpr std::string_view kReportPath = "files/reports/latest.json";
 constexpr std::uint16_t kNodeHttpPort = 8088U;
-constexpr std::uint16_t kPosePeerTunnelPort = 18089U;
 constexpr std::size_t kClockExchangeSampleCount = 5U;
 
 bool SafeSessionId(std::string_view session_id);
@@ -1407,15 +1410,6 @@ std::uint16_t EstablishForward(const std::filesystem::path &adb, std::string_vie
   return static_cast<std::uint16_t>(port);
 }
 
-void EstablishReverse(const std::filesystem::path &adb, std::string_view serial,
-                      std::uint16_t device_port, std::uint16_t host_port,
-                      std::chrono::steady_clock::time_point deadline) {
-  RunRequiredAdb(adb,
-                 DeviceArguments(serial, {"reverse", "tcp:" + std::to_string(device_port),
-                                          "tcp:" + std::to_string(host_port)}),
-                 deadline);
-}
-
 std::string ReadControlToken(const std::filesystem::path &adb, std::string_view serial,
                              std::chrono::steady_clock::time_point deadline) {
   const std::string preferences =
@@ -2479,13 +2473,67 @@ std::set<std::string, std::less<>> ReadyCaptureSessionIds(
   return ids;
 }
 
-void ArmPoseStandby(const ConcurrentNode &node, std::chrono::steady_clock::time_point deadline) {
-  const Json request = {{"armed", true}};
+struct PairNetworkHealthAcceptance {
+  PairNetworkHealthArmDecision decision = PairNetworkHealthArmDecision::kNotReady;
+  Json evidence;
+};
+
+PairNetworkHealthAcceptance WaitForPairNetworkHealth(
+    const ConcurrentNode &leader, std::string_view expected_peer_origin,
+    std::string_view expected_peer_node_id, std::chrono::steady_clock::time_point deadline) {
+  const auto started = std::chrono::steady_clock::now();
+  std::size_t poll_count = 0;
+  std::string latest_state = "unavailable";
+  while (std::chrono::steady_clock::now() < deadline) {
+    const HttpResponse response = RequireNodeHttp({.port = leader.host_port,
+                                                   .method = "GET",
+                                                   .path = "/api/v1/capture/status",
+                                                   .bearer_token = leader.control_token,
+                                                   .body = {},
+                                                   .deadline = deadline},
+                                                  200);
+    ++poll_count;
+    WriteArtifact(OutputDirectory() / leader.role / "pair-network-health-status-latest.json",
+                  response.body);
+    const PairNetworkHealthArmDecision decision =
+        InspectPairNetworkHealthForArm({.status_json = response.body,
+                                        .expected_peer_origin = expected_peer_origin,
+                                        .expected_peer_node_id = expected_peer_node_id});
+    const Json status = Json::parse(response.body);
+    const Json &snapshot = status.at("pair_network_health");
+    latest_state = snapshot.value("state", "invalid");
+    if (decision == PairNetworkHealthArmDecision::kGood ||
+        decision == PairNetworkHealthArmDecision::kDegraded) {
+      Json evidence = {
+          {"schema_version", 1},
+          {"passed", true},
+          {"poll_count", static_cast<std::int64_t>(poll_count)},
+          {"elapsed_milliseconds", ElapsedMilliseconds(started)},
+          {"accepted_state", decision == PairNetworkHealthArmDecision::kGood ? "good" : "degraded"},
+          {"degraded_override", decision == PairNetworkHealthArmDecision::kDegraded},
+          {"expected_peer_origin", expected_peer_origin},
+          {"expected_peer_node_id", expected_peer_node_id},
+          {"snapshot", snapshot},
+      };
+      WriteArtifact(OutputDirectory() / leader.role / "pair-network-health-accepted.json",
+                    evidence.dump(2) + "\n");
+      return {.decision = decision, .evidence = std::move(evidence)};
+    }
+    std::this_thread::sleep_for(kPollInterval);
+  }
+  throw std::runtime_error(
+      "paired pose leader network health did not become usable within 15 "
+      "seconds (latest state=" +
+      latest_state + ")");
+}
+
+void ArmPoseStandby(const ConcurrentNode &node, std::string_view request_body,
+                    std::chrono::steady_clock::time_point deadline) {
   static_cast<void>(RequireNodeHttp({.port = node.host_port,
                                      .method = "POST",
                                      .path = "/api/v1/capture/arm",
                                      .bearer_token = node.control_token,
-                                     .body = request.dump(),
+                                     .body = request_body,
                                      .deadline = deadline},
                                     202));
 }
@@ -3921,6 +3969,7 @@ Json EvidenceJson(const CapturedNode &captured) {
            {"first_white_frame_index", captured.optical.first_white_frame_index},
            {"last_white_frame_index", captured.optical.last_white_frame_index},
            {"maximum_white_delta", captured.optical.maximum_white_delta},
+           {"peak_tile", {{"x", captured.optical.tile_x}, {"y", captured.optical.tile_y}}},
            {"localized_response_tile_count", captured.optical.localized_response_tile_count},
            {"post_sequence_baseline_shift", captured.optical.post_sequence_baseline_shift},
            {"white_duration_us", captured.optical.white_duration_us},
@@ -4046,8 +4095,12 @@ Json PcmEvidenceJson(const CapturedNode &captured, const ExtractedPcmReplayCase 
       {"optical",
        {{"passed", captured.optical.detected},
         {"diagnostic", captured.optical.diagnostic},
+        {"peak_frame_index", captured.optical.peak_frame_index},
         {"first_white_frame_index", captured.optical.first_white_frame_index},
         {"last_white_frame_index", captured.optical.last_white_frame_index},
+        {"maximum_white_delta", captured.optical.maximum_white_delta},
+        {"peak_tile", {{"x", captured.optical.tile_x}, {"y", captured.optical.tile_y}}},
+        {"localized_response_tile_count", captured.optical.localized_response_tile_count},
         {"white_duration_us", captured.optical.white_duration_us},
         {"optical_to_audio_offset_us", captured.optical.optical_to_audio_offset_us},
         {"timing_correlation",
@@ -5303,7 +5356,12 @@ Json QualificationNodeCaptureJson(CapturedNode *captured,
         {"analysis_width", captured->analysis_width},
         {"analysis_height", captured->analysis_height}}},
       {"optical",
-       {{"passed", captured->optical.detected}, {"timing_correlation_passed", timing.passed}}},
+       {{"passed", captured->optical.detected},
+        {"timing_correlation_passed", timing.passed},
+        {"peak_frame_index", captured->optical.peak_frame_index},
+        {"maximum_white_delta", captured->optical.maximum_white_delta},
+        {"peak_tile", {{"x", captured->optical.tile_x}, {"y", captured->optical.tile_y}}},
+        {"localized_response_tile_count", captured->optical.localized_response_tile_count}}},
       {"april_tag", {{"passed", true}, {"persistent_pre_marker_post", true}}},
       {"report", (relative_node_directory / "report.json").generic_string()},
       {"manifest", (relative_node_directory / "manifest.json").generic_string()},
@@ -5631,11 +5689,9 @@ int RunPairedPoseQualification(const std::filesystem::path &adb, ConcurrentNode 
 int RunPairedPose(int argument_count, char **arguments) {
   const std::string_view mode = argument_count == 4 ? std::string_view(arguments[3]) : "";
   const bool qualification = IsPairedPoseQualificationMode(mode);
-  const bool lan_only = mode == "paired-pose-lan" || qualification;
-  if (argument_count != 4 ||
-      (mode != "paired-pose" && mode != "paired-pose-lan" && !qualification)) {
+  if (argument_count != 4 || (mode != "paired-pose-lan" && !qualification)) {
     throw std::runtime_error(
-        "expected Bazel runfiles: <adb> <APK> paired-pose[-lan], "
+        "expected Bazel runfiles: <adb> <APK> paired-pose-lan, "
         "paired-pose-qualify-5m, or paired-pose-soak-30m");
   }
   const std::filesystem::path adb = std::filesystem::absolute(arguments[1]);
@@ -5676,59 +5732,46 @@ int RunPairedPose(int argument_count, char **arguments) {
     throw std::runtime_error("paired pose-arm HIL nodes reuse one persistent identity");
   }
 
-  const std::optional<LanOrigin> leader_lan_origin =
-      lan_only ? std::optional<LanOrigin>(
-                     ParseLanOrigin(RequiredEnvironment("SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN"),
-                                    "SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN"))
-               : std::nullopt;
-  const std::optional<LanOrigin> shadow_lan_origin =
-      lan_only ? std::optional<LanOrigin>(
-                     ParseLanOrigin(RequiredEnvironment("SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN"),
-                                    "SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN"))
-               : std::nullopt;
-  if (lan_only && leader_lan_origin->ipv4_address == shadow_lan_origin->ipv4_address) {
+  const LanOrigin leader_lan_origin =
+      ParseLanOrigin(RequiredEnvironment("SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN"),
+                     "SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN");
+  const LanOrigin shadow_lan_origin =
+      ParseLanOrigin(RequiredEnvironment("SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN"),
+                     "SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN");
+  if (leader_lan_origin.ipv4_address == shadow_lan_origin.ipv4_address) {
     throw std::runtime_error("LAN-only paired pose HIL requires two distinct phone addresses");
   }
 
   const auto association_started = std::chrono::steady_clock::now();
   const auto association_deadline = association_started + kStageDeadline;
   const auto peer_configuration_started = std::chrono::steady_clock::now();
-  if (!lan_only) {
-    EstablishReverse(adb, leader.serial, kPosePeerTunnelPort, shadow.host_port,
-                     association_deadline);
-    cleanup.RegisterReverse(leader.serial, kPosePeerTunnelPort);
-  }
   ConfigurePoseMode(shadow, "shadow", std::nullopt, std::nullopt, association_deadline);
-  const std::string peer_origin = lan_only
-                                      ? shadow_lan_origin->origin
-                                      : "http://127.0.0.1:" + std::to_string(kPosePeerTunnelPort);
-  ConfigurePeerPoseModeWithRetries(leader, peer_origin, shadow.control_token, association_deadline);
+  ConfigurePeerPoseModeWithRetries(leader, shadow_lan_origin.origin, shadow.control_token,
+                                   association_deadline);
   PreservePoseConfiguredNodeDescriptor(shadow, "shadow", false, association_deadline);
   PreservePoseConfiguredNodeDescriptor(leader, "leader", true, association_deadline);
   const std::int64_t peer_configuration_milliseconds =
       ElapsedMilliseconds(peer_configuration_started);
   const auto lan_validation_started = std::chrono::steady_clock::now();
-  Json lan_endpoint_evidence = nullptr;
+  Json lan_endpoint_evidence;
   std::int64_t face_on_lan_validation_milliseconds = 0;
   std::int64_t down_the_line_lan_validation_milliseconds = 0;
-  if (lan_only) {
-    auto validate_face_on = std::async(std::launch::async, [&] {
-      const auto started = std::chrono::steady_clock::now();
-      Json evidence = ValidateLanNodeEndpoint(leader, *leader_lan_origin, leader_model, "leader",
-                                              shadow_lan_origin->origin, association_deadline);
-      return std::pair(std::move(evidence), ElapsedMilliseconds(started));
-    });
-    const auto down_the_line_started = std::chrono::steady_clock::now();
-    Json down_the_line_evidence = ValidateLanNodeEndpoint(shadow, *shadow_lan_origin, shadow_model,
-                                                          "shadow", {}, association_deadline);
-    down_the_line_lan_validation_milliseconds = ElapsedMilliseconds(down_the_line_started);
-    auto [face_on_evidence, face_on_elapsed] = validate_face_on.get();
-    face_on_lan_validation_milliseconds = face_on_elapsed;
-    lan_endpoint_evidence = {
-        {"face_on", std::move(face_on_evidence)},
-        {"down_the_line", std::move(down_the_line_evidence)},
-    };
-  }
+  auto validate_face_on = std::async(std::launch::async, [&] {
+    const auto started = std::chrono::steady_clock::now();
+    Json evidence = ValidateLanNodeEndpoint(leader, leader_lan_origin, leader_model, "leader",
+                                            shadow_lan_origin.origin, association_deadline);
+    return std::pair(std::move(evidence), ElapsedMilliseconds(started));
+  });
+  const auto down_the_line_started = std::chrono::steady_clock::now();
+  Json down_the_line_evidence = ValidateLanNodeEndpoint(shadow, shadow_lan_origin, shadow_model,
+                                                        "shadow", {}, association_deadline);
+  down_the_line_lan_validation_milliseconds = ElapsedMilliseconds(down_the_line_started);
+  auto [face_on_evidence, face_on_elapsed] = validate_face_on.get();
+  face_on_lan_validation_milliseconds = face_on_elapsed;
+  lan_endpoint_evidence = {
+      {"face_on", std::move(face_on_evidence)},
+      {"down_the_line", std::move(down_the_line_evidence)},
+  };
   const std::int64_t lan_validation_milliseconds = ElapsedMilliseconds(lan_validation_started);
   const auto clock_exchange_started = std::chrono::steady_clock::now();
   CollectClockExchanges(&leader, &shadow, association_deadline);
@@ -5738,6 +5781,12 @@ int RunPairedPose(int argument_count, char **arguments) {
                 ClockEvidenceJson(shadow).dump(2) + "\n");
   const std::int64_t clock_exchange_milliseconds = ElapsedMilliseconds(clock_exchange_started);
   const std::int64_t association_stage_milliseconds = ElapsedMilliseconds(association_started);
+  const auto network_health_started = std::chrono::steady_clock::now();
+  PairNetworkHealthAcceptance pair_network_health =
+      WaitForPairNetworkHealth(leader, shadow_lan_origin.origin, shadow.identity.node_id,
+                               network_health_started + kStageDeadline);
+  const std::int64_t pair_network_health_wait_milliseconds =
+      ElapsedMilliseconds(network_health_started);
   WriteArtifact(
       OutputDirectory() / "peer-association-timing.json",
       Json{{"total", StageJson(association_stage_milliseconds)},
@@ -5745,7 +5794,8 @@ int RunPairedPose(int argument_count, char **arguments) {
            {"lan_validation", StageJson(lan_validation_milliseconds)},
            {"face_on_lan_validation", StageJson(face_on_lan_validation_milliseconds)},
            {"down_the_line_lan_validation", StageJson(down_the_line_lan_validation_milliseconds)},
-           {"clock_exchange", StageJson(clock_exchange_milliseconds)}}
+           {"clock_exchange", StageJson(clock_exchange_milliseconds)},
+           {"pair_network_health_wait", StageJson(pair_network_health_wait_milliseconds)}}
               .dump(2) +
           "\n");
 
@@ -5756,8 +5806,9 @@ int RunPairedPose(int argument_count, char **arguments) {
   const auto leader_baseline = ReadyCaptureSessionIds(leader, monitoring_deadline);
   const auto shadow_baseline = ReadyCaptureSessionIds(shadow, monitoring_deadline);
   RegisterAutonomousStationCheckpointCleanup(cleanup, adb, leader.serial, monitoring_deadline);
-  ArmPoseStandby(shadow, monitoring_deadline);
-  ArmPoseStandby(leader, monitoring_deadline);
+  ArmPoseStandby(shadow, Json{{"armed", true}}.dump(), monitoring_deadline);
+  ArmPoseStandby(leader, PairNetworkHealthArmRequestBody(pair_network_health.decision),
+                 monitoring_deadline);
   Json standby_inference_evidence =
       WaitForPairedPosePhase(leader, shadow, "monitoring", {}, monitoring_deadline);
   const std::int64_t monitoring_stage_milliseconds = ElapsedMilliseconds(monitoring_started);
@@ -5772,6 +5823,7 @@ int RunPairedPose(int argument_count, char **arguments) {
         {"leader_node_id", leader.identity.node_id},
         {"shadow_node_id", shadow.identity.node_id},
         {"lan_endpoint_validation", lan_endpoint_evidence},
+        {"pair_network_health_admission", pair_network_health.evidence},
         {"standby_inference_validation", standby_inference_evidence},
         {"node_setup",
          {{"face_on", NodeSetupTimingJson(leader)},
@@ -5781,9 +5833,11 @@ int RunPairedPose(int argument_count, char **arguments) {
           {"lan_validation", StageJson(lan_validation_milliseconds)},
           {"face_on_lan_validation", StageJson(face_on_lan_validation_milliseconds)},
           {"down_the_line_lan_validation", StageJson(down_the_line_lan_validation_milliseconds)},
-          {"clock_exchange", StageJson(clock_exchange_milliseconds)}}},
+          {"clock_exchange", StageJson(clock_exchange_milliseconds)},
+          {"pair_network_health_wait", StageJson(pair_network_health_wait_milliseconds)}}},
         {"stages",
          {{"peer_association_milliseconds", association_stage_milliseconds},
+          {"pair_network_health_wait_milliseconds", pair_network_health_wait_milliseconds},
           {"standby_monitoring_start_milliseconds", monitoring_stage_milliseconds}}},
     };
     return RunPairedPoseQualification(adb, leader, shadow, &prepared_pcm, &cleanup, policy,
@@ -6051,8 +6105,7 @@ int RunPairedPose(int argument_count, char **arguments) {
 
   Json aggregate = {
       {"schema_version", 1},
-      {"report_type", lan_only ? "android_dual_phone_paired_pose_arm_lan_hil"
-                               : "android_dual_phone_paired_pose_arm_hil"},
+      {"report_type", "android_dual_phone_paired_pose_arm_lan_hil"},
       {"passed", true},
       {"camera_jobs_concurrent", true},
       {"single_pcm_replay_count", 1},
@@ -6071,8 +6124,8 @@ int RunPairedPose(int argument_count, char **arguments) {
            {"shadow_device_model", shadow_model},
            {"leader_candidate_source", "explicit_hil_endpoint"},
            {"peer_dispatch", "production_pose_peer_arm_client"},
-           {"peer_transport", lan_only ? "wifi_lan_direct" : "adb_reverse_to_shadow_http_api"},
-           {"adb_reverse_used", !lan_only},
+           {"peer_transport", "wifi_lan_direct"},
+           {"adb_reverse_used", false},
            {"host_control_transport", "adb_forward"},
            {"leader_trigger_source", "local_audio"},
            {"shadow_trigger_source", "peer_audio_clock_candidate"},
@@ -6111,7 +6164,9 @@ int RunPairedPose(int argument_count, char **arguments) {
         {"lan_validation", StageJson(lan_validation_milliseconds)},
         {"face_on_lan_validation", StageJson(face_on_lan_validation_milliseconds)},
         {"down_the_line_lan_validation", StageJson(down_the_line_lan_validation_milliseconds)},
-        {"clock_exchange", StageJson(clock_exchange_milliseconds)}}},
+        {"clock_exchange", StageJson(clock_exchange_milliseconds)},
+        {"pair_network_health_wait", StageJson(pair_network_health_wait_milliseconds)}}},
+      {"pair_network_health_admission", pair_network_health.evidence},
       {"standby_inference_validation", std::move(standby_inference_evidence)},
       {"setup_preview_validation", std::move(setup_preview_evidence)},
       {"lan_endpoint_validation", std::move(lan_endpoint_evidence)},
@@ -6121,6 +6176,7 @@ int RunPairedPose(int argument_count, char **arguments) {
            {"down_the_line_setup", StageJson(shadow.setup_stage_milliseconds)},
            {"face_on_setup", StageJson(leader.setup_stage_milliseconds)},
            {"peer_association", StageJson(association_stage_milliseconds)},
+           {"pair_network_health_wait", StageJson(pair_network_health_wait_milliseconds)},
            {"standby_monitoring_start", StageJson(monitoring_stage_milliseconds)},
            {"setup_preview", StageJson(preview_stage_milliseconds)},
            {"high_speed_transition", StageJson(transition_stage_milliseconds)},
@@ -6158,15 +6214,11 @@ int RunPairedPose(int argument_count, char **arguments) {
                 {"trigger_report", "down_the_line/trigger-report.json"},
                 {"evidence", "down_the_line/evidence.json"},
                 {"capture", PcmNodeArtifactPaths("down_the_line", "diagnostic_audio.wav")},
-                {"lan_node_descriptor",
-                 lan_only ? Json("down_the_line/lan-node-descriptor.json") : Json(nullptr)},
-                {"lan_setup_authenticated",
-                 lan_only ? Json("down_the_line/lan-setup-authenticated.json") : Json(nullptr)},
-                {"lan_setup_unauthenticated",
-                 lan_only ? Json("down_the_line/lan-setup-unauthenticated.json") : Json(nullptr)},
-                {"lan_capture_status",
-                 lan_only ? Json("down_the_line/lan-capture-status.json") : Json(nullptr)},
-                {"lan_clock", lan_only ? Json("down_the_line/lan-clock.json") : Json(nullptr)},
+                {"lan_node_descriptor", "down_the_line/lan-node-descriptor.json"},
+                {"lan_setup_authenticated", "down_the_line/lan-setup-authenticated.json"},
+                {"lan_setup_unauthenticated", "down_the_line/lan-setup-unauthenticated.json"},
+                {"lan_capture_status", "down_the_line/lan-capture-status.json"},
+                {"lan_clock", "down_the_line/lan-clock.json"},
             }},
            {"face_on",
             {
@@ -6182,15 +6234,12 @@ int RunPairedPose(int argument_count, char **arguments) {
                 {"trigger_report", "face_on/trigger-report.json"},
                 {"evidence", "face_on/evidence.json"},
                 {"capture", PcmNodeArtifactPaths("face_on", "audio_evidence.wav")},
-                {"lan_node_descriptor",
-                 lan_only ? Json("face_on/lan-node-descriptor.json") : Json(nullptr)},
-                {"lan_setup_authenticated",
-                 lan_only ? Json("face_on/lan-setup-authenticated.json") : Json(nullptr)},
-                {"lan_setup_unauthenticated",
-                 lan_only ? Json("face_on/lan-setup-unauthenticated.json") : Json(nullptr)},
-                {"lan_capture_status",
-                 lan_only ? Json("face_on/lan-capture-status.json") : Json(nullptr)},
-                {"lan_clock", lan_only ? Json("face_on/lan-clock.json") : Json(nullptr)},
+                {"lan_node_descriptor", "face_on/lan-node-descriptor.json"},
+                {"lan_setup_authenticated", "face_on/lan-setup-authenticated.json"},
+                {"lan_setup_unauthenticated", "face_on/lan-setup-unauthenticated.json"},
+                {"lan_capture_status", "face_on/lan-capture-status.json"},
+                {"lan_clock", "face_on/lan-clock.json"},
+                {"pair_network_health_accepted", "face_on/pair-network-health-accepted.json"},
             }},
        }},
       {"nodes", Json::array({leader_evidence, shadow_evidence})},
@@ -6595,7 +6644,6 @@ int FinalizeReturnedHilReport(int primary_exit_code) {
   }
   const std::string report_type = report.value("report_type", "");
   const bool file_only_paired_pose_report =
-      report_type == "android_dual_phone_paired_pose_arm_hil" ||
       report_type == "android_dual_phone_paired_pose_arm_lan_hil" ||
       report_type == "android_dual_phone_paired_pose_qualification_5m" ||
       report_type == "android_dual_phone_paired_pose_soak_30m";
@@ -6615,10 +6663,6 @@ int RunDualAndroidHil(int argument_count, char **arguments) {
   const bool paired_pose_qualification =
       argument_count == 4 && IsPairedPoseQualificationMode(arguments[3]);
   const bool paired_pose =
-      argument_count == 4 &&
-      (std::string_view(arguments[3]) == "paired-pose" ||
-       std::string_view(arguments[3]) == "paired-pose-lan" || paired_pose_qualification);
-  const bool paired_pose_lan =
       argument_count == 4 &&
       (std::string_view(arguments[3]) == "paired-pose-lan" || paired_pose_qualification);
   const bool discovery_pairing =
@@ -6650,8 +6694,7 @@ int RunDualAndroidHil(int argument_count, char **arguments) {
           : discovery_pairing    ? "android_dual_phone_discovery_pairing_hil"
           : paired_pose_qualification
               ? std::string(PairedPoseQualificationPolicyForMode(arguments[3]).report_type)
-          : paired_pose ? (paired_pose_lan ? "android_dual_phone_paired_pose_arm_lan_hil"
-                                           : "android_dual_phone_paired_pose_arm_hil")
+          : paired_pose ? "android_dual_phone_paired_pose_arm_lan_hil"
                         : (concurrent ? "android_dual_phone_concurrent_hil"
                                       : "android_dual_phone_sequential_hil");
       const Json cleanup = ReadFinalCleanupEvidence();

@@ -109,6 +109,14 @@ public final class NodeHttpProtocolTest {
             "POST", NodeHttpProtocol.PUBLIC_CLOCK_HINT_PATH),
         "public clock policy cannot exempt mutations");
     check(
+        NodeHttpProtocol.requiresControlCredential(
+            "POST", NodeHttpProtocol.NETWORK_HEALTH_REVERSE_PATH),
+        "reverse network-health probe requires bearer authentication");
+    check(
+        NodeHttpProtocol.requiresControlCredential(
+            "GET", NodeHttpProtocol.NETWORK_HEALTH_REVERSE_PATH),
+        "reverse network-health response is not a public read");
+    check(
         NodeHttpProtocol.publicClockHintResponseHeaders().get("Cache-Control")
             .equals("no-store, max-age=0"),
         "public timestamp samples cannot be cached as fresh evidence");

@@ -24,6 +24,7 @@ MDNS_CONNECT_SERVICE = "_adb-tls-connect._tcp"
 MAXIMUM_LOG_BYTES = 64 * 1024
 MAXIMUM_NETWORK_PORT = 65_535
 PAIR_NODE_COUNT = 2
+CAPTURE_STATUS_SCHEMA_VERSION = 2
 MDNS_COMPACT_FIELD_COUNT = 2
 MDNS_VERBOSE_FIELD_COUNT = 3
 HTTP_OK = 200
@@ -34,6 +35,25 @@ CAMERA_ROLES: frozenset[str] = frozenset(("face_on", "down_the_line"))
 CREDENTIAL_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{32}(?![A-Za-z0-9_-])")
 BEARER_CREDENTIAL_PATTERN = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+")
 BSSID_PATTERN = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+FIELD_RECORDING_STATUS_FIELDS = frozenset(
+    (
+        "schema_version",
+        "state",
+        "active_recording_id",
+        "shared_recording_id",
+        "started_at_utc",
+        "started_elapsed_realtime_ns",
+        "elapsed_ms",
+        "video_bytes",
+        "audio_frames",
+        "max_duration_seconds",
+        "error",
+        "hil_reject_next_start",
+        "hil_fail_next_accepted_start",
+        "hil_accepted_start_waiting",
+    )
+)
+FIELD_RECORDING_STATES = frozenset(("idle", "starting", "recording", "stopping", "ready", "error"))
 
 
 class AdmissionError(RuntimeError):
@@ -104,6 +124,7 @@ class DoctorAttempt(TypedDict):
     role_association_passed: bool
     exact_apk_evidence_passed: bool | None
     lan_diagnostics_passed: bool
+    status_diagnostics_passed: bool
     failures: list[DoctorFailure]
     passed: bool
 
@@ -129,6 +150,7 @@ class AdmissionReport(TypedDict):
     launch_mode: str
     screen_policy: str
     require_monitoring: bool
+    require_stopped_clean: bool
     expected_apk_sha256: str | None
     preparation_failure: str | None
     nodes: list[NodeReport]
@@ -485,6 +507,75 @@ def _read_doctor_report(path: Path) -> Mapping[str, object] | None:
     return _json_mapping(value)
 
 
+def _field_recording_diagnostics_valid(status: Mapping[str, object]) -> bool:
+    """Validate the complete credential-free GET field-recorder status schema."""
+    state = status.get("state")
+    active_id = status.get("active_recording_id")
+    shared_id = status.get("shared_recording_id")
+    started_at = status.get("started_at_utc")
+    started_elapsed = status.get("started_elapsed_realtime_ns")
+    elapsed_ms = status.get("elapsed_ms")
+    max_duration = status.get("max_duration_seconds")
+    flags = (
+        status.get("hil_reject_next_start"),
+        status.get("hil_fail_next_accepted_start"),
+        status.get("hil_accepted_start_waiting"),
+    )
+    nullable_strings = (active_id, shared_id, started_at)
+    if (
+        len(status) != len(FIELD_RECORDING_STATUS_FIELDS)
+        or any(field not in status for field in FIELD_RECORDING_STATUS_FIELDS)
+        or status.get("schema_version") != 1
+        or isinstance(status.get("schema_version"), bool)
+        or not isinstance(state, str)
+        or state not in FIELD_RECORDING_STATES
+        or any(
+            value is not None and (not isinstance(value, str) or not value)
+            for value in nullable_strings
+        )
+        or (
+            started_elapsed is not None
+            and (
+                not isinstance(started_elapsed, str)
+                or re.fullmatch(r"0|[1-9]\d*", started_elapsed) is None
+            )
+        )
+        or not isinstance(elapsed_ms, int)
+        or isinstance(elapsed_ms, bool)
+        or elapsed_ms < 0
+        or not isinstance(max_duration, int)
+        or isinstance(max_duration, bool)
+        or max_duration <= 0
+        or not isinstance(status.get("error"), str)
+        or any(not isinstance(flag, bool) for flag in flags)
+        or any(
+            not isinstance(status.get(field), str)
+            or re.fullmatch(r"0|[1-9]\d*", cast("str", status.get(field))) is None
+            for field in ("video_bytes", "audio_frames")
+        )
+    ):
+        return False
+    if state == "idle" and any(
+        value is not None for value in (active_id, shared_id, started_at, started_elapsed)
+    ):
+        return False
+    if state == "idle" and (
+        elapsed_ms != 0
+        or status.get("video_bytes") != "0"
+        or status.get("audio_frames") != "0"
+        or status.get("error") != ""
+    ):
+        return False
+    if state in {"idle", "ready", "error"} and active_id is not None:
+        return False
+    if state in {"starting", "recording", "stopping"} and (active_id is None or shared_id is None):
+        return False
+    return not (
+        status.get("hil_accepted_start_waiting") is True
+        and (status.get("hil_fail_next_accepted_start") is not True or state != "starting")
+    )
+
+
 def _exact_apk_evidence_passed(
     doctor_report: Mapping[str, object] | None,
     expected_apk_sha256: str | None,
@@ -581,6 +672,44 @@ def _lan_diagnostics_evidence(  # noqa: C901 - validates a nested evidence schem
             observed_edges.add(edge)
     matrix_valid = matrix_valid and observed_edges == expected_edges
     return diagnostics, inventory_valid and matrix_valid
+
+
+def _status_diagnostics_evidence_passed(
+    doctor_report: Mapping[str, object] | None,
+    nodes: Sequence[Node],
+) -> bool:
+    """Require one rich credential-free capture-status snapshot for every requested node."""
+    if doctor_report is None:
+        return False
+    raw_nodes = _json_list(doctor_report.get("nodes"))
+    if raw_nodes is None or len(raw_nodes) != len(nodes):
+        return False
+    expected_serials = {node.serial for node in nodes}
+    observed_serials: set[str] = set()
+    for raw_node_value in raw_nodes:
+        raw_node = _json_mapping(raw_node_value)
+        if raw_node is None:
+            return False
+        serial = raw_node.get("serial")
+        status = _json_mapping(raw_node.get("capture_status"))
+        field_recording_status = _json_mapping(raw_node.get("field_recording_status"))
+        if (
+            not isinstance(serial, str)
+            or serial not in expected_serials
+            or serial in observed_serials
+            or status is None
+            or status.get("schema_version") != CAPTURE_STATUS_SCHEMA_VERSION
+            or not isinstance(status.get("state"), str)
+            or not isinstance(status.get("armed"), bool)
+            or _json_mapping(status.get("pose")) is None
+            or _json_mapping(status.get("operational_health")) is None
+            or _json_mapping(status.get("pair_network_health")) is None
+            or field_recording_status is None
+            or not _field_recording_diagnostics_valid(field_recording_status)
+        ):
+            return False
+        observed_serials.add(serial)
+    return observed_serials == expected_serials
 
 
 def _role_association_evidence(
@@ -706,6 +835,7 @@ def execute(  # noqa: C901, PLR0912, PLR0913, PLR0915 - linear evidence ceremony
     launch_after_unlock: bool = False,
     sleep_screen_after_launch: bool = False,
     require_monitoring: bool = False,
+    require_stopped_clean: bool = False,
     maximum_attempts: int = 3,
     retry_seconds: float = 2.0,
     runner: CommandRunner = subprocess_runner,
@@ -715,6 +845,9 @@ def execute(  # noqa: C901, PLR0912, PLR0913, PLR0915 - linear evidence ceremony
     """Execute a bounded ceremony and return credential-free admission evidence."""
     validate_pair(nodes)
     validate_expected_roles(nodes, expected_roles)
+    if require_monitoring and require_stopped_clean:
+        message = "require_monitoring and require_stopped_clean are mutually exclusive"
+        raise ValueError(message)
     if sleep_screen_after_launch and not launch_after_unlock:
         message = "sleep_screen_after_launch requires launch_after_unlock"
         raise ValueError(message)
@@ -746,6 +879,7 @@ def execute(  # noqa: C901, PLR0912, PLR0913, PLR0915 - linear evidence ceremony
         "launch_mode": "adb_foreground_activity" if launch_after_unlock else "none",
         "screen_policy": "sleep_after_launch" if sleep_screen_after_launch else "unchanged",
         "require_monitoring": require_monitoring,
+        "require_stopped_clean": require_stopped_clean,
         "expected_apk_sha256": expected_apk_sha256,
         "preparation_failure": None,
         "nodes": [],
@@ -804,6 +938,8 @@ def execute(  # noqa: C901, PLR0912, PLR0913, PLR0915 - linear evidence ceremony
                 arguments.extend(("--json", str(raw_attempt_path), "--require-wireless-adb"))
                 if require_monitoring:
                     arguments.append("--require-monitoring")
+                if require_stopped_clean:
+                    arguments.append("--require-stopped-clean")
                 result = _run(runner, arguments)
                 doctor_report = _read_doctor_report(raw_attempt_path)
                 if doctor_report is not None:
@@ -827,6 +963,9 @@ def execute(  # noqa: C901, PLR0912, PLR0913, PLR0915 - linear evidence ceremony
             lan_diagnostics, lan_diagnostics_passed = _lan_diagnostics_evidence(
                 doctor_report, resolved_nodes
             )
+            status_diagnostics_passed = _status_diagnostics_evidence_passed(
+                doctor_report, resolved_nodes
+            )
             report["role_associations"] = role_associations
             report["lan_diagnostics"] = lan_diagnostics
             attempt_passed = (
@@ -839,6 +978,7 @@ def execute(  # noqa: C901, PLR0912, PLR0913, PLR0915 - linear evidence ceremony
                 and role_association_passed
                 and exact_apk_evidence_passed is not False
                 and lan_diagnostics_passed
+                and status_diagnostics_passed
             )
             attempts.append(
                 {
@@ -848,6 +988,7 @@ def execute(  # noqa: C901, PLR0912, PLR0913, PLR0915 - linear evidence ceremony
                     "role_association_passed": role_association_passed,
                     "exact_apk_evidence_passed": exact_apk_evidence_passed,
                     "lan_diagnostics_passed": lan_diagnostics_passed,
+                    "status_diagnostics_passed": status_diagnostics_passed,
                     "failures": _doctor_failures(doctor_report),
                     "passed": attempt_passed,
                 }

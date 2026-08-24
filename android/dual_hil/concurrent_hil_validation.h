@@ -61,6 +61,24 @@ struct LanEndpointInspection {
   int authenticated_setup_status = 0;
 };
 
+enum class PairNetworkHealthArmDecision {
+  kNotReady,
+  kGood,
+  kDegraded,
+};
+
+struct PairNetworkHealthStatusInspection {
+  std::string_view status_json;
+  std::string_view expected_peer_origin;
+  std::string_view expected_peer_node_id;
+};
+
+struct PairNetworkHealthAdmissionInspection {
+  std::string_view admission_json;
+  std::string_view expected_peer_origin;
+  std::string_view expected_peer_node_id;
+};
+
 enum class DurablePairingState {
   kAbsent,
   kActive,
@@ -121,6 +139,20 @@ void ValidateMappedPeerImpactStatus(const MappedPeerImpactStatusInspection &insp
 void ValidatePairedPoseSessionState(const PairedPoseSessionStateInspection &inspection);
 
 void ValidateLanEndpoint(const LanEndpointInspection &inspection);
+
+// Validates the complete schema-1 pair-health snapshot and returns an arm decision only for
+// fresh, measured, stable evidence belonging to the exact configured LAN peer.
+[[nodiscard]] PairNetworkHealthArmDecision InspectPairNetworkHealthForArm(
+    const PairNetworkHealthStatusInspection &inspection);
+
+// Validates the exact schema-1 readiness evidence retained immediately before arming. The
+// accepted state, degraded override, expected peer, and complete embedded snapshot must agree.
+[[nodiscard]] PairNetworkHealthArmDecision InspectPairNetworkHealthAdmission(
+    const PairNetworkHealthAdmissionInspection &inspection);
+
+// Produces the exact capture-arm body. Only degraded evidence carries an explicit override;
+// not-ready/unusable evidence cannot be converted into an arm request.
+[[nodiscard]] std::string PairNetworkHealthArmRequestBody(PairNetworkHealthArmDecision decision);
 
 [[nodiscard]] DiscoveryPairingFixtureInspection InspectDiscoveryPairingFixture(
     std::string_view setup_json);

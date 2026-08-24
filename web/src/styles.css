@@ -953,6 +953,65 @@ h1 {
   grid-column: 1 / -1;
 }
 
+.pair-network-health {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 0.55rem;
+  border-radius: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.pair-network-health header,
+.pair-network-health dl > div {
+  display: grid;
+  grid-template-columns: minmax(10rem, auto) minmax(0, 1fr);
+  gap: 0.35rem 1rem;
+  align-items: baseline;
+}
+
+.pair-network-health header span,
+.pair-network-health dd {
+  color: var(--muted);
+}
+
+.pair-network-health dl,
+.pair-network-health dd,
+.pair-network-health ul {
+  margin: 0;
+}
+
+.pair-network-health dl,
+.pair-network-health ul {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.pair-network-health dt {
+  font-weight: 620;
+}
+
+.degraded-network-override {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.2rem 0.55rem;
+  align-items: start;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid #604b23;
+  border-radius: 0.5rem;
+  color: var(--warning);
+  background: var(--warning-dark);
+}
+
+.degraded-network-override input {
+  margin-top: 0.15rem;
+}
+
+.degraded-network-override small {
+  grid-column: 2;
+  color: var(--muted);
+}
+
 .peer-arm-notice {
   display: grid;
   grid-column: 1 / -1;

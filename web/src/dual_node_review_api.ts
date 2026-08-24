@@ -29,6 +29,7 @@ import {
   type ReviewRole,
   type SessionList,
   type SessionSummary,
+  type SetArmedOptions,
   validateDiagnosticFeedback,
 } from "./review_api.js";
 
@@ -238,7 +239,7 @@ export class DualNodeReviewApi implements ReviewApi {
       : combined;
   }
 
-  async setArmed(armed: boolean): Promise<CaptureStatus> {
+  async setArmed(armed: boolean, options: SetArmedOptions = {}): Promise<CaptureStatus> {
     await this.#verifyControlCredentials();
     if (!armed) {
       const results = await Promise.allSettled(
@@ -261,7 +262,9 @@ export class DualNodeReviewApi implements ReviewApi {
     this.#activeSharedSessionId = null;
     this.#coordinationError = null;
     const results = await Promise.allSettled(
-      this.#nodes.map((node) => node.setArmed(true, sharedSessionId)),
+      this.#nodes.map((node) =>
+        node.setArmed(true, sharedSessionId, options.allowDegradedNetwork === true),
+      ),
     );
     if (results.some((result) => result.status === "rejected")) {
       await Promise.allSettled(
@@ -1135,10 +1138,17 @@ class AndroidNodeClient {
     );
   }
 
-  async setArmed(armed: boolean, sharedSessionId: string | null): Promise<CaptureStatus> {
+  async setArmed(
+    armed: boolean,
+    sharedSessionId: string | null,
+    allowDegradedNetwork = false,
+  ): Promise<CaptureStatus> {
     const body: Record<string, unknown> = { armed };
     if (sharedSessionId !== null) {
       body.shared_session_id = sharedSessionId;
+    }
+    if (armed && allowDegradedNetwork) {
+      body.allow_degraded_network = true;
     }
     return parseCaptureStatus(
       await this.#request("/api/v1/capture/arm", {
@@ -1824,6 +1834,15 @@ function combineCaptureStatuses(
   const pose = combinedPoseCaptureStatus(
     statuses.flatMap((status) => (status.pose === undefined ? [] : [status.pose])),
   );
+  const leaderStatuses = statuses.filter((status) => status.pose?.mode === "leader");
+  const configuredNetworkHealth = statuses.filter(
+    (status) => status.pair_network_health?.configured === true,
+  );
+  const soleLeader = leaderStatuses.length === 1 ? leaderStatuses[0] : undefined;
+  const pairNetworkHealth =
+    configuredNetworkHealth.length === 1 && soleLeader?.pair_network_health?.configured === true
+      ? soleLeader.pair_network_health
+      : undefined;
   return {
     schema_version: CAPTURE_SCHEMA_VERSION,
     state,
@@ -1839,6 +1858,7 @@ function combineCaptureStatuses(
       last_run: null,
     },
     ...(pose === undefined ? {} : { pose }),
+    ...(pairNetworkHealth === undefined ? {} : { pair_network_health: pairNetworkHealth }),
   };
 }
 

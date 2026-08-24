@@ -54,6 +54,74 @@ def _lines(*values: str) -> str:
     return "\n".join(values)
 
 
+def _capture_status_fixture(*, monitoring: bool) -> dict[str, object]:
+    """Return the rich child-doctor evidence shape required by the field wrapper."""
+    return {
+        "schema_version": 2,
+        "state": "armed" if monitoring else "ready",
+        "armed": monitoring,
+        "active_session_id": None,
+        "video_frames": 0,
+        "audio_frames": 0,
+        "ring_bytes": 0,
+        "ring_duration_us": 0,
+        "pose": {
+            "metrics": {
+                "recent_inference_sample_count": 150,
+                "recent_inference_duration_p95_ns": "180000000",
+            },
+            "standby_audio": {
+                "ready": monitoring,
+                "peak_amplitude": 0.2,
+                "noise_floor": 0.001,
+                "threshold": 0.015,
+            },
+            "autonomous_pair": {
+                "state": "monitoring" if monitoring else "stopped",
+                "active_shared_session_id": None,
+                "replication_backlog_size": 0,
+                "local_triggered": False,
+                "peer_triggered": False,
+                "local_published": False,
+                "peer_published": False,
+            },
+        },
+        "operational_health": {
+            "thermal": {"status": 0, "headroom": 0.5},
+            "storage": {"usable_bytes": 8 * 1024**3, "ready": True},
+        },
+        "pair_network_health": {
+            "schema_version": 1,
+            "state": "good",
+            "raw_state": "good",
+            "local_to_peer": {"p95_round_trip_ns": "14000000"},
+            "peer_to_local": {"p95_round_trip_ns": "15000000"},
+        },
+    }
+
+
+def _field_recording_status_fixture(*, omit_shared_id: bool = False) -> dict[str, object]:
+    status: dict[str, object] = {
+        "schema_version": 1,
+        "state": "idle",
+        "active_recording_id": None,
+        "shared_recording_id": None,
+        "started_at_utc": None,
+        "started_elapsed_realtime_ns": None,
+        "elapsed_ms": 0,
+        "video_bytes": "0",
+        "audio_frames": "0",
+        "max_duration_seconds": 600,
+        "error": "",
+        "hil_reject_next_start": False,
+        "hil_fail_next_accepted_start": False,
+        "hil_accepted_start_waiting": False,
+    }
+    if omit_shared_id:
+        del status["shared_recording_id"]
+    return status
+
+
 class FakeRunner:
     """Production-shaped command boundary with programmable doctor outcomes."""
 
@@ -70,6 +138,8 @@ class FakeRunner:
         doctor_stderr: str = "",
         omit_apk_evidence: bool = False,
         omit_lan_evidence: bool = False,
+        omit_status_evidence: bool = False,
+        malformed_field_recording_status: bool = False,
     ) -> None:
         self.doctor_outcomes: list[bool] = list(doctor_outcomes)
         self.locked_serial: str | None = locked_serial
@@ -86,6 +156,8 @@ class FakeRunner:
         self.doctor_stderr: str = doctor_stderr
         self.omit_apk_evidence: bool = omit_apk_evidence
         self.omit_lan_evidence: bool = omit_lan_evidence
+        self.omit_status_evidence: bool = omit_status_evidence
+        self.malformed_field_recording_status: bool = malformed_field_recording_status
         self.commands: list[tuple[str, ...]] = []
 
     def __call__(self, arguments: Sequence[str]) -> CommandResult:  # noqa: C901, PLR0911
@@ -106,6 +178,18 @@ class FakeRunner:
                     {
                         "serial": value.partition("=")[0],
                         "role": self.doctor_roles.get(value.partition("=")[0].partition(":")[0]),
+                        **(
+                            {}
+                            if self.omit_status_evidence
+                            else {
+                                "capture_status": _capture_status_fixture(
+                                    monitoring="--require-monitoring" in command
+                                ),
+                                "field_recording_status": _field_recording_status_fixture(
+                                    omit_shared_id=self.malformed_field_recording_status
+                                ),
+                            }
+                        ),
                     }
                     for value in node_values
                 ],
@@ -398,6 +482,98 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(len(doctor_commands), 2)
         self.assertTrue(all("--require-wireless-adb" in command for command in doctor_commands))
         self.assertTrue(all("--require-monitoring" in command for command in doctor_commands))
+        self.assertTrue(
+            all(attempt["status_diagnostics_passed"] for attempt in report["doctor_attempts"])
+        )
+
+    def test_stopped_clean_gate_is_forwarded_and_retains_rich_status(self) -> None:
+        runner = FakeRunner((True,))
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary) / "field"
+            report = execute(
+                ADB,
+                DOCTOR,
+                NODES,
+                evidence,
+                expected_roles=EXPECTED_ROLES,
+                require_stopped_clean=True,
+                maximum_attempts=1,
+                runner=runner,
+            )
+            child_report = cast(
+                "dict[str, object]",
+                json.loads((evidence / "doctor_attempt_1.json").read_text(encoding="utf-8")),
+            )
+
+        self.assertTrue(report["passed"])
+        self.assertFalse(report["require_monitoring"])
+        self.assertTrue(report["require_stopped_clean"])
+        self.assertTrue(report["doctor_attempts"][0]["status_diagnostics_passed"])
+        doctor_command = next(command for command in runner.commands if command[0] == str(DOCTOR))
+        self.assertIn("--require-stopped-clean", doctor_command)
+        self.assertNotIn("--require-monitoring", doctor_command)
+        child_nodes = cast("list[dict[str, object]]", child_report["nodes"])
+        capture_status = cast("dict[str, object]", child_nodes[0]["capture_status"])
+        pose = cast("dict[str, object]", capture_status["pose"])
+        standby_audio = cast("dict[str, object]", pose["standby_audio"])
+        health = cast("dict[str, object]", capture_status["operational_health"])
+        storage = cast("dict[str, object]", health["storage"])
+        network = cast("dict[str, object]", capture_status["pair_network_health"])
+        local_to_peer = cast("dict[str, object]", network["local_to_peer"])
+        field_status = cast("dict[str, object]", child_nodes[0]["field_recording_status"])
+        self.assertEqual(standby_audio["noise_floor"], 0.001)
+        self.assertEqual(storage["usable_bytes"], 8 * 1024**3)
+        self.assertEqual(local_to_peer["p95_round_trip_ns"], "14000000")
+        self.assertEqual(field_status["max_duration_seconds"], 600)
+        self.assertEqual(field_status["video_bytes"], "0")
+
+    def test_field_report_rejects_missing_child_status_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            report = execute(
+                ADB,
+                DOCTOR,
+                NODES,
+                Path(temporary) / "field",
+                expected_roles=EXPECTED_ROLES,
+                maximum_attempts=1,
+                runner=FakeRunner((True,), omit_status_evidence=True),
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertFalse(report["doctor_attempts"][0]["status_diagnostics_passed"])
+
+    def test_field_report_rejects_malformed_field_recording_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            report = execute(
+                ADB,
+                DOCTOR,
+                NODES,
+                Path(temporary) / "field",
+                expected_roles=EXPECTED_ROLES,
+                maximum_attempts=1,
+                runner=FakeRunner((True,), malformed_field_recording_status=True),
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertFalse(report["doctor_attempts"][0]["status_diagnostics_passed"])
+
+    def test_stopped_clean_and_monitoring_are_mutually_exclusive(self) -> None:
+        runner = FakeRunner(())
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            self.assertRaisesRegex(ValueError, "mutually exclusive"),
+        ):
+            execute(
+                ADB,
+                DOCTOR,
+                NODES,
+                Path(temporary) / "field",
+                expected_roles=EXPECTED_ROLES,
+                require_monitoring=True,
+                require_stopped_clean=True,
+                runner=runner,
+            )
+        self.assertEqual(runner.commands, [])
 
     def test_retains_only_bounded_credential_redacted_doctor_failures(self) -> None:
         checks = [

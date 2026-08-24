@@ -7,6 +7,7 @@ import {
   type StatusSubscriptionOptions,
 } from "./live_status.js";
 import { parseOperationalHealth, type OperationalHealth } from "./operational_health.js";
+import { parsePairNetworkHealth, type PairNetworkHealth } from "./pair_network_health.js";
 
 export const REVIEW_SCHEMA_VERSION = 1 as const;
 export const PIPELINE_PROFILE_SCHEMA_VERSION = 3 as const;
@@ -92,7 +93,12 @@ export interface CaptureStatus {
   hil: SyntheticSwingHilStatus;
   pose?: PoseCaptureStatus;
   operational_health?: OperationalHealth;
+  pair_network_health?: PairNetworkHealth;
   live_status?: LiveStatusVersion;
+}
+
+export interface SetArmedOptions {
+  allowDegradedNetwork?: boolean;
 }
 
 export const PEER_ARM_STATES = [
@@ -371,7 +377,7 @@ export interface FieldRecordingList {
 
 export interface ReviewApi {
   getCaptureStatus(): Promise<CaptureStatus>;
-  setArmed(armed: boolean): Promise<CaptureStatus>;
+  setArmed(armed: boolean, options?: SetArmedOptions): Promise<CaptureStatus>;
   triggerManualCapture(): Promise<SessionSummary>;
   saveMissedShot(): Promise<SessionSummary>;
   startSyntheticSwing(): Promise<CaptureStatus>;
@@ -431,11 +437,15 @@ export class HttpReviewApi implements ReviewApi {
     return status;
   }
 
-  async setArmed(armed: boolean): Promise<CaptureStatus> {
+  async setArmed(armed: boolean, options: SetArmedOptions = {}): Promise<CaptureStatus> {
+    const body: Record<string, unknown> = { armed };
+    if (armed && options.allowDegradedNetwork === true) {
+      body.allow_degraded_network = true;
+    }
     return this.#request("/api/v1/capture/arm", parseCaptureStatus, {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ armed }),
+      body: JSON.stringify(body),
     });
   }
 
@@ -663,6 +673,7 @@ export function parseCaptureStatus(value: unknown): CaptureStatus {
   }
   const pose = parsePoseCaptureStatus(object.pose);
   const operationalHealth = parseOperationalHealth(object.operational_health);
+  const pairNetworkHealth = parsePairNetworkHealth(object.pair_network_health);
   const liveStatus = parseLiveStatusVersion(object.live_status);
   return {
     schema_version: CAPTURE_SCHEMA_VERSION,
@@ -673,6 +684,7 @@ export function parseCaptureStatus(value: unknown): CaptureStatus {
     hil: parseSyntheticSwingHilStatus(object.hil),
     ...(pose === undefined ? {} : { pose }),
     ...(operationalHealth === undefined ? {} : { operational_health: operationalHealth }),
+    ...(pairNetworkHealth === undefined ? {} : { pair_network_health: pairNetworkHealth }),
     ...(liveStatus === undefined ? {} : { live_status: liveStatus }),
   };
 }

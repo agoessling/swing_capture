@@ -86,6 +86,66 @@ class ExecutableSmokeTest(unittest.TestCase):
         self.assertTrue(all(node["passed"] is True for node in nodes))
         attempts = cast("list[dict[str, object]]", report["doctor_attempts"])
         self.assertEqual(attempts[0]["passed"], True)
+        self.assertEqual(attempts[0]["status_diagnostics_passed"], True)
+
+    def test_operator_executable_forwards_stopped_clean_gate(self) -> None:
+        """Require the packaged command to forward and retain terminal admission semantics."""
+        executable = _runfile("tools/field_preflight/android_field_preflight_test_fixture")
+        fake_adb = _runfile("tools/field_preflight/fake_adb")
+        fake_doctor = _runfile("tools/field_preflight/fake_doctor")
+        with tempfile.TemporaryDirectory() as temporary:
+            expected_apk = Path(temporary) / "expected.apk"
+            expected_apk.write_bytes(b"fake exact APK\n")
+            evidence = Path(temporary) / "artifacts" / "field-stopped"
+            result = subprocess.run(
+                [
+                    str(executable),
+                    str(fake_adb),
+                    str(fake_doctor),
+                    str(expected_apk),
+                    "--node",
+                    "10.168.168.111:37123=http://10.168.168.111:8088",
+                    "--node",
+                    "10.168.168.241:42491=http://10.168.168.241:8088",
+                    "--expected-role",
+                    "10.168.168.111=face_on",
+                    "--expected-role",
+                    "10.168.168.241=down_the_line",
+                    "--evidence-dir",
+                    "artifacts/field-stopped",
+                    "--require-stopped-clean",
+                    "--maximum-attempts",
+                    "1",
+                    "--retry-seconds",
+                    "0",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env={**os.environ, "BUILD_WORKSPACE_DIRECTORY": temporary},
+            )
+            report = cast(
+                "dict[str, object]",
+                json.loads((evidence / "report.json").read_text(encoding="utf-8")),
+            )
+            child = cast(
+                "dict[str, object]",
+                json.loads((evidence / "doctor_attempt_1.json").read_text(encoding="utf-8")),
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(report["passed"])
+        self.assertFalse(report["require_monitoring"])
+        self.assertTrue(report["require_stopped_clean"])
+        attempts = cast("list[dict[str, object]]", report["doctor_attempts"])
+        self.assertTrue(attempts[0]["status_diagnostics_passed"])
+        nodes = cast("list[dict[str, object]]", child["nodes"])
+        status = cast("dict[str, object]", nodes[0]["capture_status"])
+        field_status = cast("dict[str, object]", nodes[0]["field_recording_status"])
+        self.assertEqual(status["ring_bytes"], 12_345_678)
+        self.assertEqual(field_status["state"], "idle")
+        self.assertEqual(field_status["max_duration_seconds"], 600)
 
     def test_operator_executable_surfaces_actionable_strict_doctor_failure(self) -> None:
         """Require a failing strict doctor check to reach the operator output."""

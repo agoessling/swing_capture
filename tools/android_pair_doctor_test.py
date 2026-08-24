@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import json
 import os
 import subprocess
 import tempfile
@@ -18,15 +19,18 @@ if TYPE_CHECKING:
 
 from tools.android_pair_doctor import (
     BrowserCorsEvidence,
+    Check,
     DeviceTelemetry,
     EvidenceCollector,
     HostedWebAsset,
     LanNodeDiagnostics,
     NodeEvidence,
     ReachabilityEvidence,
+    capture_status_diagnostics,
     collect_pair_evidence,
     evaluate_lan_diagnostics,
     evaluate_pair,
+    field_recording_status_diagnostics,
     lan_diagnostics_json,
     parse_control_token,
     parse_telemetry,
@@ -116,13 +120,19 @@ class _FakeCollectionBackends:
 
     def read(self, url: str, credential: str | None) -> tuple[int, Mapping[str, object]]:
         self.observed_http_tokens.append(credential)
-        endpoint = url.rsplit("/", maxsplit=1)[-1]
+        path = urlsplit(url).path
+        endpoint = (
+            "field-recording-status"
+            if path.endswith("/field-recording/status")
+            else path.rsplit("/", maxsplit=1)[-1]
+        )
         self.observed_operations.append(
             f"http:{endpoint}:{'authenticated' if credential is not None else 'anonymous'}"
         )
         responses: Mapping[str, Mapping[str, object]] = {
             "node": self.fixture.descriptor,
             "status": self.fixture.status,
+            "field-recording-status": self.fixture.field_recording_status,
             "clock": self.fixture.clock,
         }
         if endpoint == "node" and credential != self.token:
@@ -243,6 +253,60 @@ def _nominal_browser_cors() -> BrowserCorsEvidence:
     )
 
 
+def _network_direction() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "attempts": 3,
+        "successes": 3,
+        "timeouts": 0,
+        "round_trip_ns": ["10000000", "12000000", "14000000"],
+        "transfer_bytes": "1000000",
+        "transfer_duration_ns": "100000000",
+        "transfer_complete": True,
+        "minimum_round_trip_ns": "10000000",
+        "median_round_trip_ns": "12000000",
+        "p95_round_trip_ns": "14000000",
+        "maximum_round_trip_ns": "14000000",
+        "jitter_ns": "4000000",
+        "transfer_bits_per_second": 80000000.0,
+    }
+
+
+def _network_health(mode: str, peer: NodeEvidence | None) -> dict[str, object]:
+    if mode != "leader":
+        return {
+            "schema_version": 1,
+            "configured": False,
+            "state": "unusable",
+            "raw_state": "unusable",
+            "measured": False,
+            "stale": False,
+            "transition_pending": False,
+            "age_ns": "0",
+            "issues": ["A peer is not configured for network-health measurement."],
+            "peer": None,
+            "measured_at_elapsed_realtime_ns": None,
+            "local_to_peer": None,
+            "peer_to_local": None,
+        }
+    assert peer is not None
+    return {
+        "schema_version": 1,
+        "configured": True,
+        "state": "good",
+        "raw_state": "good",
+        "measured": True,
+        "stale": False,
+        "transition_pending": False,
+        "age_ns": "1000000000",
+        "issues": [],
+        "peer": {"origin": peer.origin, "node_id": peer.descriptor["node_id"]},
+        "measured_at_elapsed_realtime_ns": "9000000000",
+        "local_to_peer": _network_direction(),
+        "peer_to_local": _network_direction(),
+    }
+
+
 def _node(
     specification: _NodeSpec,
     peer: NodeEvidence | None = None,
@@ -287,7 +351,11 @@ def _node(
             "configuration": {
                 "role": role,
                 "capture_profile": "720p240",
-                "pose": {"mode": mode, "peer": peer_origin},
+                "pose": {
+                    "mode": mode,
+                    "inference_delegate": "gpu_preferred",
+                    "peer": peer_origin,
+                },
             },
             "pairing": pairing,
             "readiness": {"issues": [], "capture_state": "stopped"},
@@ -314,7 +382,44 @@ def _node(
                 "issues": [],
             },
         },
-        status={"schema_version": 2, "state": "stopped", "armed": False},
+        status={
+            "schema_version": 2,
+            "state": "stopped",
+            "armed": False,
+            "active_session_id": None,
+            "pose": {
+                "autonomous_pair": {
+                    "state": "stopped",
+                    "active_shared_session_id": None,
+                    "replication_backlog_size": 0,
+                    "local_triggered": False,
+                    "peer_triggered": False,
+                    "local_published": False,
+                    "peer_published": False,
+                }
+            },
+            "operational_health": {
+                "thermal": {"status": 0, "headroom": 0.5},
+                "storage": {"usable_bytes": 8 * 1024**3, "ready": True},
+            },
+            "pair_network_health": _network_health(mode, peer),
+        },
+        field_recording_status={
+            "schema_version": 1,
+            "state": "idle",
+            "active_recording_id": None,
+            "shared_recording_id": None,
+            "started_at_utc": None,
+            "started_elapsed_realtime_ns": None,
+            "elapsed_ms": 0,
+            "video_bytes": "0",
+            "audio_frames": "0",
+            "max_duration_seconds": 600,
+            "error": "",
+            "hil_reject_next_start": False,
+            "hil_fail_next_accepted_start": False,
+            "hil_accepted_start_waiting": False,
+        },
         clock={"schema_version": 1, "node_id": node_id},
         unauthenticated_setup_status=401,
         web_assets=_nominal_web_assets(),
@@ -357,12 +462,23 @@ def _monitoring(nodes: list[NodeEvidence]) -> list[NodeEvidence]:
         mode = str(_mutable_mapping(node.descriptor["pose"])["mode"])
         pose = {
             "mode": mode,
+            "configured_delegate": "gpu_preferred",
+            "experiment_enabled": False,
+            "model_variant": "lite",
+            "model_asset_path": "pose_landmarker_lite.task",
+            "actual_standby_width": 640,
+            "actual_standby_height": 360,
             "phase": "monitoring",
             "metrics": {
-                "successful_inferences": 7,
+                "delegate": "gpu",
+                "successful_inferences": 120,
                 "failed_inferences": 0,
                 "inference_duration_p95_ns": "180000000",
                 "maximum_inference_duration_ns": "220000000",
+                "recent_inference_sample_count": 100,
+                "recent_inference_duration_p95_ns": "180000000",
+                "recent_maximum_inference_duration_ns": "220000000",
+                "recent_inference_deadline_misses": 3,
                 "rejected_decision_timestamps": 0,
             },
             "autonomous_pair": {
@@ -388,6 +504,7 @@ def _monitoring(nodes: list[NodeEvidence]) -> list[NodeEvidence]:
             dataclass_replace(
                 node,
                 status={
+                    **node.status,
                     "schema_version": 2,
                     "state": "armed",
                     "armed": True,
@@ -401,6 +518,340 @@ def _monitoring(nodes: list[NodeEvidence]) -> list[NodeEvidence]:
 def test_nominal_pair_is_ready() -> None:
     """A complementary authenticated pair passes the default preflight."""
     assert _passed(_nominal())
+
+
+def test_stopped_clean_gate_rejects_capture_and_autonomous_publication_work() -> None:
+    """Pre-session admission fails closed on every active or dirty terminal dimension."""
+    nodes = _nominal()
+    assert all(check.passed for check in evaluate_pair(nodes, require_stopped_clean=True))
+    assert all(check.passed for check in evaluate_pair(_monitoring(nodes)))
+    mutual_exclusion_raised = False
+    try:
+        evaluate_pair(nodes, require_monitoring=True, require_stopped_clean=True)
+    except ValueError:
+        mutual_exclusion_raised = True
+    assert mutual_exclusion_raised
+
+    def stopped_clean_check(status: dict[str, object]) -> Check:
+        checks = evaluate_pair(
+            [dataclass_replace(nodes[0], status=status), nodes[1]],
+            require_stopped_clean=True,
+        )
+        return next(check for check in checks if check.name == "node.1.stopped_clean")
+
+    variants: list[tuple[str, dict[str, object]]] = []
+    for state in ("arming", "armed", "waiting_post_roll", "encoding", "stopping"):
+        status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+        status["state"] = state
+        status["armed"] = state == "armed"
+        variants.append((state, status))
+    active_capture = _mutable_mapping(copy.deepcopy(nodes[0].status))
+    active_capture["active_session_id"] = "active-session"
+    variants.append(("active capture session", active_capture))
+    missing_active_capture = _mutable_mapping(copy.deepcopy(nodes[0].status))
+    del missing_active_capture["active_session_id"]
+    variants.append(("missing active capture session evidence", missing_active_capture))
+    for field, value in (
+        ("replication_backlog_size", 1),
+        ("active_shared_session_id", "shared-session"),
+        ("state", "publishing"),
+        ("local_triggered", True),
+        ("peer_triggered", True),
+        ("local_published", True),
+        ("peer_published", True),
+    ):
+        status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+        autonomous = _mutable_mapping(_mutable_mapping(status["pose"])["autonomous_pair"])
+        autonomous[field] = value
+        variants.append((field, status))
+    missing_shared_session = _mutable_mapping(copy.deepcopy(nodes[0].status))
+    del _mutable_mapping(_mutable_mapping(missing_shared_session["pose"])["autonomous_pair"])[
+        "active_shared_session_id"
+    ]
+    variants.append(("missing active shared session evidence", missing_shared_session))
+    for label, status in variants:
+        check = stopped_clean_check(status)
+        assert not check.passed, label
+        assert "replication_backlog_size" in check.message, label
+
+
+def test_stopped_clean_gate_rejects_field_recording_and_malformed_evidence() -> None:
+    """Separate recorder activity, publication, faults, and missing keys all fail closed."""
+    nodes = _nominal()
+
+    def checks_for(status: Mapping[str, object]) -> tuple[Check, Check]:
+        checks = evaluate_pair(
+            [dataclass_replace(nodes[0], field_recording_status=status), nodes[1]],
+            require_stopped_clean=True,
+        )
+        by_name = {check.name: check for check in checks}
+        return (
+            by_name["node.1.field_recording_contract"],
+            by_name["node.1.field_recording_stopped_clean"],
+        )
+
+    for state in ("starting", "recording", "stopping"):
+        status = _mutable_mapping(copy.deepcopy(nodes[0].field_recording_status))
+        status.update(
+            {
+                "state": state,
+                "active_recording_id": "recording-local",
+                "shared_recording_id": "recording-shared",
+                "started_at_utc": "2026-08-23T18:00:00Z",
+                "started_elapsed_realtime_ns": "1000000",
+            }
+        )
+        contract, clean = checks_for(status)
+        assert contract.passed, state
+        assert not clean.passed, state
+
+    ready = _mutable_mapping(copy.deepcopy(nodes[0].field_recording_status))
+    ready.update(
+        {
+            "state": "ready",
+            "shared_recording_id": "completed-shared",
+            "started_at_utc": "2026-08-23T18:00:00Z",
+            "started_elapsed_realtime_ns": "1000000",
+            "elapsed_ms": 42_000,
+            "video_bytes": "12345678",
+            "audio_frames": "2016000",
+        }
+    )
+    contract, clean = checks_for(ready)
+    assert contract.passed
+    assert clean.passed
+
+    failed = _mutable_mapping(copy.deepcopy(ready))
+    failed["state"] = "error"
+    failed["error"] = "encoder failed"
+    contract, clean = checks_for(failed)
+    assert contract.passed
+    assert not clean.passed
+
+    for fault in (
+        "hil_reject_next_start",
+        "hil_fail_next_accepted_start",
+    ):
+        status = _mutable_mapping(copy.deepcopy(nodes[0].field_recording_status))
+        status[fault] = True
+        contract, clean = checks_for(status)
+        assert contract.passed, fault
+        assert not clean.passed, fault
+
+    waiting = _mutable_mapping(copy.deepcopy(nodes[0].field_recording_status))
+    waiting.update(
+        {
+            "state": "starting",
+            "active_recording_id": "recording-local",
+            "shared_recording_id": "recording-shared",
+            "started_at_utc": "2026-08-23T18:00:00Z",
+            "started_elapsed_realtime_ns": "1000000",
+            "hil_fail_next_accepted_start": True,
+            "hil_accepted_start_waiting": True,
+        }
+    )
+    contract, clean = checks_for(waiting)
+    assert contract.passed
+    assert not clean.passed
+
+    for missing_key in nodes[0].field_recording_status:
+        malformed = _mutable_mapping(copy.deepcopy(nodes[0].field_recording_status))
+        del malformed[missing_key]
+        contract, clean = checks_for(malformed)
+        assert not contract.passed, missing_key
+        assert not clean.passed, missing_key
+
+    malformed_schema = _mutable_mapping(copy.deepcopy(nodes[0].field_recording_status))
+    malformed_schema["schema_version"] = True
+    contract, clean = checks_for(malformed_schema)
+    assert not contract.passed
+    assert not clean.passed
+    malformed_state = _mutable_mapping(copy.deepcopy(nodes[0].field_recording_status))
+    malformed_state["state"] = []
+    contract, clean = checks_for(malformed_state)
+    assert not contract.passed
+    assert not clean.passed
+
+
+def test_capture_status_diagnostics_retains_metrics_and_redacts_credentials() -> None:
+    """Every attempt keeps numeric margins without allowing a credential into artifacts."""
+    secret = "A" * 32
+    redacted = "[REDACTED]"
+    expected_inference_samples = 150
+    expected_noise_floor = 0.001
+    status = _mutable_mapping(copy.deepcopy(_nominal()[0].status))
+    pose = _mutable_mapping(status["pose"])
+    pose["metrics"] = {
+        "recent_inference_sample_count": expected_inference_samples,
+        "recent_inference_duration_p95_ns": "187000000",
+    }
+    pose["standby_audio"] = {
+        "peak_amplitude": 0.25,
+        "noise_floor": expected_noise_floor,
+        "threshold": 0.015,
+    }
+    pose["control_token"] = secret
+    status["error"] = f"request used Bearer {secret}"
+
+    retained = capture_status_diagnostics(status)
+
+    retained_pose = _mutable_mapping(retained["pose"])
+    assert retained_pose["control_token"] == redacted
+    assert redacted in str(retained["error"])
+    assert secret not in json.dumps(retained)
+    assert (
+        _mutable_mapping(retained_pose["metrics"])["recent_inference_sample_count"]
+        == expected_inference_samples
+    )
+    assert _mutable_mapping(retained_pose["standby_audio"])["noise_floor"] == expected_noise_floor
+    health = _mutable_mapping(retained["pair_network_health"])
+    assert _mutable_mapping(health["local_to_peer"])["p95_round_trip_ns"] == "14000000"
+
+    field_status = _mutable_mapping(copy.deepcopy(_nominal()[0].field_recording_status))
+    field_status["error"] = f"request used Bearer {secret}"
+    retained_field_status = field_recording_status_diagnostics(field_status)
+    assert retained_field_status["elapsed_ms"] == 0
+    assert secret not in json.dumps(retained_field_status)
+
+
+def test_pair_network_health_nominal_and_degraded_are_viable_in_both_modes() -> None:
+    """Degraded service remains usable but cannot lose its explicit operator warning."""
+    for require_monitoring in (False, True):
+        nodes = _monitoring(_nominal()) if require_monitoring else _nominal()
+        nominal_checks = evaluate_pair(nodes, require_monitoring=require_monitoring)
+        nominal_health = next(
+            check for check in nominal_checks if check.name == "pair.network_health"
+        )
+        assert nominal_health.passed
+        assert "good" in nominal_health.message
+
+        leader_status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+        health = _mutable_mapping(leader_status["pair_network_health"])
+        health["state"] = "degraded"
+        health["raw_state"] = "degraded"
+        health["issues"] = ["Some phone-to-phone application requests failed or timed out."]
+        degraded_checks = evaluate_pair(
+            [dataclass_replace(nodes[0], status=leader_status), nodes[1]],
+            require_monitoring=require_monitoring,
+        )
+        degraded_health = next(
+            check for check in degraded_checks if check.name == "pair.network_health"
+        )
+        assert degraded_health.passed
+        assert "WARNING: degraded" in degraded_health.message
+        assert "explicit operator override" in degraded_health.message
+
+
+def test_pair_network_health_unusable_and_stale_fail_in_both_modes() -> None:
+    """Neither an overrideable warning nor armed flags can hide nonviable coordination."""
+    for require_monitoring in (False, True):
+        for stale in (False, True):
+            nodes = _monitoring(_nominal()) if require_monitoring else _nominal()
+            leader_status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+            health = _mutable_mapping(leader_status["pair_network_health"])
+            health["state"] = "unusable"
+            health["raw_state"] = "unusable"
+            health["stale"] = stale
+            health["age_ns"] = "31000000000" if stale else "1000000000"
+            health["issues"] = [
+                "Pair network-health evidence is stale."
+                if stale
+                else "At least one phone-to-phone application direction is unreachable."
+            ]
+            checks = evaluate_pair(
+                [dataclass_replace(nodes[0], status=leader_status), nodes[1]],
+                require_monitoring=require_monitoring,
+            )
+            failed = {check.name for check in checks if not check.passed}
+            assert "pair.network_health" in failed
+            assert "node.1.pair_network_health_contract" not in failed
+
+
+def test_pair_network_health_unmeasured_leader_fails_viability() -> None:
+    """A configured leader cannot arm from an internally valid but unmeasured snapshot."""
+    nodes = _nominal()
+    leader_status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+    health = _mutable_mapping(leader_status["pair_network_health"])
+    health.update(
+        {
+            "state": "unusable",
+            "raw_state": "unusable",
+            "measured": False,
+            "stale": False,
+            "transition_pending": False,
+            "age_ns": "0",
+            "issues": ["Pair network health has not been measured."],
+            "measured_at_elapsed_realtime_ns": None,
+            "local_to_peer": None,
+            "peer_to_local": None,
+        }
+    )
+    checks = evaluate_pair([dataclass_replace(nodes[0], status=leader_status), nodes[1]])
+    failed = {check.name for check in checks if not check.passed}
+    assert "pair.network_health" in failed
+    assert "node.1.pair_network_health_contract" not in failed
+
+
+def test_pair_network_health_requires_exact_authenticated_shadow() -> None:
+    """Fresh good metrics for another peer cannot qualify the configured pair."""
+    nodes = _nominal()
+    leader_status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+    health = _mutable_mapping(leader_status["pair_network_health"])
+    peer = _mutable_mapping(health["peer"])
+    peer["node_id"] = "replaced-shadow"
+    checks = evaluate_pair([dataclass_replace(nodes[0], status=leader_status), nodes[1]])
+    failed = {check.name for check in checks if not check.passed}
+    assert "pair.network_health" in failed
+    assert "node.1.pair_network_health_contract" not in failed
+
+
+def test_pair_network_health_malformed_contract_fails_without_aborting_diagnosis() -> None:
+    """Type drift is retained as named failures while unrelated pair checks still run."""
+    nodes = _nominal()
+    leader_status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+    health = _mutable_mapping(leader_status["pair_network_health"])
+    health["age_ns"] = 1000
+    local_direction = _mutable_mapping(health["local_to_peer"])
+    local_direction["successes"] = 4
+    checks = evaluate_pair([dataclass_replace(nodes[0], status=leader_status), nodes[1]])
+    failed = {check.name for check in checks if not check.passed}
+    assert "node.1.pair_network_health_contract" in failed
+    assert "pair.network_health" in failed
+    assert "pair.roles" not in failed
+
+
+def test_shadow_network_health_must_remain_unconfigured() -> None:
+    """The intentionally unconfigured shadow cannot masquerade as another measuring leader."""
+    nodes = _nominal()
+    shadow_status = _mutable_mapping(copy.deepcopy(nodes[1].status))
+    shadow_status["pair_network_health"] = copy.deepcopy(nodes[0].status["pair_network_health"])
+    checks = evaluate_pair([nodes[0], dataclass_replace(nodes[1], status=shadow_status)])
+    failed = {check.name for check in checks if not check.passed}
+    assert "node.2.pair_network_health_contract" in failed
+    assert "node.1.pair_network_health_contract" not in failed
+    assert "pair.network_health" not in failed
+
+
+def test_disabled_network_health_uses_the_unconfigured_contract() -> None:
+    """A disabled standalone node does not become a network-health measurement owner."""
+    nodes = _nominal()
+    descriptor = _mutable_mapping(copy.deepcopy(nodes[0].descriptor))
+    descriptor_pose = _mutable_mapping(descriptor["pose"])
+    descriptor_pose["mode"] = "disabled"
+    setup = _mutable_mapping(copy.deepcopy(nodes[0].setup))
+    setup_pose = _mutable_mapping(_mutable_mapping(setup["configuration"])["pose"])
+    setup_pose["mode"] = "disabled"
+    status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+    status["pair_network_health"] = _network_health("disabled", None)
+    checks = evaluate_pair(
+        [
+            dataclass_replace(nodes[0], descriptor=descriptor, setup=setup, status=status),
+            nodes[1],
+        ]
+    )
+    failed = {check.name for check in checks if not check.passed}
+    assert "node.1.pair_network_health_contract" not in failed
+    assert "pair.pose_topology" in failed
 
 
 def test_wrong_role_and_duplicate_identity_fail() -> None:
@@ -555,6 +1006,21 @@ def test_monitoring_gate_rejects_pose_latency_regression() -> None:
     status = _mutable_mapping(copy.deepcopy(nodes[0].status))
     pose = _mutable_mapping(status["pose"])
     metrics = _mutable_mapping(pose["metrics"])
+    metrics["recent_inference_duration_p95_ns"] = "714000000"
+    metrics["recent_maximum_inference_duration_ns"] = "714000000"
+
+    checks = evaluate_pair(
+        [dataclass_replace(nodes[0], status=status), nodes[1]],
+        require_monitoring=True,
+    )
+    assert "node.1.pose_monitoring" in {check.name for check in checks if not check.passed}
+
+
+def test_monitoring_gate_uses_recent_window_instead_of_diluted_lifetime() -> None:
+    """Old lifetime tails remain visible but do not replace the representative recent window."""
+    nodes = _monitoring(_nominal())
+    status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+    metrics = _mutable_mapping(_mutable_mapping(status["pose"])["metrics"])
     metrics["inference_duration_p95_ns"] = "714000000"
     metrics["maximum_inference_duration_ns"] = "714000000"
 
@@ -562,7 +1028,31 @@ def test_monitoring_gate_rejects_pose_latency_regression() -> None:
         [dataclass_replace(nodes[0], status=status), nodes[1]],
         require_monitoring=True,
     )
-    assert "node.1.pose_monitoring" in {check.name for check in checks if not check.passed}
+    assert "node.1.pose_monitoring" not in {check.name for check in checks if not check.passed}
+
+
+def test_monitoring_gate_rejects_runtime_drift_and_short_recent_window() -> None:
+    """Configured preference cannot hide fallback, experiment leakage, or a tiny sample."""
+    nodes = _monitoring(_nominal())
+    mutations = (
+        ("metrics", "delegate", "cpu"),
+        ("pose", "model_variant", "full"),
+        ("pose", "actual_standby_width", 1280),
+        ("metrics", "recent_inference_sample_count", 99),
+        ("metrics", "recent_inference_sample_count", 151),
+    )
+    for section, field, value in mutations:
+        status = _mutable_mapping(copy.deepcopy(nodes[0].status))
+        pose = _mutable_mapping(status["pose"])
+        target = _mutable_mapping(pose["metrics"]) if section == "metrics" else pose
+        target[field] = value
+        checks = evaluate_pair(
+            [dataclass_replace(nodes[0], status=status), nodes[1]],
+            require_monitoring=True,
+        )
+        assert "node.1.pose_monitoring" in {check.name for check in checks if not check.passed}, (
+            field
+        )
 
 
 def test_monitoring_gate_rejects_wrong_peer_clock_identity_and_uncertainty() -> None:
@@ -691,14 +1181,16 @@ def test_collector_uses_direct_lan_auth_and_redacts_credential() -> None:
     peer_origin = "http://10.0.0.2:8088"
     diagnostics = collector.collect_lan_diagnostics(fixture.serial, fixture.origin, peer_origin)
     assert evidence.descriptor == fixture.descriptor
+    assert evidence.field_recording_status == fixture.field_recording_status
     assert evidence.telemetry.storage_usable_bytes == 8 * 1024**3
     assert diagnostics.bssid == "44:d9:e7:aa:bb:cc"
     assert diagnostics.host_to_phone.reachable
     assert diagnostics.phone_to_peer.reachable
     assert diagnostics.phone_to_peer.target == peer_origin
-    expected_authenticated_requests = 3
+    expected_authenticated_requests = 4
     assert backends.observed_http_tokens.count(token) == expected_authenticated_requests
     assert "http:node:authenticated" in backends.observed_operations
+    assert "http:field-recording-status:authenticated" in backends.observed_operations
     assert "http:clock:anonymous" in backends.observed_operations
     assert backends.observed_asset_urls == [
         f"{fixture.origin}/",
@@ -905,6 +1397,9 @@ def dataclass_replace(value: NodeEvidence, **changes: object) -> NodeEvidence:
 
 if __name__ == "__main__":
     test_nominal_pair_is_ready()
+    test_stopped_clean_gate_rejects_capture_and_autonomous_publication_work()
+    test_stopped_clean_gate_rejects_field_recording_and_malformed_evidence()
+    test_capture_status_diagnostics_retains_metrics_and_redacts_credentials()
     test_wrong_role_and_duplicate_identity_fail()
     test_two_shadow_phones_fail_before_field_use()
     test_stale_binding_and_readiness_issue_fail()

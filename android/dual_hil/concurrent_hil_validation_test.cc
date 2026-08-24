@@ -15,11 +15,15 @@ using swing_capture::android::dual_hil::ArmedStatusInspection;
 using swing_capture::android::dual_hil::DurablePairingState;
 using swing_capture::android::dual_hil::HasPairedAutomaticImpactEvidence;
 using swing_capture::android::dual_hil::InspectDiscoveryPairingFixture;
+using swing_capture::android::dual_hil::InspectPairNetworkHealthForArm;
 using swing_capture::android::dual_hil::LanEndpointInspection;
 using swing_capture::android::dual_hil::MappedPeerImpactStatusInspection;
 using swing_capture::android::dual_hil::NodeApiIdentity;
 using swing_capture::android::dual_hil::PairedPoseClockStatusInspection;
 using swing_capture::android::dual_hil::PairedPoseSessionStateInspection;
+using swing_capture::android::dual_hil::PairNetworkHealthArmDecision;
+using swing_capture::android::dual_hil::PairNetworkHealthArmRequestBody;
+using swing_capture::android::dual_hil::PairNetworkHealthStatusInspection;
 using swing_capture::android::dual_hil::PoseConfiguredDescriptorInspection;
 using swing_capture::android::dual_hil::ValidateArmedCaptureStatus;
 using swing_capture::android::dual_hil::ValidateCanonicalCoordinationReplay;
@@ -56,6 +60,9 @@ NodeApiIdentity Identity() {
                                 coordination::CaptureRole::kDownTheLine, "720p240");
 }
 
+Json PairNetworkDirectionFixture();
+Json PairNetworkStatusFixture(std::string_view state);
+
 Json PairedPoseReportFixture() {
   constexpr std::string_view kSharedSessionId = "pose-hil-shared";
   const auto node = [](std::string_view role) {
@@ -64,6 +71,7 @@ Json PairedPoseReportFixture() {
         role == "face_on" ? "audio_evidence.wav" : "diagnostic_audio.wav";
     return Json{
         {"passed", true},
+        {"node_id", role == "face_on" ? "leader-node" : "shadow-node"},
         {"role", role},
         {"shared_session_id", "pose-hil-shared"},
         {"startup_timing",
@@ -142,11 +150,21 @@ Json PairedPoseReportFixture() {
     if (role == "down_the_line") {
       result["pose_status_triggered"] = prefix + "pose-status-triggered.json";
     }
+    result["lan_node_descriptor"] = prefix + "lan-node-descriptor.json";
+    result["lan_setup_authenticated"] = prefix + "lan-setup-authenticated.json";
+    result["lan_setup_unauthenticated"] = prefix + "lan-setup-unauthenticated.json";
+    result["lan_capture_status"] = prefix + "lan-capture-status.json";
+    result["lan_clock"] = prefix + "lan-clock.json";
+    if (role == "face_on") {
+      result["pair_network_health_accepted"] = prefix + "pair-network-health-accepted.json";
+    }
     return result;
   };
+  Json network_health = PairNetworkStatusFixture("good").at("pair_network_health");
+  network_health["peer"]["origin"] = "http://10.0.0.5:8088";
   return Json{
       {"schema_version", 1},
-      {"report_type", "android_dual_phone_paired_pose_arm_hil"},
+      {"report_type", "android_dual_phone_paired_pose_arm_lan_hil"},
       {"passed", true},
       {"camera_jobs_concurrent", true},
       {"single_pcm_replay_count", 1},
@@ -165,8 +183,8 @@ Json PairedPoseReportFixture() {
         {"leader_role", "face_on"},
         {"shadow_role", "down_the_line"},
         {"peer_dispatch", "production_pose_peer_arm_client"},
-        {"peer_transport", "adb_reverse_to_shadow_http_api"},
-        {"adb_reverse_used", true},
+        {"peer_transport", "wifi_lan_direct"},
+        {"adb_reverse_used", false},
         {"host_control_transport", "adb_forward"},
         {"high_speed_profile", "720p240"},
         {"leader_trigger_source", "local_audio"},
@@ -256,7 +274,43 @@ Json PairedPoseReportFixture() {
             {"cache_control", "no-store, max-age=0"},
             {"state", "unavailable"},
             {"reason", "high_speed_capture"}}}}}}},
-      {"lan_endpoint_validation", nullptr},
+      {"pair_network_health_admission",
+       {{"schema_version", 1},
+        {"passed", true},
+        {"poll_count", 2},
+        {"elapsed_milliseconds", 250},
+        {"accepted_state", "good"},
+        {"degraded_override", false},
+        {"expected_peer_origin", "http://10.0.0.5:8088"},
+        {"expected_peer_node_id", "shadow-node"},
+        {"snapshot", network_health}}},
+      {"lan_endpoint_validation",
+       {{"down_the_line",
+         {{"host_direct_request", true},
+          {"unauthenticated_setup_status", 401},
+          {"authenticated_setup_status", 200},
+          {"descriptor_schema_version", 1},
+          {"status_schema_version", 2},
+          {"clock_schema_version", 1},
+          {"control_authentication", "bearer"},
+          {"secret_material_preserved", false},
+          {"role", "down_the_line"},
+          {"pose_mode", "shadow"},
+          {"origin", "http://10.0.0.5:8088"},
+          {"peer_origin", nullptr}}},
+        {"face_on",
+         {{"host_direct_request", true},
+          {"unauthenticated_setup_status", 401},
+          {"authenticated_setup_status", 200},
+          {"descriptor_schema_version", 1},
+          {"status_schema_version", 2},
+          {"clock_schema_version", 1},
+          {"control_authentication", "bearer"},
+          {"secret_material_preserved", false},
+          {"role", "face_on"},
+          {"pose_mode", "leader"},
+          {"origin", "http://10.0.0.6:8088"},
+          {"peer_origin", "http://10.0.0.5:8088"}}}}},
       {"artifacts",
        {{"down_the_line", artifacts("down_the_line")}, {"face_on", artifacts("face_on")}}},
       {"nodes", Json::array({node("down_the_line"), node("face_on")})},
@@ -457,35 +511,27 @@ void PairedPoseReportRequiresStageExactEvidence() {
       100000;
   ExpectFailure([&] { ValidatePairedPoseHilReport(weakened_timing_limit.dump()); });
 
-  Json lan = report;
-  lan["report_type"] = "android_dual_phone_paired_pose_arm_lan_hil";
-  lan["pose_transition"]["peer_transport"] = "wifi_lan_direct";
-  lan["pose_transition"]["adb_reverse_used"] = false;
-  for (const std::string_view role : {"down_the_line", "face_on"}) {
-    const std::string prefix = std::string(role) + "/";
-    lan["artifacts"][role]["lan_node_descriptor"] = prefix + "lan-node-descriptor.json";
-    lan["artifacts"][role]["lan_setup_authenticated"] = prefix + "lan-setup-authenticated.json";
-    lan["artifacts"][role]["lan_setup_unauthenticated"] = prefix + "lan-setup-unauthenticated.json";
-    lan["artifacts"][role]["lan_capture_status"] = prefix + "lan-capture-status.json";
-    lan["artifacts"][role]["lan_clock"] = prefix + "lan-clock.json";
-    lan["lan_endpoint_validation"][role] = {
-        {"host_direct_request", true},
-        {"unauthenticated_setup_status", 401},
-        {"authenticated_setup_status", 200},
-        {"descriptor_schema_version", 1},
-        {"status_schema_version", 2},
-        {"clock_schema_version", 1},
-        {"control_authentication", "bearer"},
-        {"secret_material_preserved", false},
-        {"role", role},
-        {"pose_mode", role == "face_on" ? "leader" : "shadow"},
-        {"origin", role == "face_on" ? "http://10.0.0.6:8088" : "http://10.0.0.5:8088"},
-        {"peer_origin", role == "face_on" ? Json("http://10.0.0.5:8088") : Json(nullptr)},
-    };
-  }
-  ValidatePairedPoseHilReport(lan.dump());
-  lan["pose_transition"]["adb_reverse_used"] = true;
-  ExpectFailure([&] { ValidatePairedPoseHilReport(lan.dump()); });
+  Json retired_tunnel_contract = report;
+  retired_tunnel_contract["report_type"] = "android_dual_phone_paired_pose_arm_hil";
+  retired_tunnel_contract["pose_transition"]["peer_transport"] = "adb_reverse_to_shadow_http_api";
+  retired_tunnel_contract["pose_transition"]["adb_reverse_used"] = true;
+  ExpectFailure([&] { ValidatePairedPoseHilReport(retired_tunnel_contract.dump()); });
+
+  Json missing_health = report;
+  missing_health.erase("pair_network_health_admission");
+  ExpectFailure([&] { ValidatePairedPoseHilReport(missing_health.dump()); });
+
+  Json mismatched_health_peer = report;
+  mismatched_health_peer["pair_network_health_admission"]["expected_peer_node_id"] = "other-shadow";
+  ExpectFailure([&] { ValidatePairedPoseHilReport(mismatched_health_peer.dump()); });
+
+  Json undeclared_override = report;
+  undeclared_override["pair_network_health_admission"]["degraded_override"] = true;
+  ExpectFailure([&] { ValidatePairedPoseHilReport(undeclared_override.dump()); });
+
+  Json reverse_transport = report;
+  reverse_transport["pose_transition"]["adb_reverse_used"] = true;
+  ExpectFailure([&] { ValidatePairedPoseHilReport(reverse_transport.dump()); });
 }
 
 void IdentityAndSessionMismatchFail() {
@@ -682,6 +728,133 @@ void PairedPoseSessionStateModelIsExact() {
   ExpectFailure(validate);
 }
 
+Json PairNetworkDirectionFixture() {
+  return {
+      {"schema_version", 1},
+      {"attempts", 3},
+      {"successes", 3},
+      {"timeouts", 0},
+      {"round_trip_ns", Json::array({"1000000", "2000000", "3000000"})},
+      {"transfer_bytes", "1048576"},
+      {"transfer_duration_ns", "100000000"},
+      {"transfer_complete", true},
+      {"minimum_round_trip_ns", "1000000"},
+      {"median_round_trip_ns", "2000000"},
+      {"p95_round_trip_ns", "3000000"},
+      {"maximum_round_trip_ns", "3000000"},
+      {"jitter_ns", "2000000"},
+      {"transfer_bits_per_second", 83'886'080.0},
+  };
+}
+
+Json PairNetworkStatusFixture(std::string_view state) {
+  const bool measured = state != "unknown";
+  const std::string visible_state = measured ? std::string(state) : "unusable";
+  return {
+      {"schema_version", 2},
+      {"pair_network_health",
+       {{"schema_version", 1},
+        {"configured", true},
+        {"state", visible_state},
+        {"raw_state", visible_state},
+        {"measured", measured},
+        {"stale", false},
+        {"transition_pending", false},
+        {"age_ns", measured ? "1000000" : "0"},
+        {"issues", visible_state == "good" ? Json::array()
+                                           : Json::array({"pair network health is not good"})},
+        {"peer", {{"origin", "http://10.168.168.241:8088"}, {"node_id", "shadow-node"}}},
+        {"measured_at_elapsed_realtime_ns", measured ? Json("9000000") : Json(nullptr)},
+        {"local_to_peer", measured ? PairNetworkDirectionFixture() : Json(nullptr)},
+        {"peer_to_local", measured ? PairNetworkDirectionFixture() : Json(nullptr)}}},
+  };
+}
+
+void PairNetworkHealthArmBoundaryIsFailClosed() {
+  auto inspect = [](const Json &status) {
+    return InspectPairNetworkHealthForArm(PairNetworkHealthStatusInspection{
+        .status_json = status.dump(),
+        .expected_peer_origin = "http://10.168.168.241:8088",
+        .expected_peer_node_id = "shadow-node",
+    });
+  };
+
+  Json status = PairNetworkStatusFixture("good");
+  assert(inspect(status) == PairNetworkHealthArmDecision::kGood);
+  Json request = Json::parse(PairNetworkHealthArmRequestBody(PairNetworkHealthArmDecision::kGood));
+  assert((request == Json{{"armed", true}}));
+
+  status = PairNetworkStatusFixture("degraded");
+  assert(inspect(status) == PairNetworkHealthArmDecision::kDegraded);
+  request = Json::parse(PairNetworkHealthArmRequestBody(PairNetworkHealthArmDecision::kDegraded));
+  assert(request == Json({{"armed", true}, {"allow_degraded_network", true}}));
+
+  status = PairNetworkStatusFixture("unusable");
+  assert(inspect(status) == PairNetworkHealthArmDecision::kNotReady);
+  ExpectFailure([] {
+    static_cast<void>(PairNetworkHealthArmRequestBody(PairNetworkHealthArmDecision::kNotReady));
+  });
+
+  status = PairNetworkStatusFixture("unknown");
+  assert(inspect(status) == PairNetworkHealthArmDecision::kNotReady);
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["stale"] = true;
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status["pair_network_health"]["state"] = "unusable";
+  status["pair_network_health"]["raw_state"] = "unusable";
+  status["pair_network_health"]["issues"] = Json::array({"evidence is stale"});
+  assert(inspect(status) == PairNetworkHealthArmDecision::kNotReady);
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["transition_pending"] = true;
+  status["pair_network_health"]["raw_state"] = "degraded";
+  status["pair_network_health"]["issues"] = Json::array({"degradation is pending"});
+  assert(inspect(status) == PairNetworkHealthArmDecision::kGood);
+  status = PairNetworkStatusFixture("degraded");
+  status["pair_network_health"]["transition_pending"] = true;
+  status["pair_network_health"]["raw_state"] = "good";
+  assert(inspect(status) == PairNetworkHealthArmDecision::kDegraded);
+  status = PairNetworkStatusFixture("unusable");
+  status["pair_network_health"]["transition_pending"] = true;
+  status["pair_network_health"]["raw_state"] = "good";
+  assert(inspect(status) == PairNetworkHealthArmDecision::kNotReady);
+  status["pair_network_health"]["transition_pending"] = false;
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["peer"]["origin"] = "http://10.168.168.111:8088";
+  assert(inspect(status) == PairNetworkHealthArmDecision::kNotReady);
+
+  status = PairNetworkStatusFixture("unknown");
+  status["pair_network_health"]["age_ns"] = "1";
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status = PairNetworkStatusFixture("unknown");
+  status["pair_network_health"]["configured"] = false;
+  status["pair_network_health"]["peer"] = nullptr;
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["age_ns"] = 1;
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["local_to_peer"]["round_trip_ns"] = Json::array({"1000000"});
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["local_to_peer"]["round_trip_ns"] =
+      Json::array({"1000000", "3000000", "2000000"});
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["local_to_peer"]["median_round_trip_ns"] = "3000000";
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["local_to_peer"]["transfer_bits_per_second"] = 1.0;
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"]["issues"] = Json::array({"not actually good"});
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+  status = PairNetworkStatusFixture("good");
+  status["pair_network_health"].erase("issues");
+  ExpectFailure([&] { static_cast<void>(inspect(status)); });
+}
+
 void LanEndpointContractRequiresAdvertisedDirectOriginAndBearerAuth() {
   const NodeApiIdentity identity = Identity();
   constexpr std::string_view kOrigin = "http://10.168.168.241:8088";
@@ -755,6 +928,7 @@ int main() {
   ExactTriggerReportPassesAndCorruptionFails();
   ProductionClockAndMappedImpactEvidenceAreExact();
   PairedPoseSessionStateModelIsExact();
+  PairNetworkHealthArmBoundaryIsFailClosed();
   LanEndpointContractRequiresAdvertisedDirectOriginAndBearerAuth();
   CanonicalReplayIsByteExactExceptForFramingNewline();
   return 0;

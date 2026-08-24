@@ -102,6 +102,7 @@ public final class CaptureForegroundService extends Service
   private static final long PEER_CLOCK_POLL_INTERVAL_MILLIS = 1_000;
   private static final long PEER_CLOCK_FAILURE_LOG_INTERVAL_NANOS =
       TimeUnit.SECONDS.toNanos(30);
+  private static final long PAIR_NETWORK_HEALTH_POLL_INTERVAL_MILLIS = 10_000;
   private static final int AUTONOMOUS_PEER_MAXIMUM_ATTEMPTS = 3;
   private static final long AUTONOMOUS_PEER_RETRY_DELAY_MILLIS = 50;
   private static final long AUTONOMOUS_PAIR_POLL_INTERVAL_MILLIS = 250;
@@ -122,6 +123,9 @@ public final class CaptureForegroundService extends Service
   private final ScheduledExecutorService peerClockExecutor =
       Executors.newSingleThreadScheduledExecutor(
           runnable -> new Thread(runnable, "peer-clock-exchange"));
+  private final ScheduledExecutorService pairNetworkHealthExecutor =
+      Executors.newSingleThreadScheduledExecutor(
+          runnable -> new Thread(runnable, "pair-network-health"));
   private final ScheduledExecutorService autonomousPairExecutor =
       Executors.newSingleThreadScheduledExecutor(
           runnable -> new Thread(runnable, "autonomous-pair-lifecycle"));
@@ -143,6 +147,29 @@ public final class CaptureForegroundService extends Service
   private final PoseTriggerControllerLease poseTriggerControllerLease =
       new PoseTriggerControllerLease();
   private final PeerArmStatusTracker peerArmStatus = new PeerArmStatusTracker();
+  private final PairNetworkHealthPolicy pairNetworkHealth =
+      new PairNetworkHealthPolicy(
+          new PairNetworkHealthPolicy.Config(
+              TimeUnit.SECONDS.toNanos(30),
+              CaptureProfile.standard().bitrateBitsPerSecond(),
+              2,
+              2,
+              3));
+  private final PairNetworkHealthPollTask pairNetworkHealthPollTask =
+      new PairNetworkHealthPollTask(
+          this::pollPairNetworkHealth,
+          failure -> {
+            invalidatePairNetworkHealthTargetAfterFailure();
+            Log.e(
+                TAG,
+                "Pair network-health poll failed; scheduled sampling will continue",
+                failure);
+          });
+  private final PairNetworkHealthImmediatePoll pairNetworkHealthImmediatePoll =
+      new PairNetworkHealthImmediatePoll(
+          pairNetworkHealthExecutor, pairNetworkHealthPollTask);
+  private final Object pairNetworkHealthTargetMonitor = new Object();
+  private PairNetworkHealthTarget reconciledPairNetworkHealthTarget;
   private static final AutonomousPairLifecycle.Config AUTONOMOUS_PAIR_CONFIG =
       new AutonomousPairLifecycle.Config(TimeUnit.SECONDS.toNanos(30));
   private AutonomousPairLifecycle autonomousPair =
@@ -248,6 +275,11 @@ public final class CaptureForegroundService extends Service
         0,
         PEER_CLOCK_POLL_INTERVAL_MILLIS,
         TimeUnit.MILLISECONDS);
+    pairNetworkHealthExecutor.scheduleWithFixedDelay(
+        pairNetworkHealthPollTask,
+        0,
+        PAIR_NETWORK_HEALTH_POLL_INTERVAL_MILLIS,
+        TimeUnit.MILLISECONDS);
     autonomousPairExecutor.scheduleWithFixedDelay(
         this::maintainAutonomousPair,
         AUTONOMOUS_PAIR_POLL_INTERVAL_MILLIS,
@@ -320,7 +352,7 @@ public final class CaptureForegroundService extends Service
       if (recoveredState != AutonomousPairLifecycle.State.STOPPING) {
         autonomousRestartResumeInProgress = true;
         try {
-          setArmed(true, null);
+          setArmedInternal(true, null, false, false, false);
         } finally {
           autonomousRestartResumeInProgress = false;
         }
@@ -506,9 +538,9 @@ public final class CaptureForegroundService extends Service
         String requestedSessionId =
             intent == null ? null : intent.getStringExtra(EXTRA_SHARED_SESSION_ID);
         if (ACTION_ARM_POSE_EXPERIMENT_HIL.equals(action)) {
-          setArmed(true, requestedSessionId, false);
+          setArmedInternal(true, requestedSessionId, false, false, false);
         } else {
-          setArmed(true, requestedSessionId);
+          setArmedInternal(true, requestedSessionId, false, false, false);
         }
       } catch (IllegalArgumentException | IllegalStateException rejected) {
         continuousHilRequested = previousContinuousHilRequested;
@@ -525,7 +557,7 @@ public final class CaptureForegroundService extends Service
         onFailure(rejected);
       }
     } else if (ACTION_DISARM.equals(action)) {
-      setArmed(false, null);
+      setArmedInternal(false, null, false, false, false);
     } else if (ACTION_TRIGGER.equals(action)) {
       try {
         triggerManual();
@@ -555,6 +587,7 @@ public final class CaptureForegroundService extends Service
     controlExecutor.shutdownNow();
     peerExecutor.shutdownNow();
     peerClockExecutor.shutdownNow();
+    pairNetworkHealthExecutor.shutdownNow();
     autonomousPairExecutor.shutdownNow();
     poseTimeoutExecutor.shutdownNow();
     releaseWakeLock();
@@ -589,11 +622,16 @@ public final class CaptureForegroundService extends Service
   }
 
   @Override
-  public void setArmed(boolean armed, String sharedSessionId) {
+  public void setArmed(
+      boolean armed, String sharedSessionId, boolean allowDegradedNetwork) {
+    if (!armed && allowDegradedNetwork) {
+      throw new IllegalArgumentException(
+          "allow_degraded_network is valid only while arming");
+    }
     if (armed) {
       poseExperimentConfiguration = null;
     }
-    setArmed(armed, sharedSessionId, false);
+    setArmedInternal(armed, sharedSessionId, false, true, allowDegradedNetwork);
   }
 
   private static PoseExperimentConfiguration requirePoseExperimentConfiguration(Intent intent) {
@@ -606,8 +644,12 @@ public final class CaptureForegroundService extends Service
         intent.getIntExtra(EXTRA_POSE_EXPERIMENT_STANDBY_HEIGHT, -1));
   }
 
-  private void setArmed(
-      boolean armed, String sharedSessionId, boolean preserveCompletedTriggerReport) {
+  private void setArmedInternal(
+      boolean armed,
+      String sharedSessionId,
+      boolean preserveCompletedTriggerReport,
+      boolean enforcePairNetworkAdmission,
+      boolean allowDegradedNetwork) {
     if (!armed) {
       if (preserveCompletedTriggerReport) {
         throw new IllegalArgumentException("disarming cannot preserve a trigger report");
@@ -636,6 +678,13 @@ public final class CaptureForegroundService extends Service
       DeviceCapabilityPolicy.assess(currentDeviceCapabilities(), requestedConfiguration.profile())
           .requireReady();
       requestedPoseConfiguration = configuration.poseConfigurationSnapshot();
+      if (enforcePairNetworkAdmission) {
+        PairNetworkArmPolicy.requireAllowed(
+            true,
+            requestedPoseConfiguration.mode(),
+            pairNetworkHealthStatus().state(),
+            allowDegradedNetwork);
+      }
       if (!preserveCompletedTriggerReport
           && requestedPoseConfiguration.mode() == PoseNodeMode.SHADOW
           && activePoseConfiguration != null
@@ -1210,6 +1259,16 @@ public final class CaptureForegroundService extends Service
                 .put("inference_outlier_bound_ns", PoseStandbyMetrics.INFERENCE_OUTLIER_BOUND_NS)
                 .put("inference_deadline_misses", metrics.inferenceDeadlineMisses())
                 .put("inference_outliers", metrics.inferenceOutliers())
+                .put("recent_inference_sample_count", metrics.recentInferenceSampleCount())
+                .put(
+                    "recent_inference_duration_p95_ns",
+                    metrics.recentInferenceDurationP95Ns())
+                .put(
+                    "recent_maximum_inference_duration_ns",
+                    metrics.recentMaximumInferenceDurationNs())
+                .put(
+                    "recent_inference_deadline_misses",
+                    metrics.recentInferenceDeadlineMisses())
                 .put("decision_age_samples", metrics.decisionAgeSamples())
                 .put("rejected_decision_timestamps", metrics.rejectedDecisionTimestamps())
                 .put("mean_decision_age_ms", metrics.meanDecisionAgeMs())
@@ -1658,7 +1717,7 @@ public final class CaptureForegroundService extends Service
           () -> {
             stopCaptureForPoseRestart();
             try {
-              setArmed(true, null, true);
+              setArmedInternal(true, null, true, false, false);
             } catch (RuntimeException restartFailure) {
               onFailure(restartFailure);
             }
@@ -2635,6 +2694,123 @@ public final class CaptureForegroundService extends Service
     autonomousPeerClock = null;
     autonomousPendingRecord = null;
   }
+
+  @Override
+  public PairNetworkHealthPolicy.DirectionEvidence measurePairNetworkDirection(
+      String callbackOrigin, String callbackNodeId) {
+    return new PairNetworkHealthClient(
+            SystemClock::elapsedRealtimeNanos, PeerClockJsonResponseParser::parse)
+        .measureDirection(callbackOrigin, callbackNodeId);
+  }
+
+  @Override
+  public PairNetworkHealthPolicy.Snapshot pairNetworkHealthStatus() {
+    reconcilePairNetworkHealthTarget(configuredPairNetworkHealthTarget(), true);
+    return pairNetworkHealth.snapshot(SystemClock.elapsedRealtimeNanos());
+  }
+
+  private void pollPairNetworkHealth() {
+    PairNetworkHealthTarget target = configuredPairNetworkHealthTarget();
+    if (target == null) {
+      reconcilePairNetworkHealthTarget(null, false);
+      return;
+    }
+    PairNetworkHealthPolicy.PeerTarget peer =
+        new PairNetworkHealthPolicy.PeerTarget(target.origin(), target.peerNodeId());
+    reconcilePairNetworkHealthTarget(target, false);
+
+    PairNetworkHealthClient client =
+        new PairNetworkHealthClient(
+            SystemClock::elapsedRealtimeNanos, PeerClockJsonResponseParser::parse);
+    PairNetworkHealthPolicy.DirectionEvidence localToPeer =
+        client.measureDirection(target.origin(), target.peerNodeId());
+    PairNetworkHealthPolicy.DirectionEvidence peerToLocal = unreachableNetworkDirection();
+    try {
+      String callbackOrigin =
+          PairNetworkHealthClient.callbackOrigin(target.origin(), NodeHttpServer.DEFAULT_PORT);
+      peerToLocal =
+          client.requestReverseDirection(
+              target.origin(),
+              target.peerControlToken(),
+              PairNetworkHealthJson.reverseRequest(callbackOrigin, target.localNodeId()),
+              PairNetworkHealthJson::parseDirection);
+    } catch (IOException | IllegalArgumentException reverseUnavailable) {
+      Log.d(
+          TAG,
+          "Reverse pair network-health probe unavailable: "
+              + reverseUnavailable.getClass().getSimpleName()
+              + ": "
+              + String.valueOf(reverseUnavailable.getMessage()));
+    }
+
+    PairNetworkHealthTarget current = configuredPairNetworkHealthTarget();
+    if (!target.equals(current)) {
+      reconcilePairNetworkHealthTarget(current, true);
+      return;
+    }
+    pairNetworkHealth.record(
+        peer,
+        new PairNetworkHealthPolicy.Round(
+            SystemClock.elapsedRealtimeNanos(), localToPeer, peerToLocal));
+  }
+
+  private void reconcilePairNetworkHealthTarget(
+      PairNetworkHealthTarget target, boolean requestImmediateSample) {
+    synchronized (pairNetworkHealthTargetMonitor) {
+      if (Objects.equals(target, reconciledPairNetworkHealthTarget)) {
+        return;
+      }
+      reconciledPairNetworkHealthTarget = target;
+      pairNetworkHealth.clearPeer();
+      if (target != null) {
+        pairNetworkHealth.configurePeer(
+            new PairNetworkHealthPolicy.PeerTarget(target.origin(), target.peerNodeId()));
+      }
+    }
+    if (target != null && requestImmediateSample) {
+      pairNetworkHealthImmediatePoll.request();
+    }
+  }
+
+  private void invalidatePairNetworkHealthTargetAfterFailure() {
+    synchronized (pairNetworkHealthTargetMonitor) {
+      reconciledPairNetworkHealthTarget = null;
+      pairNetworkHealth.clearPeer();
+    }
+  }
+
+  private PairNetworkHealthTarget configuredPairNetworkHealthTarget() {
+    NodeConfiguration.StationConfiguration station = configuration.stationConfiguration();
+    PoseStationConfigurationSnapshot pose = station.pose();
+    if (pose.mode() != PoseNodeMode.LEADER || !pose.hasPeer()) {
+      return null;
+    }
+    PeerPairingBinding binding = station.pairing().orElse(null);
+    if (binding == null
+        || binding.state() != PeerPairingBinding.State.ACTIVE
+        || !binding.origin().equals(pose.peerOrigin())) {
+      return null;
+    }
+    return new PairNetworkHealthTarget(
+        binding.origin(),
+        binding.peerNodeId(),
+        pose.peerControlToken(),
+        station.capture().nodeId());
+  }
+
+  private static PairNetworkHealthPolicy.DirectionEvidence unreachableNetworkDirection() {
+    return new PairNetworkHealthPolicy.DirectionEvidence(
+        PairNetworkHealthClient.CLOCK_ATTEMPTS,
+        0,
+        0,
+        List.of(),
+        0,
+        0,
+        false);
+  }
+
+  private record PairNetworkHealthTarget(
+      String origin, String peerNodeId, String peerControlToken, String localNodeId) {}
 
   private void pollPeerClock() {
     try {

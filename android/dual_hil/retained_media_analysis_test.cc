@@ -64,6 +64,8 @@ void RetainsMachineReadableReasonForStrictPointTimingFailure() {
   analysis.optical.optical_to_audio_offset_us = -20832L;
   analysis.optical.optical_onset_lower_bound_us = -24999L;
   analysis.optical.optical_onset_upper_bound_us = -16665L;
+  analysis.optical.tile_x = 6U;
+  analysis.optical.tile_y = 2U;
   analysis.optical.localized_response_tile_count = 9U;
   analysis.optical.acceptance = {
       .minimum_white_delta = 7.0,
@@ -72,12 +74,10 @@ void RetainsMachineReadableReasonForStrictPointTimingFailure() {
       .minimum_white_duration_us = 8000.0,
       .maximum_white_duration_us = 35000.0,
       .maximum_absolute_optical_audio_offset_us = 20000L,
-      .maximum_localized_response_tile_count = 12U,
       .minimum_white_delta_passed = true,
       .white_frame_count_passed = true,
       .white_duration_passed = true,
       .optical_audio_offset_passed = false,
-      .localized_response_passed = true,
   };
   for (std::size_t index = 0; index < analysis.april_tags.size(); ++index) {
     auto &tag = analysis.april_tags[index];
@@ -89,6 +89,7 @@ void RetainsMachineReadableReasonForStrictPointTimingFailure() {
   }
 
   const nlohmann::json report = RetainedMediaAnalysisEvidenceJson(analysis, evidence);
+  assert(report.at("schema_version") == 2);
   assert(report.at("passed") == false);
   assert(report.at("timing_claim").at("absolute_ball_impact_calibrated") == false);
   assert(report.at("manifest_timing_inputs").at("trigger_timestamp_uncertainty_ns") == 277241L);
@@ -98,7 +99,11 @@ void RetainsMachineReadableReasonForStrictPointTimingFailure() {
   assert(acceptance.at("checks").at("optical_audio_offset_passed") == false);
   assert(acceptance.at("checks").at("white_frame_count_passed") == true);
   assert(acceptance.at("checks").at("white_duration_passed") == true);
-  assert(acceptance.at("checks").at("localized_response_passed") == true);
+  assert(!acceptance.at("policy").contains("maximum_localized_response_tile_count"));
+  assert(!acceptance.at("checks").contains("localized_response_passed"));
+  assert(report.at("optical").at("peak_tile").at("x") == 6U);
+  assert(report.at("optical").at("peak_tile").at("y") == 2U);
+  assert(report.at("optical").at("localized_response_tile_count") == 9U);
   assert(report.at("diagnostic_frames").at(1).at("path") == "down_the_line/diagnostic-02.png");
 }
 
