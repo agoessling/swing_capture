@@ -8,9 +8,10 @@ bazel test //...
 
 The default suite consists entirely of hardware-independent C++, Java, Python,
 and TypeScript/UI tests. The representative targets are listed below.
-The current 2026-08-23 canonical checkpoint passed all 236 software tests. The separate
-`--config=manual_test_static_check` build selected and compiled all 916 targets without executing
-the manual hardware tests.
+The current 2026-08-23 canonical checkpoint passed all 246 software tests uncached. The separate
+`--config=manual_test_static_check` build selected and compiled all 937 targets without executing
+the manual hardware tests. The optimized pre-commit checkpoint also passed all 246 tests with the
+configured formatting, lint, type-check, and static-analysis aspects green.
 
 For Android-only Java iteration, run the checked focused configuration before
 the full checkpoint:
@@ -123,10 +124,10 @@ Android-shaped node origins.
 | One phone disconnects while stopping a field recording | `//web:browser_test`, `field recording recovers a disconnected phone during stop without reload`, proves the read-only preflight fails before either stop mutation, both recorders remain active, the role-specific error is accessible, and a retry after reconnection stops each phone exactly once without reloading. | This is deterministic transport fault injection; no repeated real recording or physical disconnection is needed to prove coordinator mutation ordering. |
 | One phone fails its stop after both stop preflights pass | `//web:browser_test`, `field recording retries an after-preflight partial stop without reload`, makes DTL become idle while face-on returns 503, exposes the split state and role-specific error, then retries safely and converges both nodes without reload. | This is deterministic after-mutation transport fault injection; no physical recording is needed to prove retry ownership. |
 | Stop was accepted but publication takes longer than the first UI poll window | `//web:browser_test`, `field recording keeps both nodes stopping until asynchronous publication completes`, holds both accepted stops in `stopping`, requires one stop mutation per phone and a stable stopping state, then releases publication and starts the completed library. The physical browser harness separately allows eight seconds for this bounded convergence. | `artifacts/android_field_recording_browser_hil_failed_20260823T103018Z/report.json` records both 202 stops, both completed bundle origins, and all four successful MP4/WAV Range reads; the target's overall timeout interrupted only final cleanup. |
-| Direct phone-to-phone discovery, auth, clock, arm, impact, publication, and rearm | `//android/app:lan_node_discovery_registry_test`, `peer_pairing_binding_test`, and `peer_credential_status_policy_test` cover discovery lifetime, authenticated identity/address replacement, credential generations, revocation, and re-pair. `//android/app:peer_clock_client_test`, `peer_clock_synchronizer_test`, and `//android/core/coordination:clock_exchange_estimator_test` cover direct non-cacheable HTTP exchange, redirect refusal, authenticated identity matching, bounded bodies, invalid and expired sample rejection, bounded clock mapping, and clock-jump withdrawal. `//android/app:pose_peer_arm_client_test` covers authenticated HTTP arm/impact, readiness and transient retries, cancellation across lifecycle replacement, non-retry of 401, session identity, mapped-impact fallback, and redirect refusal. `//android/app:automatic_trigger_readiness_gate_test` requires local and peer encoded pre-roll readiness in either callback order and keeps the no-impact timeout disabled for an unconfirmed peer. `//android/app:autonomous_pair_peer_client_test` now checks destination Bearer auth on peer arm, trigger, manifest HEAD, MP4 HEAD, and coordination replication while rejecting manifest-only publication; `//android/core/coordination:autonomous_pair_lifecycle_test` covers publication ordering, partial publication, restarts, backlog, conflict fail-closed, and local/peer rearm. `//android/dual_hil:concurrent_hil_validation_test` rejects corrupt identities, sessions, trigger reports, clock/mapped-impact evidence, startup milestones, missing capture media, or a LAN report that used ADB reverse. | `artifacts/android_discovery_pairing_pass_20260822T195604/report.json` records mutual discovery, authenticated binding, wrong/old-token rejection, rotation/re-pair, and passed cleanup. `artifacts/android_pcm_paired_s06_startup_pass_20260823T043404Z/report.json` records the current APK crossing the two-phone full-pre-roll barrier, `wifi_lan_direct`, no ADB reverse, five mapped-clock samples per phone, accepted peer arm, schema-2 mapped impact, two decoded 720p240 AVC sessions, monotonic startup milestones with zero resets, 55 validated artifact files, visually nominal pre/white/post diagnostics, persisted coordination, monitoring rearm, and complete cleanup. Restart/rearm and Wi-Fi/peer-restart recovery are retained in `artifacts/android_autonomous_restart_pass_20260822T174922/report.json` and `artifacts/android_autonomous_disturbance_pass_20260822T175253/report.json`. |
-| Unsupported phone and OS-reboot expectations are discovered before capture | `//android/app:device_capability_policy_test` covers every API, permission, camera/profile, encoder, PCM, GLES, and failed-probe rejection; it also proves a Pixel-5a-shaped 1080p rejection cannot mutate a separately assessed Pixel-6-shaped phone. `//tools:android_capability_report_test` rejects stale, incomplete, cross-node, pose-coupled, screen-on, and APK-mismatched evidence. `//android/app:unattended_recovery_policy_test` covers boot-event classification, the prohibition on boot-triggered capture, locked boot, unlocked-but-not-launched, permission loss, and running-service readiness. `//android/dual_hil:os_reboot_ceremony_validation_test` rejects unchanged boot IDs, missing pre-launch absence, ADB-launched activity, configuration drift, missing peer/monitoring evidence, incomplete disarm, and a recovered leader clock that is missing, malformed, mapped to the wrong peer, has no samples, is older than 10 seconds, or exceeds 25 ms uncertainty. The manual `//android/dual_hil:dual_phone_os_reboot_ceremony_hil_test` is the only gate that can turn those contracts into physical reboot evidence. Setup/status expose `device_admission`, `reboot_recovery`, and the durable marker; arming checks local admission before coordination or camera mutation. | `artifacts/android_product_floor_exact_apk_pass_20260823T072145Z/report.json` passes the independent 720p240, hardware AVC, audio, GLES, Lite 640x360/5 Hz, screen-off, and exact installed/Bazel APK checks on Pixel 6/API 36 and Pixel 5a/API 34 at SHA-256 `328203380f02db24ec7d7707476cab361d3164476d5c9187549897aa64cad39a`. `artifacts/android_pair_preflight_current_apk_20260823.json` proves both operator-started services were unlocked and ready on the cited current boot. The physical OS-reboot target has been statically compiled but deliberately not executed; first-unlock/foreground-launch/peer-clock-recovery/rearm evidence and long thermal qualification remain open. |
+| Direct phone-to-phone discovery, auth, clock, arm, impact, publication, and rearm | `//android/app:lan_node_discovery_registry_test`, `peer_pairing_binding_test`, and `peer_credential_status_policy_test` cover discovery lifetime, authenticated identity/address replacement, credential generations, revocation, and re-pair. `//android/app:peer_clock_client_test`, `peer_clock_synchronizer_test`, and `//android/core/coordination:clock_exchange_estimator_test` cover direct non-cacheable HTTP exchange, redirect refusal, authenticated identity matching, bounded bodies, invalid and expired sample rejection, bounded clock mapping, and clock-jump withdrawal. `//android/app:pose_peer_arm_client_test` covers authenticated HTTP arm/impact, readiness and transient retries, cancellation across lifecycle replacement, non-retry of 401, session identity, mapped-impact fallback, and redirect refusal. `//android/app:automatic_trigger_readiness_gate_test` requires local and peer encoded pre-roll readiness in either callback order and keeps the no-impact timeout disabled for an unconfirmed peer. `//android/app:autonomous_pair_peer_client_test` now checks destination Bearer auth on peer arm, trigger, manifest HEAD, MP4 HEAD, and coordination replication while rejecting manifest-only publication; `//android/core/coordination:autonomous_pair_lifecycle_test` covers publication ordering, partial publication, restarts, backlog, conflict fail-closed, and local/peer rearm. `//android/dual_hil:concurrent_hil_validation_test` rejects corrupt identities, sessions, trigger reports, clock/mapped-impact evidence, startup milestones, missing capture media, or a LAN report that used ADB reverse. | `artifacts/android_discovery_pairing_pass_20260822T195604/report.json` records mutual discovery, authenticated binding, wrong/old-token rejection, rotation/re-pair, and passed cleanup. The historical hash-pinned `artifacts/android_pcm_paired_s06_startup_pass_20260823T043404Z/report.json` records crossing the two-phone full-pre-roll barrier, `wifi_lan_direct`, no ADB reverse, five mapped-clock samples per phone, accepted peer arm, schema-2 mapped impact, two decoded 720p240 AVC sessions, monotonic startup milestones with zero resets, 55 validated artifact files, visually nominal pre/white/post diagnostics, persisted coordination, monitoring rearm, and complete cleanup. Restart/rearm and Wi-Fi/peer-restart recovery are retained in `artifacts/android_autonomous_restart_pass_20260822T174922/report.json` and `artifacts/android_autonomous_disturbance_pass_20260822T175253/report.json`. |
+| Unsupported phone and OS-reboot expectations are discovered before capture | `//android/app:device_capability_policy_test` covers every API, permission, camera/profile, encoder, PCM, GLES, and failed-probe rejection; it also proves a Pixel-5a-shaped 1080p rejection cannot mutate a separately assessed Pixel-6-shaped phone. `//tools:android_capability_report_test` rejects stale, incomplete, cross-node, pose-coupled, screen-on, and APK-mismatched evidence. `//android/app:unattended_recovery_policy_test` covers boot-event classification, the prohibition on boot-triggered capture, locked boot, unlocked-but-not-launched, permission loss, and running-service readiness. `//android/dual_hil:os_reboot_ceremony_validation_test` rejects unchanged boot IDs, missing pre-launch absence, ADB-launched activity, configuration drift, missing peer/monitoring evidence, incomplete disarm, and a recovered leader clock that is missing, malformed, mapped to the wrong peer, has no samples, is older than 10 seconds, or exceeds 25 ms uncertainty. The manual `//android/dual_hil:dual_phone_os_reboot_ceremony_hil_test` is the only gate that can turn those contracts into physical reboot evidence. Setup/status expose `device_admission`, `reboot_recovery`, and the durable marker; arming checks local admission before coordination or camera mutation. | `artifacts/android_product_floor_final_20260823T154000Z/report.json` passes the independent 720p240, hardware AVC, audio, GLES, Lite 640x360/5 Hz, screen-off, and exact installed/Bazel APK checks on Pixel 6/API 36 and Pixel 5a/API 34 at SHA-256 `9d2ad9c12f8ff1846d02ab8018d0a659bf88d313b542824fde0c185d1572a230`. The physical OS-reboot target remains deliberately unexecuted; first-unlock/foreground-launch/peer-clock-recovery/rearm evidence and long thermal qualification remain open. |
 | Cleanup after a primary failure | `//android/dual_hil:hil_cleanup_evidence_test` crosses primary pass/fail with cleanup pass/fail, preserves the primary diagnostic, accepts a recorded failed attempt followed by successful restoration, and fails unresolved obligations. `//android/dual_hil:configuration_recovery_journal_test` rejects unsafe/secret-bearing journals and verifies ordered, hashed, idempotent restoration and atomic owner-only journal replacement. | `artifacts/android_discovery_pairing_failure_20260822T194808/report.json` and `artifacts/android_pcm_paired_s06_lan_latency_failure_20260822T202518/report.json` retain failed primary outcomes with `cleanup.passed=true`; the later passing discovery and paired-LAN reports also retain complete restoration evidence. |
-| Retained white marker is visually clean but outside the strict point-timing gate | `//android/dual_hil:rgb_swing_analysis_test` reproduces the −20.832 ms first-white-frame result with six valid white frames and an adjacent-frame interval of −24.999 to −16.665 ms. It remains rejected against the unchanged ±20 ms point limit while proving the delta, duration, frame-count, and localization checks pass. `//android/dual_hil:dual_session_validation_test` composes the retained 277.241 µs trigger uncertainty and 293 µs maximum PTS residual, independently reproducing the later conservative lower bound of −25.570 ms against its unchanged ±25 ms limit. `//android/dual_hil:retained_media_analysis_test` requires the completed analysis to serialize every policy limit and independent result before the HIL reports failure. | `artifacts/android_hil_inner_timing_failure_20260823T081020Z` retains nominal pre/white/post images from both phones; the down-the-line point estimate exceeded the strict limit by 832 µs, and its uncertainty-expanded interval independently exceeded the conservative limit by 570 µs. Future runs also retain `<role>/retained-media-analysis.json`, so this boundary failure cannot collapse into an unstructured exception before node evidence is published. This does not calibrate absolute ball-impact timing or weaken either timing gate. |
+| Retained white marker is visually clean but outside the strict point-timing gate | `//android/dual_hil:rgb_swing_analysis_test` reproduces the −20.832 ms first-white-frame result with six valid white frames and an adjacent-frame interval of −24.999 to −16.665 ms. It remains rejected against the unchanged ±20 ms point limit while proving the delta, duration, and frame-count checks pass and retaining peak-tile and response-footprint telemetry. `//android/dual_hil:dual_session_validation_test` composes the retained 277.241 µs trigger uncertainty and 293 µs maximum PTS residual, independently reproducing the later conservative lower bound of −25.570 ms against its unchanged ±25 ms limit. `//android/dual_hil:retained_media_analysis_test` requires the schema-2 analysis to serialize every policy limit and independent result before the HIL reports failure. | `artifacts/android_hil_inner_timing_failure_20260823T081020Z` retains nominal pre/white/post images from both phones; the down-the-line point estimate exceeded the strict limit by 832 µs, and its uncertainty-expanded interval independently exceeded the conservative limit by 570 µs. Future schema-2 runs also retain `<role>/retained-media-analysis.json`, so this boundary failure cannot collapse into an unstructured exception before node evidence is published. This does not calibrate absolute ball-impact timing or weaken either timing gate. |
 
 Scoped-media authorization is also part of the deterministic incident gate. The Java protocol
 requires Bearer authorization for session manifests and field-recording catalogs, grants only a
@@ -141,10 +142,10 @@ deterministic correctness:
 - desktop Google Chrome is the selected prototype browser, and every proposed release revision
   requires a reviewed passing `//web:prototype_browser_release_gate` artifact. The target combines
   the proprietary-AVC exact-frame gate with the exact-APK, direct-LAN phone-hosted browser HIL and
-  requires Chrome to visibly decode both freshly published phone MP4s. Two consecutive temporary
-  relay passes validate the final decode/cancellation schema and media-worker cleanup, but the
-  direct-LAN attempt stopped before Playwright when Pixel 6-to-host Wi-Fi remained unreachable, so
-  the current contract still needs a reviewed direct-LAN invocation;
+  requires Chrome to visibly decode both freshly published phone MP4s. The current direct-LAN
+  invocation passed with a 5.674-second camera stage at
+  `artifacts/browser_direct_lan_final_apk_20260823T153900Z/`; repeat it for every changed release
+  candidate;
 - Firefox and WebKit remain passing compatibility candidates through
   `//web:browser_h264_candidate_matrix`, not prototype release blockers; and
 - repeat the shortest relevant paired-capture HIL after materially changing the APK, phone OS, or
@@ -609,6 +610,22 @@ from each LAN origin, rejects redirects or missing bundle markers, verifies thei
 and mutating cross-origin requests. A healthy JSON API alone therefore cannot admit a phone whose
 review UI is missing or unusable from its peer's origin.
 
+The authenticated capture status also carries bounded application-level bidirectional pair-network
+health. The doctor validates the complete schema without aborting the rest of diagnosis, requires a
+leader's measured peer identity and origin to match the authenticated shadow exactly, and requires
+shadow or disabled nodes to remain unconfigured measurement consumers. Stabilized `good` passes;
+`degraded` remains viable but emits an explicit warning that arming requires operator override;
+`unusable`, unmeasured, stale, malformed, or wrong-peer evidence fails identically in stopped and
+monitoring runs. BSSID, band, and RSSI remain diagnostic annotations rather than admission rules.
+
+The explicit `--require-stopped-clean` mode additionally validates the raw authenticated capture
+and field-recorder endpoints. Capture must be unarmed with no active/shared session; autonomous
+pose state must be stopped with no active shared capture, replication backlog, trigger, or
+publication work; and the field recorder must be idle/ready with no active recording or injected
+fault. The two admission modes are mutually exclusive. Each attempt retains recursively
+credential-redacted raw status, and missing, malformed, or internally inconsistent terminal state
+fails closed.
+
 Run it before moving the phones into the hitting area, and again over wireless ADB after moving
 them. The stricter second invocation also proves both stations are already monitoring, each pose
 path has produced inference decisions with p95 no greater than 200 ms, no maximum above 400 ms,
@@ -621,6 +638,7 @@ phones. An `armed=true` flag alone is deliberately insufficient:
 bazel run //tools:android_pair_doctor_current_apk -- \
   --node 22181FDF6005QH=http://10.168.168.111:8088 \
   --node 1A011JEG501717=http://10.168.168.241:8088 \
+  --require-stopped-clean \
   --json artifacts/android_pair_preflight_usb.json
 
 bazel run //tools:android_pair_doctor_current_apk -- \
@@ -649,6 +667,7 @@ bazel run //tools/field_preflight:android_field_preflight -- \
   --node 10.168.168.241=http://10.168.168.241:8088 \
   --expected-role 10.168.168.111=face_on \
   --expected-role 10.168.168.241=down_the_line \
+  --require-stopped-clean \
   --launch-after-unlock --sleep-screen-after-launch \
   --evidence-dir artifacts/field_preflight_before_arm
 
@@ -666,6 +685,13 @@ assignments even when the pair has complementary roles. It never pairs, unlocks,
 configures, or arms a phone and refuses to overwrite evidence. The first-unlock and on-device
 production launch steps remain human actions; an ADB foreground launch is only a development
 convenience. See `tools/field_preflight/README.md`.
+
+During collection, run `//tools/session_sidecar:session_sidecar` from before the first slate through
+final publication/export. It reads credentials through app-private `adb run-as`, samples only the
+authenticated capture and field-recording status endpoints, and retains bounded timestamped JSONL,
+logcat, power/battery/thermal/Wi-Fi diagnostics, a credential scan, and a SHA-256 inventory in a
+non-overwriting directory. It has hard duration, log, and artifact limits and never arms, stops,
+configures, deletes, or exports media; retain the actual MP4/WAV/manifests separately.
 
 The unqualified `//tools:android_pair_doctor` target remains available for diagnosing an
 intentionally stale installation. It reports each installed SHA-256 and the missing current
@@ -685,9 +711,10 @@ The collector is read-only, runs the two ADB pulls concurrently, refuses to repl
 evidence directory, redacts credentials, rejects stale reports, host-hashes each installed
 monolithic `base.apk` against the Bazel-supplied current APK, and verifies the complete camera,
 encoder, audio, API/OpenGL, pose-isolation, and screen-off product floor. The capability portion of
-`artifacts/android_product_floor_exact_apk_pass_20260823T072145Z/report.json` passes on Pixel 6/API
-36 and Pixel 5a/API 34. Its expected Bazel APK and both installed `base.apk` files share SHA-256
-`328203380f02db24ec7d7707476cab361d3164476d5c9187549897aa64cad39a`. This is exact-APK static
+`artifacts/android_product_floor_final_20260823T154000Z/report.json` passes on Pixel 6/API 36 and
+Pixel 5a/API 34 with both screens off. Its expected Bazel APK and both installed `base.apk` files
+share SHA-256 `9d2ad9c12f8ff1846d02ab8018d0a659bf88d313b542824fde0c185d1572a230`.
+This is exact-APK static
 admission, not motion, thermal, or long-duration qualification.
 
 Before deploying another software revision, the fast hermetic checkpoint for the integration
@@ -697,11 +724,12 @@ contracts that previously escaped into the hitting area is:
 bazel test //tools:pre_field_integration_tests
 ```
 
-It currently lists 118 targets covering credential bootstrap/rotation, scoped native-media authorization,
+It currently lists 131 targets covering credential bootstrap/rotation, scoped native-media authorization,
 stale ownership and partial mutation, the real Java node HTTP protocol, atomic field-recording publication, hosted UI/CORS and setup
 preview, peer readiness/auth/clock/publication/recovery ordering, read-only APK identity, reboot
 evidence including bounded post-reboot peer-clock validation, exact-APK-bound product-floor parsing,
-the production field-preflight executable and host-to-camera-role association,
+the production field-preflight executable, stopped-clean raw-status admission, bounded session
+sidecar, and host-to-camera-role association,
 `field_readiness_v2` acquisition/readiness, exact production audio
 prediction plus fixed-memory candidate replay, immutable policy locks, same-holdout comparison,
 and the audio holdout CLI, trigger and pose lifecycle replay, diagnostic archive/store/publication
@@ -710,54 +738,28 @@ evidence, cleanup, full and isolated TypeScript checks, and production-shaped br
 The browser harness additionally covers post-202 stop/publication failure and stale bookmark roles
 after the phones are physically swapped. It does not contact the phones and therefore complements
 rather than replaces the current-APK doctor and the shortest relevant physical gate. The current
-120-target aggregate passed 120/120 uncached in 21.58 seconds on 2026-08-23, from 08:06:54 through
-08:07:15; `//web:browser_test` was the 19.78-second critical path. This is a current software
+131-target aggregate passed 131/131 uncached on 2026-08-23. This is a current software
 checkpoint, not physical phone, camera, microphone, or network evidence.
 
-The prior 2026-08-23 combined prototype-browser checkpoint completed its physical camera stage in
-5.546 seconds against the direct-LAN Pixel 5a/Pixel 6 origins, observed both 202 starts/stops and
-both published bundles, fetched bounded video and audio ranges from each phone with four HTTP 206
-responses, and returned both nodes to `ready`. Its launcher verified the same Bazel APK SHA-256
-`8454c21a0b2582916e6e25ed06affc207f0fcdf4be7e49159fa24264485b5346` on both phones, retained no
-credentials, and restored screen-sleep state; the companion system-Chrome gate passed the fixture
-contract. That phone report has no `fresh_media_decode` evidence and is no longer eligible under
-the current validator. The current physical half requires installed Google Chrome to decode both
-newly published MP4s from their direct phone origins, validate their complementary roles and shared
-recording identity, present a nonblack frame, and advance playback by at least 0.1 seconds.
-`artifacts/android_field_recording_browser_hil_relay_range_pass1_20260823T071927Z` and
-`artifacts/android_field_recording_browser_hil_relay_range_pass2_20260823T072013Z` are consecutive
-exact-APK passes under the final schema. Each decodes both fresh 720x1280 MP4s, advances them by
-more than 0.2 seconds, records Chrome's allowlisted decoder-release `net::ERR_ABORTED`, retains no
-unexpected request/page/accessibility failure, and restores both nodes and screen-sleep state. The
-second clean pass after the first cancellation validates media-worker cleanup. These runs are
-explicitly non-qualifying because the Pixel 6 face-on origin used a temporary relay.
+The current direct-LAN Chrome evidence is retained at
+`artifacts/browser_direct_lan_final_apk_20260823T153900Z/`. Its
+`browser-hil-launcher-report.json`, `report.json`, and
+`android-field-recording-browser-hil.png` record a pass against both real phone
+origins with no relay. The launcher bound both phones to exact APK SHA-256
+`9d2ad9c12f8ff1846d02ab8018d0a659bf88d313b542824fde0c185d1572a230`; every required API,
+authenticated mutation, MP4/WAV Range request, fresh H.264 decode/playback, accessibility check,
+terminal state, credential-redaction rule, and screen-sleep cleanup passed. Earlier direct-LAN
+preflight failures remain useful incident evidence, but host-to-Pixel 6 reachability is no longer a
+current release blocker. Every later proposed release revision still requires a fresh reviewed
+invocation.
 
-The sequential direct-LAN retry is retained at
-`artifacts/android_browser_hil_direct_lan_preflight_failure_20260823T072340Z`. The Pixel 5a DTL
-origin became HTTP-ready in 951 ms, while the Pixel 6 face-on origin returned five 500 ms transport
-timeouts through 2.901 seconds. The launcher now prepares both phones concurrently: each per-phone
-task performs the exact-APK check or install, starts the application, reads its token, and probes
-the authenticated `/api/v1/node` endpoint. The report records the shared wall time as
-`phone_preparation_elapsed_ms`.
-
-The parallel retry at
-`artifacts/android_browser_hil_direct_lan_parallel_preflight_failure_20260823T072703Z` records
-`phone_preparation_elapsed_ms: 3353`; DTL became ready in 946 ms, while the Pixel 6 repeated five
-500 ms transport timeouts through 2.902 seconds. The whole Bazel target measured 4.72 seconds,
-compared with 5.67 seconds for the preceding sequential failure. Both retries failed before
-Playwright and therefore produced no browser or fresh-decode evidence. Both installed APKs still
-matched SHA-256 `328203380f02db24ec7d7707476cab361d3164476d5c9187549897aa64cad39a`, and both screen-sleep
-cleanup actions passed. The shorter failed preflight does not close the release gate: restore Pixel
-6-to-host Wi-Fi reachability, then run and review `//web:prototype_browser_release_gate` for the
-current and every changed release candidate.
-
-The current-revision physical checkpoint is retained at
+The historical hash-pinned physical checkpoint is retained at
 `artifacts/android_pcm_current_apk_paired_pass_20260823T002901`: both roles
 triggered automatically in 621 ms, both 720p240 clips decoded to their exact
 manifested frame counts, all six inspected AprilTag/LED diagnostic frames were
 nominal, and all cleanup obligations were restored.
 
-The current-APK independent one-second field-recording transport checkpoint is retained at
+The historical hash-pinned independent one-second field-recording transport checkpoint is retained at
 `artifacts/android_field_recording_direct_lan_current_apk_20260823T015651/report.json`. It ran
 directly against both phones' Wi-Fi LAN origins without ADB forwarding. The Bazel artifact and both
 installed monolithic APKs matched SHA-256
@@ -769,7 +771,7 @@ identity/lengths, and fetched bounded MP4 and WAV ranges with valid `ftyp` and `
 The complete target and cleanup took 12.657 seconds and restored both recorders and both screen-sleep
 states. It does not claim full media decode, swing content, or optical alignment.
 
-The synchronous partial-start target passed the same current APK at
+The synchronous partial-start target passed the same historical APK at
 `artifacts/android_field_recording_partial_start_hil_pass_20260823T015457/report.json`. In 9.022
 seconds it proved DTL 202/face-on 409, one-node rollback and publication, a fresh shared-ID retry on
 both nodes, and all seven recorder, injected-fault, ADB-forward, and screen-state cleanup actions.
@@ -808,7 +810,7 @@ bundle listed. That older artifact predates mandatory fresh-phone-MP4 decode evi
 be cited as a pass of the current browser release gate.
 
 The earlier `artifacts/android_pair_preflight_web_20260822.json` run correctly rejected a stale
-two-shadow configuration. The current exact-APK field preflight at
+two-shadow configuration. A historical exact-APK field preflight at
 `artifacts/field_preflight_current_apk_pass_20260823/report.json` passes every stopped-state check on
 the restored Pixel 6 face-on leader and bound Pixel 5a down-the-line shadow: both installed hashes
 equal the Bazel artifact, the current boot is ready, the complete product floor is admitted, and
@@ -822,17 +824,32 @@ generic admission failure. Arm both and rerun with `--require-monitoring` before
 session; that requirement is not inferred from a stopped, cool-device check and is proven
 separately by the subsequent strict checkpoint.
 
-The post-catalog-change stopped-state run at
-`artifacts/field_preflight_lazy_catalog_pass_20260823/report.json` independently passed on its first
-doctor attempt with the exact APK hash used by the green browser HIL. The subsequent strict
-monitoring ceremony passed on its first attempt at
-`artifacts/field_preflight_monitoring_current_apk_pass_20260823/report.json`: both nodes were armed,
-pose p95 was 199 ms on Pixel 6 and 179 ms on Pixel 5a with no failed or rejected-timestamp
-decisions, both standby-audio paths retained frames, the authenticated peer was reachable, and the
-fresh peer-clock uncertainty was 13.502 ms. The phones were then disarmed and returned to Dozing.
+For the present APK, stopped strict admission passed on attempt 3 at
+`artifacts/field_preflight_stopped_final_apk_20260823T153900Z/report.json`. The subsequent armed
+monitoring ceremony passed on its first retry attempt at
+`artifacts/field_preflight_monitoring_final_apk_retry_20260823T154400Z/report.json`; detailed
+evidence is in its `doctor_attempt_1.json`. Both nodes
+used the production GPU/Lite 640x360 path with zero failed or rejected-timestamp decisions; the
+Pixel 6 had 150 recent samples at 140 ms p95 and 156.548 ms max, the Pixel 5a had 150 at 150 ms p95
+and 209.274 ms max, peer-clock uncertainty was 15.901 ms, and application-level pair health was
+Good. The failed predecessor evidence preserves short-window warm-up plus transient Pixel 5a
+hosted-asset, descriptor, and thermal-service timeouts rather than hiding them. Both phones were
+then explicitly disarmed; stopped exact-APK admission and screen-off cleanup are retained at
+`artifacts/field_preflight_terminal_final_apk_20260823T155000Z/report.json`.
+That artifact predates the expanded stopped-clean capture/autonomous/field-recorder checks and is
+historical terminal evidence, not a substitute for the next strict stopped-clean invocation.
 The doctor samples live status before APK hashing and authenticated setup collection so its own
 diagnostic workload cannot inflate this short observation; a deterministic operation-order test
 guards that measurement boundary.
+
+The final-APK short paired HIL at
+`artifacts/android_hil_fixture_retry_localization_failure_20260824T010041Z/` reached complete exact
+capture and passed both roles' decode, all six AprilTag diagnostics, pulse intensity/frame count/
+duration, operational optical/audio timing, and cleanup. Its 22/16-tile footprints failed only the
+former spatial rule. Schema 2 now accepts the timestamp-only pulse from intensity, frame count,
+duration, and timing while retaining response extent and peak location as diagnostic telemetry.
+The historical artifact remains a failed schema-1 run and does not substitute for one fresh
+schema-2 physical aggregate.
 
 ### Station doctor
 

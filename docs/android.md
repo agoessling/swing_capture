@@ -1009,7 +1009,7 @@ pair, and persists the coordination record. The successful physical run at
 passed that complete contract, including durable create/read-back on both
 nodes.
 
-`//android/dual_hil:dual_phone_paired_pose_arm_hil_test` extends that contract
+`//android/dual_hil:dual_phone_paired_pose_arm_lan_hil_test` extends that contract
 through the low-rate standby path. The latest direct-LAN passing evidence is
 preserved at
 [`artifacts/android_pcm_paired_s06_lan_pass_20260822T164310/report.json`](../artifacts/android_pcm_paired_s06_lan_pass_20260822T164310/report.json).
@@ -1037,9 +1037,11 @@ frame, sample count, marker frame, gain, and expected CRC32; the private source
 WAV remains under ignored `artifacts/` storage. Run one physical case at a time:
 
 ```bash
-bazel test //android/dual_hil:dual_phone_paired_pose_arm_hil_test \
+bazel test //android/dual_hil:dual_phone_paired_pose_arm_lan_hil_test \
   --test_env=SWING_CAPTURE_ANDROID_FACE_ON_SERIAL=22181FDF6005QH \
   --test_env=SWING_CAPTURE_ANDROID_DTL_SERIAL=1A011JEG501717 \
+  --test_env=SWING_CAPTURE_ANDROID_FACE_ON_LAN_ORIGIN=http://10.168.168.111:8088 \
+  --test_env=SWING_CAPTURE_ANDROID_DTL_LAN_ORIGIN=http://10.168.168.241:8088 \
   --test_env=SWING_CAPTURE_PCM_REPLAY_MANIFEST="$PWD/android/dual_hil/field_pcm_replay_cases.json" \
   --test_env=SWING_CAPTURE_PCM_REPLAY_WAV="$PWD/artifacts/<field-session>/face_on_pixel6_audio.wav" \
   --test_env=SWING_CAPTURE_PCM_REPLAY_CASE=S06-representative \
@@ -1094,7 +1096,7 @@ required positives count as misses. Diagnostic observations are optional, but
 any observed diagnostic false trigger keeps the aggregate gate red.
 
 For field-readiness validation over the production phone-to-phone network path,
-use the LAN-specific target. ADB forwarding remains only for host orchestration;
+use the LAN-specific target. ADB is used only for host orchestration;
 the target creates no ADB reverse and configures the leader with the Pixel 5a's
 actual Wi-Fi origin:
 

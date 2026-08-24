@@ -5,27 +5,37 @@ kept in the audit at `docs/todo_audit_20260822.md`; this file contains only work
 actionable or requires new physical/human evidence.
 
 The operational checkpoint for a new agent/session is `docs/CURRENT_HANDOFF.md`. It records the
-exact APK/device/network state, the post-reconnect direct-LAN pass, current monitoring and timing
-failures, and the ordered next-session commands. Read it before acting on older evidence below.
+exact APK/device/network state, the post-reconnect direct-LAN pass, current physical evidence,
+telemetry procedure, and the ordered next-session commands. Read it before acting on older evidence
+below.
 
 ## Pose arming and device performance
 
-- Before each hitting session, use `//tools/field_preflight:android_field_preflight` first in
-  stopped state and then with `--require-monitoring` after arming. The retained APK with SHA-256
-  `785602e479836330ebdf62aca1d9fafd88206346f334e1aa960e4ba7b18b4733` passed that complete
-  ceremony on its first strict attempt at
-  `artifacts/field_preflight_monitoring_current_apk_pass_20260823/report.json`. Its nested doctor
-  report proves the Pixel 6 face-on leader and Pixel 5a down-the-line shadow are armed, records
-  53/51 successful pose inferences with 199/179 ms p95, retains standby audio on both, and measures
-  a fresh 13.502 ms peer-clock uncertainty. The current Bazel APK and both installed APKs now share
-  SHA-256 `9b1389f483a5cc5269065525231631a0196e757f2e9a0837bca16506ed487e70`, and fresh static
-  admission passes at
-  `artifacts/android_product_floor_current_apk_20260823T0855Z/report.json`. The stopped/monitoring
-  ceremony was rerun after the host Wi-Fi repair: stopped admission passed at
-  `artifacts/field_preflight_stopped_current_apk_after_lan_repair_20260823T0928Z/report.json`, but
-  monitoring admission failed its unchanged 200 ms pose p95 bound (Pixel 6 207--208 ms and Pixel
-  5a 309--334 ms across retained attempts) and suffered one transient Pixel 6 wireless-ADB evidence
-  timeout. See `docs/CURRENT_HANDOFF.md`; the older monitoring pass remains historical.
+- Before each hitting session, use `//tools/field_preflight:android_field_preflight` first with
+  `--require-stopped-clean` and then with `--require-monitoring` after arming. The stopped-clean
+  contract requires unarmed high-speed capture, no active capture or shared session, zero
+  autonomous replication backlog/trigger/publication work, and a terminal field recorder; every
+  attempt retains credential-redacted raw capture and field-recording status. Run the bounded
+  read-only `//tools/session_sidecar:session_sidecar` from before the first slate through final
+  publication/export so status history, logcat, and device/network/resource context survive. The
+  current Bazel APK and both
+  installed APKs share SHA-256
+  `9d2ad9c12f8ff1846d02ab8018d0a659bf88d313b542824fde0c185d1572a230`; its static product-floor
+  pass is `artifacts/android_product_floor_final_20260823T154000Z/report.json`. Stopped admission
+  passed on attempt 3 at
+  `artifacts/field_preflight_stopped_final_apk_20260823T153900Z/report.json`. Armed monitoring
+  admission passed on its first retry attempt at
+  `artifacts/field_preflight_monitoring_final_apk_retry_20260823T154400Z/report.json`; its detailed
+  `doctor_attempt_1.json` records the Pixel 6 face-on leader at 150 recent GPU/Lite samples, 140 ms
+  p95 and 156.548 ms max, and the
+  Pixel 5a down-the-line shadow at 150 samples, 150 ms p95 and 209.274 ms max. Both had zero failed
+  inferences and rejected timestamps; network health was Good and peer-clock uncertainty was
+  15.901 ms. Preserve the failed predecessor directories: they record the expected short recent
+  window during warm-up plus transient Pixel 5a hosted-asset, descriptor, and thermal-service
+  timeouts. The latest stopped/screen-off evidence is retained at
+  `artifacts/field_preflight_after_fixture_retry_20260824T010200Z/report.json`, but that artifact
+  predates the expanded stopped-clean field-recorder checks. Obtain a fresh strict stopped-clean
+  report before collection. See `docs/CURRENT_HANDOFF.md`; older APK ceremonies remain historical.
 - Exercise aborted address, arm-without-swing, clear-and-rearm, practice-swing, empty-scene,
   walk-through, and repeated-setup cases with reviewed low-rate preview/audio evidence. Expand the
   held-out ATL/DTL corpus and reconcile provisional safe-arm labels before treating aggregate
@@ -83,7 +93,7 @@ failures, and the ordered next-session commands. Read it before acting on older 
   human labels, generated holdout predictions/evaluations, and comparison result remain
   outstanding; no result is inferred from the current development set and production remains
   unchanged. The exact next-session checklist is retained at
-  `artifacts/next_field_collection_plan_20260823.json`; it assigns Pixel 6 to down-the-line and
+  `artifacts/next_field_collection_plan_20260823T211253Z.json`; it assigns Pixel 6 to down-the-line and
   Pixel 5a to face-on and provides an ordered F01--F14 operator sequence, neutral-gap/slating rules,
   and every lifecycle, hard-negative, quiet-impact, review, and diversity requirement for the next
   session. One completed sequence cannot by itself satisfy the version-2 readiness policy.
@@ -102,62 +112,65 @@ failures, and the ordered next-session commands. Read it before acting on older 
   physical pass at `artifacts/android_pcm_current_apk_paired_pass_20260823T002901/report.json` is
   bound to APK SHA-256 `74115ca3e6a8ded19a1c995ea0b9f8be65bcfbe266d401330e1e028da3cf594b`
   and is historical rather than present-revision evidence. Existing long evidence still does not
-  qualify both phones.
+  qualify both phones. The first final-APK short HIL at
+  `artifacts/android_hil_fixture_retry_localization_failure_20260824T010041Z/` reached complete
+  exact decode on both roles and passed AprilTag persistence, pulse intensity/frame-count/duration,
+  both operational timing bounds, and cleanup. It failed only the former spatial-light rule at 22
+  down-the-line and 16 face-on tiles. The LED is a timestamp-only fixture stimulus, so retained-media
+  schema 2 removes footprint from acceptance while retaining peak tile and tile count as diagnostic
+  telemetry; weak, short, long, and mistimed pulses remain failures. Obtain one fresh shortest HIL
+  aggregate under schema 2 before considering a longer qualification; no reflection adjustment or
+  spatial-limit tuning is required.
 - Decide from field/thermal evidence whether Pixel 5a remains supported and whether Pixel 6
   720p240 stays within the accepted thermal state under production workload with the screen off.
 - Retain fresh, exact-APK-bound `product_floor_assessment` evidence after a material APK change and
   on every newly proposed device. `//tools:android_capability_report` host-hashes the Bazel APK and
   each phone's sole installed `base.apk`, records the expected and installed digests, and fails the
   pair unless both match. The Pixel 6/Pixel 5a pair passed all capability and digest checks for the
-  current APK at `artifacts/android_product_floor_current_apk_20260823T0855Z/report.json`; the
+  current APK at `artifacts/android_product_floor_final_20260823T154000Z/report.json`; the
   Bazel APK and both installed APKs have SHA-256
-  `9b1389f483a5cc5269065525231631a0196e757f2e9a0837bca16506ed487e70`. This closes static admission
+  `9d2ad9c12f8ff1846d02ab8018d0a659bf88d313b542824fde0c185d1572a230`. This closes static admission
   for that exact APK only; subsequent material APK changes require a new report, and no static
   report closes the long-duration thermal qualification.
 
 ## Product and protocol follow-ups
 
-- Before declaring a revision prototype-release-ready, run and review
-  `//web:prototype_browser_release_gate`. Desktop Google Chrome and the combined exact-frame AVC
-  plus exact-APK/direct-LAN phone-browser boundary are already selected; Firefox and WebKit remain
-  optional compatibility candidates rather than release blockers. The physical half now also
-  requires Chrome to decode both MP4s created by that invocation, present a nonblack frame, and
-  advance playback by at least 0.1 seconds, with role/origin/shared-recording identity checked in
-  the retained report. Two consecutive exact-APK Chrome runs at
-  `artifacts/android_field_recording_browser_hil_relay_range_pass1_20260823T071927Z` and
-  `artifacts/android_field_recording_browser_hil_relay_range_pass2_20260823T072013Z` passed the
-  final fresh-decode/cancellation schema and show that Chrome decoder release does not strand the
-  phone media worker. They used an explicitly temporary, non-qualifying relay for the Pixel 6
-  face-on origin, so they are cleanup evidence rather than release evidence. The direct-LAN attempt
-  at `artifacts/android_browser_hil_direct_lan_preflight_failure_20260823T072340Z` reached DTL in
-  951 ms but recorded five 500 ms Pixel 6 transport timeouts through 2.901 seconds and stopped
-  before Playwright; exact-APK verification and both screen-sleep cleanup actions still passed.
-  Pixel 6-to-host Wi-Fi reachability was restored by the user's local-console NUC Wi-Fi reconnect,
-  and the post-repair directed pair matrix passes at
-  `artifacts/android_pair_preflight_post_wifi_reconnect_20260823T163223Z.json`. Rerun the direct-LAN
-  combined browser gate now that its former transport blocker is gone. The prior combined
-  checkpoint lacks `fresh_media_decode`, and no relay or earlier component pass substitutes for a
-  reviewed invocation against the proposed release candidate.
-  The current exact APK also passes the complete Chrome/camera/publication/decode flow through an
-  explicitly temporary diagnostic relay at
-  `artifacts/android_field_recording_browser_hil_current_apk_relay_pass_20260823T0904Z`: both
-  recordings published, all four MP4/WAV ranges returned 206, both 720x1280 H.264 clips presented
-  nonblack frames and advanced playback, accessibility/page/request checks were clean, and both
-  screens returned to sleep. That run exposed and then regression-covered launcher-report schema
-  drift, but it deliberately does not qualify the direct-LAN edge.
-- Replace topology-specific network assumptions with a generic field-health contract. The prior
-  host-to-Pixel-6 failure was repaired by the user's one-shot NUC Wi-Fi reconnect; the strict
-  current-APK pair report now passes host-to-both and both phone-to-peer directions at
-  `artifacts/android_pair_preflight_post_wifi_reconnect_20260823T163223Z.json`. Pixel 5a still showed
-  high host-RTT variance despite strong RSSI. Equal BSSID or 5 GHz must not become product gates:
-  different BSSIDs identify different radios but not necessarily different physical mesh nodes,
-  and real deployments will use diverse routers. Measure bounded application-level bidirectional
-  reachability, latency, jitter, timeouts, and representative transfer behavior; expose
-  good/degraded/unusable with hysteresis; let users override a degraded warning; and fail only when
-  coordination is not viable. Retain BSSID, band, RSSI, and link rate as diagnostic context. Cover
-  client isolation, delay/loss, roaming, and transient disconnects deterministically. The doctor
-  now validates `ip route get <peer>` provenance before ordinary ping because Pixel 5a rejects
-  `ping -I wlan0` with `SO_BINDTODEVICE: Operation not permitted`; its focused regression passes.
+- Keep `//web:prototype_browser_release_gate` as a per-revision release requirement. The current
+  exact-APK/direct-LAN candidate now passes the selected desktop-Google-Chrome boundary at
+  `artifacts/browser_direct_lan_final_apk_20260823T153900Z`: both newly created 720x1280 H.264 clips
+  were nonblack and advanced by more than 0.1 seconds, all four MP4/WAV paths served byte ranges,
+  the role/origin/shared-recording identities agreed, page and accessibility errors were empty, and
+  both phones returned to the required stopped/screen-sleep state. This completes the direct-LAN
+  Chrome release gate for that candidate; relay runs remain diagnostic cleanup evidence only, and
+  a material APK or browser-contract change still requires a fresh reviewed invocation. Firefox
+  and WebKit remain optional compatibility candidates rather than release blockers.
+- Preserve the completed generic field-health contract and extend its physical coverage. The
+  phones now measure bounded application-level bidirectional reachability, latency, jitter,
+  timeouts, and representative transfer behavior; publish good/degraded/unusable with hysteresis;
+  expose both directions and issues in setup/review; require a one-shot operator acknowledgement
+  for degraded service; and fail closed when configured coordination is unknown, stale, or
+  unusable. Equal BSSID, 5 GHz, router credentials, and vendor topology remain deliberately outside
+  the gate; BSSID, band, RSSI, and link rate are diagnostic context only. Deterministic software
+  coverage exercises loss, recovery, strict status parsing, dual-node selection, and arm admission.
+  The final-APK stopped preflight at
+  `artifacts/field_preflight_stopped_final_apk_20260823T153900Z` observed the expected hysteresis:
+  its first two attempts were valid but still unusable while recovering, and its third attempt
+  passed as viable degraded service with an explicit warning. The later direct-LAN browser run at
+  `artifacts/browser_direct_lan_final_apk_20260823T153900Z` showed measured Degraded/recovering
+  health with both directions and the one-shot acknowledgement while the complete Chrome flow
+  passed. This closes the software slice and shortest
+  same-pair/direct-LAN evidence only. Representative client-isolation, topology, injected
+  delay/loss, roaming, and transient-disconnect physical coverage remains open, as do long
+  monitoring/thermal qualification, multi-session human collection, OS-reboot evidence, and TLS.
+  The initial timing-HIL candidate failed before capture while health admission warmed up; the HIL
+  now waits within its existing 15-second budget for a stabilized Good or explicitly overridden
+  Degraded state and never overrides Unusable. Physical reruns cleared that integration path. The
+  final-APK complete capture at
+  `artifacts/android_hil_fixture_retry_localization_failure_20260824T010041Z/` passed both roles'
+  exact decode, AprilTags, intensity/duration, and timing bounds; only the now-retired spatial rule
+  failed. The final immediate-poll scheduler integration has software, prior stopped, browser,
+  monitoring, and complete final-APK component evidence, but it still requires a fresh strict
+  stopped-clean preflight and one fresh short aggregate under the schema-2 host validator.
 - Physically run and review
   `//android/dual_hil:dual_phone_os_reboot_ceremony_hil_test` once on the Pixel 6/Pixel 5a pair.
   The manual/local/exclusive gate is implemented and statically checked, but deliberately has not
