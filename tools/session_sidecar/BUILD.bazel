@@ -1,0 +1,33 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+py_library(
+    name = "collector",
+    srcs = [
+        "__init__.py",
+        "collector.py",
+    ],
+)
+
+py_binary(
+    name = "session_sidecar",
+    srcs = ["main.py"],
+    args = ["$(rootpath //tools/android:adb)"],
+    data = ["//tools/android:adb"],
+    legacy_create_init = False,
+    main = "main.py",
+    deps = [":collector"],
+)
+
+py_test(
+    name = "collector_test",
+    size = "small",
+    srcs = ["collector_test.py"],
+    legacy_create_init = False,
+    deps = [":collector"],
+)
+
+exports_files(["README.md"])
