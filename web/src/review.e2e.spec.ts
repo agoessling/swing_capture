@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { expect, test, type Page, type Response as PlaywrightResponse } from "@playwright/test";
+import axe from "axe-core";
 
 interface HilManifestSummary {
   sessionId: string;
@@ -63,6 +64,7 @@ test("production document uses root-relative bundle assets", async () => {
   expect(document).toContain('href="/app.css"');
   expect(document).toContain('src="/app.js"');
   expect(document).toContain('<meta name="referrer" content="no-referrer" />');
+  expect(document).toContain("viewport-fit=cover");
 });
 
 test("retains attributable setup-preview evidence in an accessible disclosure", async ({
@@ -99,6 +101,7 @@ test("coordinates continuous field recording from the review page", async ({ pag
   fieldUrl.searchParams.set("field_recording", "1");
   await page.goto(fieldUrl.toString());
 
+  await page.getByRole("button", { name: "Inspector" }).click();
   const panel = page.getByRole("region", { name: "Continuous test recording" });
   await expect(panel).toBeVisible();
   await expect(panel).toContainText("Down the line");
@@ -121,6 +124,39 @@ test("coordinates continuous field recording from the review page", async ({ pag
       await panel.screenshot(),
     );
   }
+});
+
+test("switches collection-backed UI lab scenarios without phone services", async ({ page }) => {
+  const labUrl = new URL(stationUrl);
+  labUrl.searchParams.set("ui_lab", "1");
+  await page.goto(labUrl.toString());
+
+  const scenarios = page.getByRole("complementary", { name: "UI lab scenarios" });
+  await expect(scenarios).toBeVisible();
+  await expect(scenarios.getByRole("button", { name: "Review ready" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByText("Frame 46 of 90")).toBeVisible();
+  await expect(page.locator('video[aria-label$="recorded swing"]')).toHaveCount(2);
+
+  await scenarios.getByRole("button", { name: "Processing" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Building synchronized review media" }),
+  ).toBeVisible();
+  await expect(page.getByAltText("Down the line impact preview")).toBeVisible();
+  await expect(page.getByAltText("Face on impact preview")).toBeVisible();
+
+  await scenarios.getByRole("button", { name: "Armed / monitoring" }).click();
+  await expect(page.getByRole("heading", { name: "Waiting for the pose leader" })).toBeVisible();
+  await expect(scenarios.getByRole("button", { name: "Armed / monitoring" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  await scenarios.getByRole("button", { name: "Review ready" }).click();
+  await expect(page.getByText("Frame 46 of 90")).toBeVisible();
+  expect(await accessibilityViolations(page)).toEqual([]);
 });
 
 test("plays and steps a synchronized fixture clip", async ({ page }) => {
@@ -155,6 +191,9 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
       ),
     )
     .toEqual([4, 4]);
+  const reviewDetailsButton = page.getByRole("button", { name: "Review details" });
+  await reviewDetailsButton.click();
+  await expect(page.getByRole("dialog", { name: "Review details" })).toBeVisible();
   const pipelinePanel = page.getByRole("region", { name: "Pipeline profile" });
   await expect(pipelinePanel).toContainText("Prepublication analysis");
   await expect(pipelinePanel).toContainText("Publisher planning");
@@ -196,6 +235,9 @@ test("plays and steps a synchronized fixture clip", async ({ page }) => {
       `${JSON.stringify(browserTiming, null, 2)}\n`,
     );
   }
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Review details" })).toHaveCount(0);
+  await expect(reviewDetailsButton).toBeFocused();
   expect(pageErrors).toEqual([]);
   expect(
     await videos.evaluateAll((elements) =>
@@ -353,7 +395,8 @@ test("keeps paired-phone arm failures prominent after review media is ready", as
 
   await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Watching for address" })).toBeVisible();
-  await expect(page.getByText("Address trigger")).toBeVisible();
+  await expect(page.getByRole("banner").getByText("Address trigger")).toBeVisible();
+  await page.getByRole("button", { name: "Inspector" }).click();
   await expect(page.getByText("Paired phone rejected arm")).toHaveCount(2);
   await expect(page.getByRole("alert")).toHaveCount(3);
   await expect(page.getByText("Pair network: Unknown")).toBeVisible();
@@ -398,8 +441,16 @@ test("keeps post-capture diagnostics usable on a phone viewport", async ({ page 
     await writeFile(path.join(outputDirectory, "review-phone-player.png"), playerScreenshot);
   }
 
-  const diagnostics = page.getByRole("region", { name: "Capture diagnostics" });
-  await diagnostics.scrollIntoViewIfNeeded();
+  const diagnosticsButton = page.getByRole("button", { name: "Diagnostics", exact: true });
+  await diagnosticsButton.click();
+  await expect(diagnosticsButton).toHaveAttribute("aria-expanded", "true");
+  const inspector = page.getByRole("dialog", { name: "Review inspector" });
+  await expect(inspector).toBeVisible();
+  await expect(inspector.getByRole("tab", { name: "Diagnostics" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  const diagnostics = inspector.getByRole("region", { name: "Capture diagnostics" });
   await expect(diagnostics).toBeVisible();
   await expect(diagnostics.getByRole("option")).toHaveCount(7);
   await diagnostics.getByRole("combobox", { name: "Result" }).selectOption("missed_shot");
@@ -435,7 +486,11 @@ test("keeps camera setup available and exposes accessible review controls", asyn
   await page.goto(stationUrl);
   await page.getByRole("button", { name: "Camera setup" }).click();
   await expect(page.getByRole("heading", { name: "Camera setup" })).toBeVisible();
-  await page.getByRole("button", { name: "Review" }).click();
+  const reviewTab = page
+    .getByRole("navigation", { name: "Primary" })
+    .getByRole("button", { name: "Review", exact: true });
+  await reviewTab.click();
+  await expect(reviewTab).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
 
   await expect(page.getByRole("button", { name: "Disarm capture" })).toBeEnabled();
@@ -453,6 +508,7 @@ test("keeps camera setup available and exposes accessible review controls", asyn
   await expect(page.getByRole("heading", { name: "Ready" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Arm audio capture" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Save missed shot" })).toBeDisabled();
+  await page.getByRole("button", { name: "Inspector" }).click();
   await expect(page.getByRole("button", { name: "Run synthetic swing HIL" })).toBeEnabled();
   await page.evaluate(() => {
     const heading = document.querySelector("#synthetic-hil-heading");
@@ -490,6 +546,8 @@ test("keeps camera setup available and exposes accessible review controls", asyn
     "Encoding the synchronized review",
     "Synthetic swing ready",
   ]);
+  await page.getByRole("button", { name: "Review details" }).click();
+  await expect(page.getByRole("dialog", { name: "Review details" })).toBeVisible();
   await expect(page.getByLabel("Down-the-line synthetic HIL evidence")).toContainText(
     "Automated white-impact check · passed · frame 45",
   );
@@ -591,7 +649,11 @@ test("configures and associates two Android phones at fixed viewports", async ({
     await writeFile(path.join(outputDirectory, "phone-setup-mobile.png"), mobileScreenshot);
   }
 
-  await page.getByRole("button", { name: "Review" }).click();
+  const phoneReviewTab = page
+    .getByRole("navigation", { name: "Primary" })
+    .getByRole("button", { name: "Review", exact: true });
+  await phoneReviewTab.click();
+  await expect(phoneReviewTab).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
   await expect(page.getByText("Frame 46 of 90")).toBeVisible();
 });
@@ -630,7 +692,6 @@ test.describe("golden image visual regression", () => {
         ),
       )
       .toBe(true);
-    await normalizeRuntimeBrowserTiming(page);
     await page.evaluate(() => window.scrollTo(0, 0));
     await expect(page).toHaveScreenshot("review-desktop.png", {
       animations: "disabled",
@@ -644,7 +705,6 @@ test.describe("golden image visual regression", () => {
     // shifts the final mobile screenshot down to the page footer. Synchronize on the mobile layout
     // itself before choosing the screenshot's semantic anchor.
     await expect(playbackControls).toHaveCSS("display", "grid");
-    await normalizeRuntimeBrowserTiming(page);
     await playbackControls.evaluate((element) =>
       element.scrollIntoView({ block: "center", inline: "nearest" }),
     );
@@ -656,6 +716,111 @@ test.describe("golden image visual regression", () => {
       })),
     ).toEqual({ documentWidth: 390, viewportWidth: 390 });
     await expect(page).toHaveScreenshot("review-phone.png", {
+      animations: "disabled",
+      caret: "hide",
+    });
+  });
+
+  test("keeps the collection-backed native review shell stable", async ({ page }) => {
+    const collectionUrl = new URL(stationUrl);
+    collectionUrl.searchParams.set("collection", "1");
+    await page.goto(collectionUrl.toString());
+    await expect(page.getByRole("heading", { name: "Swing review" })).toBeVisible();
+    await expect(page.getByText("Frame 46 of 90")).toBeVisible();
+
+    const videos = page.locator('video[aria-label$="recorded swing"]');
+    await expect(videos).toHaveCount(2);
+    await expect
+      .poll(async () =>
+        videos.evaluateAll((elements) =>
+          elements.every((element) => {
+            const video = element as HTMLVideoElement;
+            return video.currentTime >= 1.499_985 && video.readyState >= 3 && !video.seeking;
+          }),
+        ),
+      )
+      .toBe(true);
+    await expect
+      .poll(async () =>
+        videos.evaluateAll((elements) =>
+          elements.every((element) => {
+            const video = element as HTMLVideoElement;
+            const bounds = video.getBoundingClientRect();
+            return (
+              video.videoWidth === 360 &&
+              video.videoHeight === 640 &&
+              (Math.abs(bounds.width / bounds.height - 360 / 640) < 0.001 ||
+                getComputedStyle(video).objectFit === "contain")
+            );
+          }),
+        ),
+      )
+      .toBe(true);
+
+    const player = page.getByRole("region", { name: "Synchronized clip player" });
+    const playbackControls = page.getByRole("toolbar", { name: "Playback controls" });
+    await expect(player).toBeVisible();
+    await expect(player).toBeInViewport();
+    await expect(playbackControls).toBeVisible();
+    await expect(playbackControls).toBeInViewport();
+    for (let index = 0; index < 2; ++index) {
+      await expect(videos.nth(index)).toBeVisible();
+      await expect(videos.nth(index)).toBeInViewport();
+    }
+    await expectFixedViewport(page, 1440, 1000);
+
+    const libraryButton = page.getByRole("button", { name: "Library" });
+    await libraryButton.click();
+    const library = page.getByRole("dialog", { name: "Recorded sessions" });
+    await expect(library).toBeVisible();
+    await expect(library.getByRole("button", { name: "Close session library" })).toBeFocused();
+    expect(await accessibilityViolations(page)).toEqual([]);
+    await page.keyboard.press("Escape");
+    await expect(library).toHaveCount(0);
+    await expect(libraryButton).toBeFocused();
+
+    const inspectorButton = page.getByRole("button", { name: "Inspector", exact: true });
+    await inspectorButton.click();
+    const inspector = page.getByRole("dialog", { name: "Review inspector" });
+    await expect(inspector).toBeVisible();
+    await inspector.getByRole("tab", { name: "Diagnostics" }).click();
+    await expect(inspector.getByRole("tab", { name: "Diagnostics" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(inspector.getByRole("region", { name: "Capture diagnostics" })).toBeVisible();
+    await inspector.getByRole("tab", { name: "Session" }).click();
+    await expect(inspector.getByRole("tab", { name: "Session" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await inspector.getByRole("tab", { name: "Capture" }).click();
+    await expect(inspector.getByRole("tab", { name: "Capture" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await inspectorButton.click();
+    await expect(inspector).toBeHidden();
+    await expectFixedViewport(page, 1440, 1000);
+    await expect(page).toHaveScreenshot("ui-lab-desktop.png", {
+      animations: "disabled",
+      caret: "hide",
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(inspector).toBeHidden();
+    await expect(player).toBeVisible();
+    await expect(player).toBeInViewport();
+    await expect(playbackControls).toBeVisible();
+    await expect(playbackControls).toBeInViewport();
+    await expect(videos.first()).toBeVisible();
+    await expect(videos.first()).toBeInViewport();
+    await expect(videos).toHaveCount(2);
+    await expectFixedViewport(page, 390, 844);
+
+    const libraryButtonBounds = await libraryButton.boundingBox();
+    expect(libraryButtonBounds?.height).toBeGreaterThanOrEqual(44);
+    await expect(page).toHaveScreenshot("ui-lab-phone.png", {
       animations: "disabled",
       caret: "hide",
     });
@@ -692,15 +857,37 @@ test.describe("golden image visual regression", () => {
   });
 });
 
-async function normalizeRuntimeBrowserTiming(page: Page): Promise<void> {
-  // These five values intentionally measure the current browser process. Preserve their labels,
-  // layout, and typography in the golden while replacing only the non-repeatable numeric samples.
-  const dynamicValues = page.locator(".browser-profile dl > div:not(:first-child) dd");
-  await expect(dynamicValues).toHaveCount(5);
-  await dynamicValues.evaluateAll((elements) => {
-    for (const element of elements) {
-      element.textContent = "0.00 ms";
-    }
+async function expectFixedViewport(page: Page, width: number, height: number): Promise<void> {
+  expect(
+    await page.evaluate(() => ({
+      clientHeight: document.documentElement.clientHeight,
+      clientWidth: document.documentElement.clientWidth,
+      documentHeight: document.documentElement.scrollHeight,
+      documentWidth: document.documentElement.scrollWidth,
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+    })),
+  ).toEqual({
+    clientHeight: height,
+    clientWidth: width,
+    documentHeight: height,
+    documentWidth: width,
+    scrollX: 0,
+    scrollY: 0,
+  });
+  await page.evaluate(() => window.scrollTo(100, 100));
+  await expect
+    .poll(() => page.evaluate(() => ({ scrollX: window.scrollX, scrollY: window.scrollY })))
+    .toEqual({ scrollX: 0, scrollY: 0 });
+}
+
+async function accessibilityViolations(page: Page): Promise<string[]> {
+  await page.addScriptTag({ content: axe.source });
+  return page.evaluate(async () => {
+    const result = await (window as typeof window & { axe: typeof axe }).axe.run(document, {
+      rules: { "color-contrast": { enabled: false } },
+    });
+    return result.violations.map((violation) => violation.id).sort();
   });
 }
 
@@ -781,6 +968,8 @@ test("loads the supplied physical HIL session artifact", async ({ page }) => {
         ),
       )
       .toBe(true);
+    await page.getByRole("button", { name: "Review details" }).click();
+    await expect(page.getByRole("dialog", { name: "Review details" })).toBeVisible();
     const physicalPipelinePanel = page.getByRole("region", { name: "Pipeline profile" });
     await expect
       .poll(async () => physicalPipelinePanel.getAttribute("data-browser-timing"))
@@ -795,6 +984,8 @@ test("loads the supplied physical HIL session artifact", async ({ page }) => {
         `${JSON.stringify(physicalBrowserTiming, null, 2)}\n`,
       );
     }
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Review details" })).toHaveCount(0);
     expect(pageErrors).toEqual([]);
     expect([...requestedMedia].sort()).toEqual([...manifest.mediaPaths].sort());
 

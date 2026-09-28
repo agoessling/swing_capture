@@ -5,6 +5,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type RefObject,
 } from "react";
 import type {
   ClipFrame,
@@ -62,6 +63,9 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
   const presentationCleanupsRef = useRef<Partial<Record<ReviewRole, () => void>>>({});
   const initializedRef = useRef(false);
   const initializedSessionRef = useRef(manifest.session_id);
+  const reviewDetailsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const reviewDetailsCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [reviewDetailsOpen, setReviewDetailsOpen] = useState(false);
 
   if (initializedSessionRef.current !== manifest.session_id) {
     initializedSessionRef.current = manifest.session_id;
@@ -82,6 +86,23 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
       presentationCleanupsRef.current = {};
     };
   }, [manifest.session_id, referenceTrack.impact_frame_index]);
+
+  useEffect(() => {
+    if (!reviewDetailsOpen) {
+      return;
+    }
+    reviewDetailsCloseButtonRef.current?.focus();
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      setReviewDetailsOpen(false);
+      reviewDetailsButtonRef.current?.focus();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [reviewDetailsOpen]);
 
   const markImpactPresented = (
     role: ReviewRole,
@@ -470,19 +491,19 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
       <div className={`review-video-grid${tracks.length === 1 ? " single-view" : ""}`}>
         {tracks.map((track, index) => {
           const mappedFrame = nearestImpactFrame(track, frame.time_from_impact_us);
-          const hilEvidence = manifest.hil_evidence;
-          const whiteImpact = hilEvidence?.optical_white_impact[track.role];
-          const scheduleAlignment = hilEvidence?.camera_schedule_alignment[track.role];
-          const whiteImpactFrame =
-            hilEvidence === undefined
-              ? undefined
-              : requiredFrame(
-                  track.frames,
-                  hilEvidence.optical_white_impact_frame_index[track.role],
-                );
           return (
-            <figure className="review-view" key={track.role}>
-              <div className="review-video-shell">
+            <figure
+              className={`review-view${
+                track.encoded.height > track.encoded.width ? " portrait" : ""
+              }`}
+              key={track.role}
+            >
+              <div
+                className="review-video-shell"
+                style={{
+                  aspectRatio: `${String(track.encoded.width)} / ${String(track.encoded.height)}`,
+                }}
+              >
                 {/* Metadata plus the explicit impact-frame seek is sufficient for initial paused
                     review. Avoid downloading whole high-speed clips before Play; it wastes phone
                     and network work and can starve live API requests behind slow Range readers. */}
@@ -532,66 +553,10 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
                   {track.source.width}×{track.source.height} · {formatRate(track.nominal_fps)} fps
                 </span>
               </figcaption>
-              {hilEvidence !== undefined ? (
-                <section
-                  aria-label={`${roleLabel(track.role)} synthetic HIL evidence`}
-                  className="review-hil-evidence"
-                >
-                  <span>
-                    Automated white-impact check ·{" "}
-                    {whiteImpact?.passed === true ? "passed" : "failed"}
-                    {" · frame "}
-                    {hilEvidence.optical_white_impact_frame_index[track.role] + 1} · source ID{" "}
-                    {whiteImpactFrame?.frame_id}
-                  </span>
-                  <span>
-                    White match · {whiteImpact?.matching_frame_count} of{" "}
-                    {whiteImpact?.stable_frame_count} stable frames (
-                    {((whiteImpact?.matching_fraction ?? 0) * 100).toFixed(0)}
-                    %)
-                  </span>
-                  <span>
-                    Signal {formatDiagnostic(whiteImpact?.mean_signal_delta)} · color distance{" "}
-                    {formatDiagnostic(whiteImpact?.mean_expected_color_distance)} · saturation{" "}
-                    {formatPercent(whiteImpact?.maximum_saturated_fraction)} · bloom{" "}
-                    {formatPercent(whiteImpact?.maximum_bloom_fraction)}
-                  </span>
-                  <span>
-                    Camera profile · {formatDiagnostic(whiteImpact?.exposure_us)} µs ·{" "}
-                    {formatDiagnostic(whiteImpact?.gain_db)} dB gain
-                  </span>
-                  <span>
-                    Schedule mapping ·{" "}
-                    {formatSignedMicroseconds(scheduleAlignment?.mapped_time_correction_us ?? 0)}{" "}
-                    correction · ±
-                    {formatUnsignedMicroseconds(scheduleAlignment?.uncertainty_us ?? 0)} uncertainty
-                  </span>
-                  <span>
-                    Audio trigger estimate relative to white ·{" "}
-                    {formatSignedMicroseconds(
-                      hilEvidence.audio_trigger_estimate_offset_us[track.role],
-                    )}{" "}
-                    (uncalibrated)
-                  </span>
-                </section>
-              ) : null}
             </figure>
           );
         })}
       </div>
-
-      {manifest.hil_evidence !== undefined ? (
-        <p className="review-hil-context">
-          The {manifest.hil_evidence.timeline.pre_impact_step_count} pre-impact and{" "}
-          {manifest.hil_evidence.timeline.post_impact_step_count} post-impact LED colors are visual
-          timeline context for human playback. The automated optical gate checks only the white
-          impact marker.
-        </p>
-      ) : null}
-
-      {manifest.pipeline_profile !== undefined ? (
-        <PipelineProfilePanel browserTiming={browserTiming} profile={manifest.pipeline_profile} />
-      ) : null}
 
       {mediaError !== null ? (
         <p className="review-error" role="alert">
@@ -722,11 +687,147 @@ export function ReviewPlayer({ manifest }: { manifest: ClipManifest }) {
               ))}
             </select>
           </label>
+          <button
+            className="review-details-button secondary"
+            onClick={() => setReviewDetailsOpen(true)}
+            ref={reviewDetailsButtonRef}
+            type="button"
+          >
+            Review details
+          </button>
         </div>
         <p className="keyboard-help" id="review-keyboard-help">
           Keyboard: Space or K play/pause · ←/→ or ,/. step one frame · Home/End jump
         </p>
       </div>
+      {reviewDetailsOpen ? (
+        <ReviewDetailsDialog
+          browserTiming={browserTiming}
+          closeButtonRef={reviewDetailsCloseButtonRef}
+          manifest={manifest}
+          onClose={() => {
+            setReviewDetailsOpen(false);
+            reviewDetailsButtonRef.current?.focus();
+          }}
+          tracks={tracks}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function ReviewDetailsDialog({
+  manifest,
+  tracks,
+  browserTiming,
+  closeButtonRef,
+  onClose,
+}: {
+  manifest: ClipManifest;
+  tracks: readonly ClipTrack[];
+  browserTiming: BrowserPipelineTiming | null;
+  closeButtonRef: RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
+}) {
+  return (
+    <div className="review-details-backdrop">
+      <div
+        aria-labelledby="review-details-heading"
+        aria-modal="true"
+        className="review-details-dialog"
+        role="dialog"
+      >
+        <header className="review-details-header">
+          <div>
+            <span className="section-kicker">Recorded session</span>
+            <h2 id="review-details-heading">Review details</h2>
+          </div>
+          <button
+            aria-label="Close review details"
+            className="review-details-close secondary"
+            onClick={onClose}
+            ref={closeButtonRef}
+            type="button"
+          >
+            Close
+          </button>
+        </header>
+        <div className="review-details-content">
+          {manifest.hil_evidence === undefined ? null : (
+            <>
+              <p className="review-hil-context">
+                The {manifest.hil_evidence.timeline.pre_impact_step_count} pre-impact and{" "}
+                {manifest.hil_evidence.timeline.post_impact_step_count} post-impact LED colors are
+                visual timeline context for human playback. The automated optical gate checks only
+                the white impact marker.
+              </p>
+              <div className="review-details-hil-evidence">
+                {tracks.map((track) => (
+                  <HilEvidencePanel key={track.role} manifest={manifest} track={track} />
+                ))}
+              </div>
+            </>
+          )}
+          {manifest.pipeline_profile === undefined ? null : (
+            <PipelineProfilePanel
+              browserTiming={browserTiming}
+              profile={manifest.pipeline_profile}
+            />
+          )}
+          {manifest.hil_evidence === undefined && manifest.pipeline_profile === undefined ? (
+            <p className="review-details-empty">No additional capture details are available.</p>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HilEvidencePanel({ manifest, track }: { manifest: ClipManifest; track: ClipTrack }) {
+  const hilEvidence = manifest.hil_evidence;
+  if (hilEvidence === undefined) {
+    return null;
+  }
+  const whiteImpact = hilEvidence.optical_white_impact[track.role];
+  const scheduleAlignment = hilEvidence.camera_schedule_alignment[track.role];
+  const whiteImpactFrame = requiredFrame(
+    track.frames,
+    hilEvidence.optical_white_impact_frame_index[track.role],
+  );
+  return (
+    <section
+      aria-label={`${roleLabel(track.role)} synthetic HIL evidence`}
+      className="review-hil-evidence"
+    >
+      <span>
+        Automated white-impact check · {whiteImpact.passed ? "passed" : "failed"}
+        {" · frame "}
+        {hilEvidence.optical_white_impact_frame_index[track.role] + 1} · source ID{" "}
+        {whiteImpactFrame.frame_id}
+      </span>
+      <span>
+        White match · {whiteImpact.matching_frame_count} of {whiteImpact.stable_frame_count} stable
+        frames ({(whiteImpact.matching_fraction * 100).toFixed(0)}%)
+      </span>
+      <span>
+        Signal {formatDiagnostic(whiteImpact.mean_signal_delta)} · color distance{" "}
+        {formatDiagnostic(whiteImpact.mean_expected_color_distance)} · saturation{" "}
+        {formatPercent(whiteImpact.maximum_saturated_fraction)} · bloom{" "}
+        {formatPercent(whiteImpact.maximum_bloom_fraction)}
+      </span>
+      <span>
+        Camera profile · {formatDiagnostic(whiteImpact.exposure_us)} µs ·{" "}
+        {formatDiagnostic(whiteImpact.gain_db)} dB gain
+      </span>
+      <span>
+        Schedule mapping · {formatSignedMicroseconds(scheduleAlignment.mapped_time_correction_us)}{" "}
+        correction · ±{formatUnsignedMicroseconds(scheduleAlignment.uncertainty_us)} uncertainty
+      </span>
+      <span>
+        Audio trigger estimate relative to white ·{" "}
+        {formatSignedMicroseconds(hilEvidence.audio_trigger_estimate_offset_us[track.role])}{" "}
+        (uncalibrated)
+      </span>
     </section>
   );
 }

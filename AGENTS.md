@@ -6,6 +6,9 @@
   `docs/CURRENT_HANDOFF.md` and `TODO.md`. The handoff records the exact device/APK state, retained
   evidence, recent failures, and ordered recovery commands that are intentionally too transient for
   this working agreement.
+- Before continuing review-UI iteration, read `docs/WEB_UI_HANDOFF.md` and `web/README.md`. They
+  record the product direction, fixture-backed workflow, current layout contract, and validation
+  checkpoint that are not recoverable from the component tree alone.
 
 ## Default validation loop
 

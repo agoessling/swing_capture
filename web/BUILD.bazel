@@ -672,6 +672,25 @@ copy_to_directory(
     visibility = ["//visibility:public"],
 )
 
+py_binary(
+    name = "ui_lab",
+    srcs = ["ui_lab_server.py"],
+    data = [":fixture_demo"],
+    main = "ui_lab_server.py",
+    deps = ["@rules_python//python/runfiles"],
+)
+
+py_test(
+    name = "ui_lab_server_test",
+    size = "small",
+    srcs = [
+        "ui_lab_server.py",
+        "ui_lab_server_test.py",
+    ],
+    main = "ui_lab_server_test.py",
+    deps = ["@rules_python//python/runfiles"],
+)
+
 # Isolated direct-LAN browser HIL for the production app hosted by the configured Android nodes.
 ts_project(
     name = "android_field_recording_browser_hil_typescript",

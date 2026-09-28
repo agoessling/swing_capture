@@ -292,8 +292,8 @@ test("production-shaped partial arm rolls back, exposes the failure, and retries
 
   const armButton = page.getByRole("button", { name: "Arm audio capture" });
   await armButton.click();
-  await expect(page.locator(".capture-error")).toContainText("Unable to arm both Android nodes");
-  await expect(page.locator(".capture-error")).toContainText(
+  await expect(reviewErrorAlert(page)).toContainText("Unable to arm both Android nodes");
+  await expect(reviewErrorAlert(page)).toContainText(
     "Face-on Android node request failed (HTTP 409): camera unavailable",
   );
   await expect(page.getByRole("heading", { name: "Not armed" })).toBeVisible();
@@ -313,7 +313,7 @@ test("production-shaped partial arm rolls back, exposes the failure, and retries
 
   await armButton.click();
   await expect(page.getByRole("heading", { name: "Listening for an audio trigger" })).toBeVisible();
-  await expect(page.locator(".capture-error")).toHaveCount(0);
+  await expect(reviewErrorAlert(page)).toHaveCount(0);
 
   await page.getByRole("button", { name: "Save missed shot" }).click();
   await expect
@@ -356,7 +356,7 @@ test("production-shaped missed-shot rejection has no mutations before arm and re
   // already disarmed. saveMissedShot() must re-check both phones before either POST is sent.
   harness.faceOn.armed = false;
   await page.getByRole("button", { name: "Save missed shot" }).click();
-  await expect(page.locator(".capture-error")).toHaveText(
+  await expect(reviewErrorAlert(page)).toContainText(
     "Both Android nodes must be armed before saving a missed shot",
   );
   expect(harness.nodes().map((node) => node.mutations.length)).toEqual(mutationsBeforeSave);
@@ -390,7 +390,7 @@ test("production-shaped missed-shot rejection has no mutations before arm and re
         ),
     )
     .toEqual([1, 1]);
-  await expect(page.locator(".capture-error")).toHaveCount(0);
+  await expect(reviewErrorAlert(page)).toHaveCount(0);
 });
 
 test("stale missed-shot credentials report 401 and recover after correction", async ({ page }) => {
@@ -406,7 +406,7 @@ test("stale missed-shot credentials report 401 and recover after correction", as
   harness.faceOn.credentialGeneration += 1;
 
   await page.getByRole("button", { name: "Save missed shot" }).click();
-  const staleCredentialError = page.locator(".capture-error");
+  const staleCredentialError = reviewErrorAlert(page);
   await expect(staleCredentialError).toContainText(
     "Face-on Android node request failed (HTTP 401): a valid bearer control credential is required",
   );
@@ -430,7 +430,7 @@ test("stale missed-shot credentials report 401 and recover after correction", as
   await expect(page.getByRole("heading", { name: "Listening for an audio trigger" })).toBeVisible();
   await page.getByRole("button", { name: "Save missed shot" }).click();
   await expect(page.getByText("Saving standby diagnostics")).toBeVisible();
-  await expect(page.locator(".capture-error")).toHaveCount(0);
+  await expect(reviewErrorAlert(page)).toHaveCount(0);
   expect(harness.nodes().map((node) => node.armed)).toEqual([false, false]);
   for (const node of harness.nodes()) {
     const requests = node.mutations.filter(
@@ -456,7 +456,7 @@ test("partial missed-shot acceptance safely disarms both phones and retries in o
   // shared-session ownership before offering another shot.
   harness.faceOn.failNextMissedShot = true;
   await page.getByRole("button", { name: "Save missed shot" }).click();
-  await expect(page.locator(".capture-error")).toContainText(
+  await expect(reviewErrorAlert(page)).toContainText(
     "Unable to save missed shot both Android nodes: Face-on Android node request failed (HTTP 409): diagnostic retention unavailable",
   );
   await expect(page.getByRole("heading", { name: "Not armed" })).toBeVisible();
@@ -484,7 +484,7 @@ test("partial missed-shot acceptance safely disarms both phones and retries in o
 
   await armButton.click();
   await expect(page.getByRole("heading", { name: "Listening for an audio trigger" })).toBeVisible();
-  await expect(page.locator(".capture-error")).toHaveCount(0);
+  await expect(reviewErrorAlert(page)).toHaveCount(0);
   await page.getByRole("button", { name: "Save missed shot" }).click();
   await expect
     .poll(() =>
@@ -556,10 +556,10 @@ test("production-shaped UI rejects a wrong face-on credential before either arm 
   const armButton = page.getByRole("button", { name: "Arm audio capture" });
   await expect(armButton).toBeDisabled();
 
-  await expect(page.locator(".capture-error")).toContainText(
+  await expect(reviewErrorAlert(page)).toContainText(
     "Face-on Android node request failed (HTTP 401): a valid bearer control credential is required",
   );
-  await expect(page.locator(".capture-error")).toContainText(
+  await expect(reviewErrorAlert(page)).toContainText(
     "Re-enter the face-on control credential for this station.",
   );
   expect(
@@ -585,10 +585,10 @@ test("production-shaped UI rejects a missing DTL credential before either arm mu
   const armButton = page.getByRole("button", { name: "Arm audio capture" });
   await expect(armButton).toBeDisabled();
 
-  await expect(page.locator(".capture-error")).toContainText(
+  await expect(reviewErrorAlert(page)).toContainText(
     "Down-the-line Android node request failed (HTTP 401): a valid bearer control credential is required",
   );
-  await expect(page.locator(".capture-error")).toContainText(
+  await expect(reviewErrorAlert(page)).toContainText(
     "Re-enter the down-the-line control credential for this station.",
   );
   expect(
@@ -659,7 +659,7 @@ test("credential rotation remains signed in across setup, review, and reload", a
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Listening for an audio trigger" })).toBeVisible();
-  await expect(page.locator(".capture-error")).toHaveCount(0);
+  await expect(reviewErrorAlert(page)).toHaveCount(0);
   expect(await accessibilityViolations(page)).toEqual([]);
   await saveOutput(
     "production-credential-rotation-review-reload.png",
@@ -677,7 +677,7 @@ test("production-shaped mutation connection drop rolls back and recovers without
   await expect(armButton).toBeEnabled();
   await armButton.click();
 
-  await expect(page.locator(".capture-error")).toContainText(
+  await expect(reviewErrorAlert(page)).toContainText(
     "Unable to arm both Android nodes: Face-on Android node is unreachable",
   );
   await expect(page.getByRole("heading", { name: "Not armed" })).toBeVisible();
@@ -698,13 +698,14 @@ test("production-shaped mutation connection drop rolls back and recovers without
   harness.faceOn.dropArmConnections = false;
   await armButton.click();
   await expect(page.getByRole("heading", { name: "Listening for an audio trigger" })).toBeVisible();
-  await expect(page.locator(".capture-error")).toHaveCount(0);
+  await expect(reviewErrorAlert(page)).toHaveCount(0);
   expect(harness.nodes().map((node) => node.armed)).toEqual([true, true]);
 });
 
 test("partial field-recording start rolls back and retries without reload", async ({ page }) => {
   harness.faceOn.failNextFieldRecordingStart = true;
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
 
   const panel = page.getByRole("region", { name: "Continuous test recording" });
   const start = panel.getByRole("button", { name: "Start field recording" });
@@ -796,6 +797,7 @@ test("accepted field-recording start failure rolls back both phones and retries"
 }) => {
   harness.faceOn.failNextFieldRecordingStartAfterAccept = true;
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
 
   const panel = page.getByRole("region", { name: "Continuous test recording" });
   const start = panel.getByRole("button", { name: "Start field recording" });
@@ -838,6 +840,7 @@ test("stale field-recording credential blocks before either phone is disarmed", 
   harness.faceOn.token = "replacement_face_control_token_01";
   harness.faceOn.credentialGeneration += 1;
   await page.goto(staleCredentialUrl);
+  await openReviewInspector(page, "Capture");
 
   const panel = page.getByRole("region", { name: "Continuous test recording" });
   await expect(panel.getByRole("alert")).toContainText(
@@ -857,6 +860,7 @@ test("stale field-recording credential blocks before either phone is disarmed", 
   ).toEqual([]);
 
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
   await panel.getByRole("button", { name: "Start field recording" }).click();
   await expect(panel.getByRole("button", { name: "Stop both phones" })).toBeVisible();
   expect(harness.nodes().map((node) => node.fieldRecordingState)).toEqual([
@@ -869,6 +873,7 @@ test("historical catalog hydration cannot starve field-recording controls", asyn
   harness.holdHistoricalCatalog(8);
   harness.setFixtureSessionPublished(false);
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
 
   await expect
     .poll(() => harness.nodes().map((node) => node.historicalManifestRequestCount))
@@ -911,6 +916,7 @@ test("slow field-recording history cannot block live controls or stop completion
 }) => {
   harness.holdFieldRecordingCatalog();
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
 
   await expect
     .poll(() => harness.nodes().map((node) => node.fieldRecordingCatalogRequestCount))
@@ -943,6 +949,7 @@ test("field recording recovers a disconnected phone during stop without reload",
   page,
 }) => {
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
   const panel = page.getByRole("region", { name: "Continuous test recording" });
   const start = panel.getByRole("button", { name: "Start field recording" });
   await expect(start).toBeEnabled();
@@ -989,6 +996,7 @@ test("field recording recovers a disconnected phone during stop without reload",
 
 test("field recording retries an after-preflight partial stop without reload", async ({ page }) => {
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
   const panel = page.getByRole("region", { name: "Continuous test recording" });
   const start = panel.getByRole("button", { name: "Start field recording" });
   await start.click();
@@ -1022,6 +1030,7 @@ test("field recording preserves one stop action while both phones publish asynch
   page,
 }) => {
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
   const panel = page.getByRole("region", { name: "Continuous test recording" });
   const start = panel.getByRole("button", { name: "Start field recording" });
   await start.click();
@@ -1060,6 +1069,7 @@ test("accepted field-recording stop surfaces a terminal publication failure and 
   page,
 }) => {
   await page.goto(harness.applicationUrl());
+  await openReviewInspector(page, "Capture");
   const panel = page.getByRole("region", { name: "Continuous test recording" });
   const start = panel.getByRole("button", { name: "Start field recording" });
   await start.click();
@@ -1209,7 +1219,7 @@ test("production-shaped UI keeps review usable while one phone disconnects and a
   await expect(page.locator(".timeline-summary")).toContainText("Frame 12 of 90");
 
   harness.faceOn.online = false;
-  const unavailable = page.locator(".capture-error").filter({
+  const unavailable = reviewErrorAlert(page).filter({
     hasText: "Face-on Android node request failed",
   });
   await expect(unavailable).toContainText("HTTP 503");
@@ -1240,7 +1250,7 @@ test("production-shaped UI rejects stale status data and accepts a fresh reconne
   await expect(page.getByText("Frame 46 of 90")).toBeVisible();
 
   harness.faceOn.staleLiveStatus = true;
-  const stale = page.locator(".capture-error").filter({
+  const stale = reviewErrorAlert(page).filter({
     hasText: "Face-on Android live status is disconnected or stale",
   });
   await expect(stale).toBeVisible();
@@ -1260,7 +1270,7 @@ test("production-shaped UI blocks stale cross-phone session ownership and then r
   harness.setPublication("mismatched");
   await page.goto(harness.applicationUrl());
 
-  const mismatch = page.locator(".capture-error").filter({
+  const mismatch = reviewErrorAlert(page).filter({
     hasText: "Android nodes report different active shared session IDs",
   });
   await expect(mismatch).toBeVisible();
@@ -1281,7 +1291,7 @@ test("production-shaped UI diagnoses duplicate live roles and recovers after set
   harness.faceOn.advertisedRole = "down_the_line";
   await page.goto(harness.applicationUrl());
 
-  const roleConflict = page.locator(".capture-error").filter({
+  const roleConflict = reviewErrorAlert(page).filter({
     hasText: "Dual-node capture requires one live phone for each camera role",
   });
   await expect(roleConflict).toBeVisible();
@@ -1321,7 +1331,7 @@ test("production-shaped UI follows live roles after bookmark role assignments be
   const armButton = page.getByRole("button", { name: "Arm audio capture" });
   await expect(armButton).toBeEnabled();
   await armButton.click();
-  await expect(page.locator(".capture-error")).toContainText(
+  await expect(reviewErrorAlert(page)).toContainText(
     "Face-on Android node request failed (HTTP 409): camera unavailable",
   );
   expect(harness.faceOn.armed).toBe(false);
@@ -1341,7 +1351,7 @@ test("production-shaped UI follows live roles after bookmark role assignments be
 
   await armButton.click();
   await expect(page.getByRole("heading", { name: "Listening for an audio trigger" })).toBeVisible();
-  await expect(page.locator(".capture-error")).toHaveCount(0);
+  await expect(reviewErrorAlert(page)).toHaveCount(0);
   expect(harness.nodes().map((node) => node.armed)).toEqual([true, true]);
   expect(await accessibilityViolations(page)).toEqual([]);
 });
@@ -1409,7 +1419,8 @@ test("production-shaped H.264 uses two origins, byte ranges, and exact player co
     'video/mp4; codecs="avc1.42C01E"',
     'video/mp4; codecs="avc1.42C01E"',
   ]);
-  await expect(page.getByText("AVC1.42C01E · inter-frame · full resolution")).toBeVisible();
+  const inspector = await openReviewInspector(page, "Session");
+  await expect(inspector.getByText("AVC1.42C01E · inter-frame · full resolution")).toBeVisible();
   expect(harness.scenario).toMatchObject({
     all_frames_keyframes: false,
     keyframe_interval_frames: 30,
@@ -2890,6 +2901,28 @@ async function nonblackPixelFraction(page: Page, source: string): Promise<number
     }
     return nonblack / (pixels.length / 4);
   }, source);
+}
+
+type ReviewInspectorTab = "Capture" | "Diagnostics" | "Session";
+
+async function openReviewInspector(page: Page, tab: ReviewInspectorTab): Promise<Locator> {
+  const inspector = page.getByRole("dialog", { name: "Review inspector" });
+  if (!(await inspector.isVisible())) {
+    await page.getByRole("button", { name: "Inspector", exact: true }).click();
+  }
+  await expect(inspector).toBeVisible();
+  const tabButton = inspector.getByRole("tab", { name: tab, exact: true });
+  if ((await tabButton.getAttribute("aria-selected")) !== "true") {
+    await tabButton.click();
+  }
+  await expect(tabButton).toHaveAttribute("aria-selected", "true");
+  return inspector;
+}
+
+function reviewErrorAlert(page: Page): Locator {
+  return page.locator(
+    '.review-error-toast[role="alert"]:visible, .capture-error[role="alert"]:visible',
+  );
 }
 
 async function accessibilityViolations(page: Page): Promise<string[]> {

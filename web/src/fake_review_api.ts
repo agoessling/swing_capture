@@ -99,6 +99,43 @@ export const FIXTURE_MANIFEST: ClipManifest = {
   ],
 };
 
+/** Review media derived from the retained Android field collection for UI-only iteration. */
+export const COLLECTION_FIXTURE_MANIFEST: ClipManifest = {
+  schema_version: REVIEW_SCHEMA_VERSION,
+  session_id: "ui-lab-collection-s06",
+  created_at_utc: "2026-08-22T18:06:00.000Z",
+  trigger: {
+    source: "local_audio",
+    host_monotonic_time_ns: "456789000000",
+    confirmation_host_monotonic_time_ns: "456791000000",
+    sample_rate_hz: 48_000,
+    peak_amplitude: 0.42,
+    noise_floor: 0.012,
+    threshold: 0.08,
+  },
+  mapped_nearest_frame_skew_us: 0,
+  views: [
+    collectionFixtureTrack(
+      "down_the_line",
+      "android-down-the-line",
+      "fixtures/ui_lab/down-the-line-s06.webm",
+      2_746_799,
+      8_100_000,
+    ),
+    collectionFixtureTrack(
+      "face_on",
+      "android-face-on",
+      "fixtures/ui_lab/face-on-s06.webm",
+      2_585_230,
+      9_300_000,
+    ),
+  ],
+};
+
+export const UI_LAB_SCENARIOS = ["review_ready", "armed_monitoring", "processing"] as const;
+
+export type UiLabScenario = (typeof UI_LAB_SCENARIOS)[number];
+
 export const FIXTURE_SYNTHETIC_HIL_EVIDENCE: SyntheticSwingHilEvidence = {
   kind: "synthetic_swing",
   selected_brightness: 8,
@@ -423,6 +460,109 @@ export class FakeReviewApi implements ReviewApi {
   }
 }
 
+/** Mutable, network-free review states for interactively exercising the fixture demo. */
+export class FakeUiLabReviewApi implements ReviewApi {
+  #scenario: UiLabScenario;
+  readonly #listeners = new Set<() => void>();
+  readonly #scenarioListeners = new Set<(scenario: UiLabScenario) => void>();
+
+  constructor(scenario: UiLabScenario = "review_ready") {
+    this.#scenario = scenario;
+  }
+
+  get scenario(): UiLabScenario {
+    return this.#scenario;
+  }
+
+  setScenario(scenario: UiLabScenario) {
+    if (scenario === this.#scenario) {
+      return;
+    }
+    this.#scenario = scenario;
+    for (const listener of this.#scenarioListeners) {
+      listener(scenario);
+    }
+    for (const listener of this.#listeners) {
+      listener();
+    }
+  }
+
+  subscribeToScenarioChanges(listener: (scenario: UiLabScenario) => void): () => void {
+    this.#scenarioListeners.add(listener);
+    return () => {
+      this.#scenarioListeners.delete(listener);
+    };
+  }
+
+  subscribeToChanges(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  getCaptureStatus(): Promise<CaptureStatus> {
+    return Promise.resolve(uiLabCaptureStatus(this.#scenario));
+  }
+
+  setArmed(armed: boolean): Promise<CaptureStatus> {
+    this.setScenario(armed ? "armed_monitoring" : "review_ready");
+    return this.getCaptureStatus();
+  }
+
+  triggerManualCapture(): Promise<SessionSummary> {
+    this.setScenario("processing");
+    return Promise.resolve(uiLabProcessingSession());
+  }
+
+  saveMissedShot(): Promise<SessionSummary> {
+    return this.triggerManualCapture();
+  }
+
+  startSyntheticSwing(): Promise<CaptureStatus> {
+    return Promise.reject(new Error("Synthetic swing HIL is disabled in the UI lab"));
+  }
+
+  getSessions(): Promise<SessionList> {
+    const sessions =
+      this.#scenario === "processing"
+        ? [uiLabProcessingSession(), uiLabReadySession()]
+        : [uiLabReadySession()];
+    return Promise.resolve({ schema_version: REVIEW_SCHEMA_VERSION, sessions });
+  }
+
+  getManifest(sessionId: string): Promise<ClipManifest> {
+    if (sessionId !== COLLECTION_FIXTURE_MANIFEST.session_id) {
+      return Promise.reject(new Error(`Unknown UI lab session ${sessionId}`));
+    }
+    const manifest = structuredClone(COLLECTION_FIXTURE_MANIFEST);
+    manifest.client_delivery_profile = {
+      manifest_fetch_duration_ms: 0,
+      manifest_response_received_performance_ms: globalThis.performance?.now() ?? Date.now(),
+      server_response_host_monotonic_ns: "458500000000",
+    };
+    return Promise.resolve(manifest);
+  }
+
+  submitDiagnosticFeedback(_sessionId: string, _feedback: DiagnosticFeedback): Promise<void> {
+    return Promise.resolve();
+  }
+
+  getDiagnosticArchives(sessionId: string): Promise<readonly DiagnosticArchive[]> {
+    return Promise.resolve([
+      {
+        filename: `swing-capture-${sessionId}-diagnostics.zip`,
+        data: new Blob([`UI lab diagnostics for ${sessionId}`], { type: "application/zip" }),
+      },
+    ]);
+  }
+
+  impactPreviewUrl(_sessionId: string, role: ReviewRole, revision: number): string {
+    const basename = role === "down_the_line" ? "down-the-line" : "face-on";
+    return `fixtures/ui_lab/${basename}-s06-impact.jpg?v=${String(revision)}`;
+  }
+}
+
 export class FakeFieldRecordingReviewApi extends FakeReviewApi {
   #recording = false;
   #completed = false;
@@ -541,6 +681,76 @@ function fixtureTrack(
     frames: Array.from({ length: FRAME_COUNT }, (_, frameIndex) =>
       fixtureFrame(frameIndex, deviceTimestampOrigin),
     ),
+  };
+}
+
+function collectionFixtureTrack(
+  role: ReviewRole,
+  cameraSerial: string,
+  path: string,
+  encodedBytes: number,
+  deviceTimestampOrigin: number,
+): ClipTrack {
+  return {
+    ...fixtureTrack(role, cameraSerial, path, encodedBytes, deviceTimestampOrigin),
+    source: { pixel_format: "camera2_private", width: 720, height: 1280 },
+    encoded: { width: 360, height: 640 },
+  };
+}
+
+function uiLabReadySession(): SessionSummary {
+  return {
+    session_id: COLLECTION_FIXTURE_MANIFEST.session_id,
+    state: "ready",
+    created_at_utc: COLLECTION_FIXTURE_MANIFEST.created_at_utc,
+    error: "",
+  };
+}
+
+function uiLabProcessingSession(): SessionSummary {
+  return {
+    session_id: "ui-lab-processing",
+    state: "encoding",
+    created_at_utc: "2026-08-22T18:07:00.000Z",
+    error: "",
+  };
+}
+
+function uiLabCaptureStatus(scenario: UiLabScenario): CaptureStatus {
+  const ready = scenario === "review_ready";
+  const monitoring = scenario === "armed_monitoring";
+  return {
+    schema_version: CAPTURE_SCHEMA_VERSION,
+    state: ready ? "ready" : monitoring ? "armed" : "encoding",
+    armed: monitoring,
+    active_session_id: ready
+      ? COLLECTION_FIXTURE_MANIFEST.session_id
+      : monitoring
+        ? null
+        : "ui-lab-processing",
+    error: "",
+    operational_health: {
+      ready_for_capture: true,
+      thermal: { status: 1, headroom: 0.22, ready: true, power_save_mode: false },
+      storage: {
+        usable_bytes: 18_253_611_008,
+        minimum_free_bytes: 2_147_483_648,
+        ready: true,
+      },
+      issues: [],
+    },
+    hil: {
+      enabled: false,
+      busy: false,
+      stage: "idle",
+      error: "",
+      last_run: null,
+    },
+    ...(monitoring
+      ? {
+          pose: fixturePoseStatus("shadow", "monitoring", fixturePeerArmStatus("accepted")),
+        }
+      : {}),
   };
 }
 

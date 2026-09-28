@@ -1,9 +1,15 @@
-import { StrictMode } from "react";
+import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Application, viewFromHash } from "./application.js";
 import { FakeStationApi, FIXTURE_STATUS } from "./fake_api.js";
 import { FakeNodeSetupApi } from "./fake_node_setup_api.js";
-import { FakeFieldRecordingReviewApi, FakeReviewApi } from "./fake_review_api.js";
+import {
+  FakeFieldRecordingReviewApi,
+  FakeReviewApi,
+  FakeUiLabReviewApi,
+  type UiLabScenario,
+  UI_LAB_SCENARIOS,
+} from "./fake_review_api.js";
 import {
   PEER_ARM_STATES,
   type PeerArmState,
@@ -22,6 +28,8 @@ if (root === null) {
 const parameters = new URLSearchParams(window.location.search);
 const phoneSetupMode = parameters.get("phone_setup");
 const fieldRecordingMode = parameters.get("field_recording") === "1";
+const collectionMode = parameters.get("collection") === "1";
+const uiLabMode = parameters.get("ui_lab") === "1";
 const stationStatus = structuredClone(FIXTURE_STATUS);
 if (parameters.get("preview_stall") === "capture_sink") {
   const camera = stationStatus.cameras.find((candidate) => candidate.role === "down_the_line");
@@ -69,20 +77,71 @@ const nodeSetupApis =
           ]
       : [new FakeNodeSetupApi("http://pixel-6-pro.test:8088")];
 
+const defaultReviewApi = collectionMode
+  ? new FakeUiLabReviewApi()
+  : new (fieldRecordingMode ? FakeFieldRecordingReviewApi : FakeReviewApi)({
+      ...(peerArmState === undefined ? {} : { peerArmState }),
+      ...(poseMode === undefined ? {} : { poseMode }),
+      ...(posePhase === undefined ? {} : { posePhase }),
+    });
+
+const application = (
+  <Application
+    initialView={viewFromHash(window.location.hash)}
+    {...(nodeSetupApis === undefined ? {} : { nodeSetupApis })}
+    pollIntervalMs={100}
+    reviewApi={defaultReviewApi}
+    stationApi={new FakeStationApi(stationStatus)}
+  />
+);
+
 createRoot(root).render(
   <StrictMode>
-    <Application
-      initialView={viewFromHash(window.location.hash)}
-      {...(nodeSetupApis === undefined ? {} : { nodeSetupApis })}
-      pollIntervalMs={100}
-      reviewApi={
-        new (fieldRecordingMode ? FakeFieldRecordingReviewApi : FakeReviewApi)({
-          ...(peerArmState === undefined ? {} : { peerArmState }),
-          ...(poseMode === undefined ? {} : { poseMode }),
-          ...(posePhase === undefined ? {} : { posePhase }),
-        })
-      }
-      stationApi={new FakeStationApi(stationStatus)}
-    />
+    {uiLabMode ? <UiLabApplication stationStatus={stationStatus} /> : application}
   </StrictMode>,
 );
+
+function UiLabApplication({ stationStatus: status }: { stationStatus: typeof FIXTURE_STATUS }) {
+  const [api] = useState(() => new FakeUiLabReviewApi());
+  const [scenario, setScenario] = useState<UiLabScenario>(api.scenario);
+
+  useEffect(() => api.subscribeToScenarioChanges(setScenario), [api]);
+
+  return (
+    <>
+      <aside aria-label="UI lab scenarios" className="ui-lab-scenario-switcher">
+        <fieldset>
+          <legend>UI lab scenario</legend>
+          {UI_LAB_SCENARIOS.map((candidate) => (
+            <button
+              aria-pressed={scenario === candidate}
+              key={candidate}
+              onClick={() => api.setScenario(candidate)}
+              type="button"
+            >
+              {uiLabScenarioLabel(candidate)}
+            </button>
+          ))}
+        </fieldset>
+      </aside>
+      <Application
+        initialView={viewFromHash(window.location.hash)}
+        pollIntervalMs={100}
+        reviewApi={api}
+        setupAvailable={false}
+        stationApi={new FakeStationApi(status)}
+      />
+    </>
+  );
+}
+
+function uiLabScenarioLabel(scenario: UiLabScenario): string {
+  switch (scenario) {
+    case "review_ready":
+      return "Review ready";
+    case "armed_monitoring":
+      return "Armed / monitoring";
+    case "processing":
+      return "Processing";
+  }
+}

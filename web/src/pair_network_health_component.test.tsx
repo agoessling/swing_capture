@@ -71,6 +71,7 @@ async function main() {
 
   const degradedApi = new NetworkReviewApi(networkHealth("degraded"), "leader");
   render(<ReviewApp api={degradedApi} pollIntervalMs={60_000} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Inspector" }));
   assert.ok(await screen.findByText("Pair network: Degraded"));
   assert.ok(screen.getAllByText(/4\/5 replies.*1 timeouts.*p95 16\.0 ms.*21\.0 Mbps/).length === 2);
   assert.ok(screen.getByText("Some phone-to-phone application requests failed or timed out."));
@@ -89,6 +90,7 @@ async function main() {
 
   const rejectedApi = new NetworkReviewApi(networkHealth("degraded"), "leader", true);
   render(<ReviewApp api={rejectedApi} pollIntervalMs={60_000} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Inspector" }));
   assert.ok(await screen.findByText("Pair network: Degraded"));
   const rejectedOverride = screen.getByRole<HTMLInputElement>("checkbox", {
     name: /Arm once using degraded pair network/,
@@ -108,6 +110,7 @@ async function main() {
       pollIntervalMs={60_000}
     />,
   );
+  fireEvent.click(await screen.findByRole("button", { name: "Inspector" }));
   assert.ok(await screen.findByText("Pair network: Unusable · stale"));
   assert.equal(
     screen.getByRole("button", { name: "Arm pose capture" }).hasAttribute("disabled"),
@@ -141,6 +144,7 @@ async function main() {
   cleanup();
 
   render(<ReviewApp api={new NetworkReviewApi(undefined, "leader")} pollIntervalMs={60_000} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Inspector" }));
   assert.ok(await screen.findByText("Pair network: Unknown"));
   assert.equal(
     screen.getByRole("button", { name: "Arm pose capture" }).hasAttribute("disabled"),

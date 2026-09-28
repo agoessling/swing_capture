@@ -40,6 +40,38 @@ host files are encoding, the application shows
 the two exact trigger-nearest full-resolution JPEGs. The physical-artifact
 Playwright bridge qualifies the completed files through the same player.
 
+## Phone-free UI lab
+
+Read the [web UI handoff](../docs/WEB_UI_HANDOFF.md) before changing the review workspace. It
+records the design intent, reference applications, responsive layout contract, and current
+validation checkpoint.
+
+Run the collection-backed review lab without either phone or a camera service:
+
+```bash
+bazel run //web:ui_lab
+```
+
+Open the printed loopback URL. The floating scenario switcher moves live between **Review ready**,
+**Armed / monitoring**, and **Processing** using the same `ReviewApi` consumed by production. The
+player uses a checked-in 90-frame slice around reviewed target swing S06 from retained field
+recording `95482d93-f024-400e-9532-5ba7082de05e`; each view is independently aligned so frame 46 is
+the reviewed impact. Its [fixture README](fixtures/ui_lab/README.md) records provenance and exact
+reproduction commands. `--port 0` selects and prints an available port when 4173 is occupied.
+
+To open the lab from another device on the same trusted LAN, bind all IPv4 interfaces and print the
+host's default-route LAN address:
+
+```bash
+bazel run //web:ui_lab -- --lan
+```
+
+The server binds only to `127.0.0.1` unless `--lan` is explicit, disables browser caching for fast
+iteration, and implements the HTTP byte ranges required for seeking and exact frame stepping. LAN
+mode has no authentication and serves the spoof fixture only, so use it on a trusted network and
+stop it with Ctrl-C when the iteration session ends. `?collection=1` opens the same media and
+ready-state data without the scenario overlay, which is the fixed-viewport visual-test surface.
+
 Build and test with Bazel:
 
 ```bash

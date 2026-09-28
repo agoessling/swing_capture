@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { DiagnosticFeedbackPanel } from "./diagnostic_feedback.js";
 import { FieldRecordingPanel, supportsFieldRecording } from "./field_recording.js";
 import { operationalHealthDescription, type OperationalHealth } from "./operational_health.js";
@@ -24,6 +31,8 @@ export interface ReviewAppProps {
   nowMs?: () => number;
 }
 
+type InspectorTab = "capture" | "diagnostics" | "details";
+
 export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: ReviewAppProps) {
   const [capture, setCapture] = useState<CaptureStatus | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -34,6 +43,9 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
   const [actionPending, setActionPending] = useState(false);
   const [allowDegradedNetwork, setAllowDegradedNetwork] = useState(false);
   const [refreshRevision, setRefreshRevision] = useState(0);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("capture");
   const latestSeenRef = useRef<string | null>(null);
   const manifestRequestRef = useRef<string | null>(null);
   const selectedSessionIdRef = useRef<string | null>(null);
@@ -41,12 +53,41 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
   const pendingSessionRef = useRef<SessionSummary | null>(null);
   const pendingSessionDeadlineMsRef = useRef<number | null>(null);
   const nowMsRef = useRef(nowMs);
+  const libraryButtonRef = useRef<HTMLButtonElement | null>(null);
+  const libraryCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const inspectorButtonRef = useRef<HTMLButtonElement | null>(null);
+  const inspectorInvokerRef = useRef<HTMLButtonElement | null>(null);
   nowMsRef.current = nowMs;
+
+  useEffect(() => {
+    if (libraryOpen) {
+      libraryCloseButtonRef.current?.focus();
+    }
+  }, [libraryOpen]);
+
+  useEffect(() => {
+    if (!inspectorOpen) {
+      return;
+    }
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || libraryOpen) {
+        return;
+      }
+      event.preventDefault();
+      setInspectorOpen(false);
+      inspectorInvokerRef.current?.focus();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [inspectorOpen, libraryOpen]);
 
   const openSession = useCallback(
     async (session: SessionSummary) => {
       selectedSessionIdRef.current = session.session_id;
       setSelectedSessionId(session.session_id);
+      if (session.session_kind === "standby_diagnostic") {
+        setInspectorTab("diagnostics");
+      }
       if (session.state !== "ready" || session.session_kind === "standby_diagnostic") {
         manifestSessionIdRef.current = null;
         setManifest(null);
@@ -240,6 +281,10 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
       latestSeenRef.current = session.session_id;
       setSessions((current) => [session, ...current]);
       await openSession(session);
+      if (session.session_kind === "standby_diagnostic") {
+        setInspectorTab("diagnostics");
+        setInspectorOpen(true);
+      }
       setActionError(null);
     } catch (caught) {
       setActionError(errorMessage(caught));
@@ -294,151 +339,271 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
     }
   }, [capture?.armed, degradedNetworkOverrideRequired]);
 
+  const showInspector = (tab: InspectorTab, invoker?: HTMLButtonElement) => {
+    if (invoker !== undefined) {
+      inspectorInvokerRef.current = invoker;
+    }
+    setInspectorTab(tab);
+    setInspectorOpen(true);
+  };
+
+  const closeInspector = () => {
+    setInspectorOpen(false);
+    window.requestAnimationFrame(() =>
+      (inspectorInvokerRef.current ?? inspectorButtonRef.current)?.focus(),
+    );
+  };
+
+  const closeLibrary = () => {
+    setLibraryOpen(false);
+    window.requestAnimationFrame(() => libraryButtonRef.current?.focus());
+  };
+
   return (
     <div className="app-shell review-shell">
-      <header className="masthead review-masthead">
-        <div>
-          <p className="eyebrow">Swing Capture Station</p>
-          <h1>Swing review</h1>
-          <p className="lede">
-            Start high-speed capture from address or continuous arm, anchor impact from the
-            microphone, and inspect both synchronized views one exact frame at a time.
-          </p>
+      <header className="review-toolbar">
+        <div className="review-toolbar-title">
+          <span aria-hidden="true" className="review-toolbar-mark">
+            S
+          </span>
+          <div>
+            <span>Swing Capture</span>
+            <h1 id="review-workspace-heading">Swing review</h1>
+          </div>
         </div>
-        <div className={`capture-badge capture-${capture?.state ?? "loading"}`}>
-          <span>Capture</span>
-          <strong>{capture === null ? "Connecting" : stateLabel(capture.state)}</strong>
+
+        {sortedSessions.length > 0 ? (
+          <label className="review-session-picker">
+            <span>Session</span>
+            <select
+              aria-label="Recorded session"
+              onChange={(event) => {
+                const session = sortedSessions.find(
+                  (candidate) => candidate.session_id === event.currentTarget.value,
+                );
+                if (session !== undefined) {
+                  void openSession(session);
+                }
+              }}
+              value={selectedSessionId ?? ""}
+            >
+              {sortedSessions.map((session) => (
+                <option key={session.session_id} value={session.session_id}>
+                  {formatSessionTime(session.created_at_utc)} · {stateLabel(session.state)}
+                  {session.session_kind === "standby_diagnostic" ? " · Diagnostics only" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <span className="review-no-session">No sessions</span>
+        )}
+
+        <div
+          aria-live="polite"
+          className={`review-capture-status capture-${capture?.state ?? "loading"}`}
+        >
+          <span aria-hidden="true" className="review-status-dot" />
+          <div>
+            <span>{captureKicker(capture)}</span>
+            <h2>{captureHeading(capture)}</h2>
+          </div>
+        </div>
+
+        <div className="review-toolbar-actions">
+          {networkPreventsArm ? (
+            <button
+              className="review-attention-action"
+              id="capture-arm-availability"
+              onClick={(event) => showInspector("capture", event.currentTarget)}
+              type="button"
+            >
+              Capture blocked · Details
+            </button>
+          ) : null}
+          <button
+            aria-describedby={networkPreventsArm ? "capture-arm-availability" : undefined}
+            className="review-arm-action"
+            disabled={
+              capture === null || actionPending || captureOperationBusy || networkPreventsArm
+            }
+            onClick={() => void setArmed(!capture?.armed)}
+            type="button"
+          >
+            {capture?.armed === true ? "Disarm capture" : armCaptureLabel(capture?.pose)}
+          </button>
+          <button
+            className="save-missed-shot"
+            disabled={
+              capture?.armed !== true ||
+              capture.state !== "armed" ||
+              capture.hil.busy ||
+              actionPending
+            }
+            onClick={() => void saveMissedShot()}
+            type="button"
+          >
+            {captureUsesPoseMonitoring(capture) ? "Tag missed shot" : "Save missed shot"}
+          </button>
         </div>
       </header>
 
-      <main>
-        <section aria-labelledby="capture-heading" className="capture-panel">
-          <div>
-            <p className="section-kicker">{captureKicker(capture)}</p>
-            <h2 id="capture-heading">{captureHeading(capture)}</h2>
-            <p>{captureDescription(capture)}</p>
-          </div>
-          <div className="capture-actions">
-            <button
-              disabled={
-                capture === null || actionPending || captureOperationBusy || networkPreventsArm
-              }
-              onClick={() => void setArmed(!capture?.armed)}
-              type="button"
+      <main
+        aria-labelledby="review-workspace-heading"
+        className={`review-workspace review-workspace-${capture?.state ?? "loading"}${
+          inspectorOpen ? " inspector-open" : ""
+        }`}
+      >
+        <nav aria-label="Review tools" className="review-tool-rail">
+          <button
+            aria-controls="session-library"
+            aria-expanded={libraryOpen}
+            aria-label="Library"
+            className={libraryOpen ? "active" : ""}
+            onClick={() => setLibraryOpen((open) => !open)}
+            ref={libraryButtonRef}
+            title="Session library"
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              className="review-tool-icon"
+              fill="none"
+              focusable="false"
+              viewBox="0 0 24 24"
             >
-              {capture?.armed === true ? "Disarm capture" : armCaptureLabel(capture?.pose)}
-            </button>
-            <button
-              className="save-missed-shot"
-              disabled={
-                capture?.armed !== true ||
-                capture.state !== "armed" ||
-                capture.hil.busy ||
-                actionPending
-              }
-              onClick={() => void saveMissedShot()}
-              type="button"
+              <rect height="14" rx="1.5" width="14" x="6" y="6" />
+              <path d="M9 3h9a3 3 0 0 1 3 3v9M9.5 10h7M9.5 14h7M9.5 18h4" />
+            </svg>
+          </button>
+          <button
+            aria-controls="review-inspector"
+            aria-expanded={inspectorOpen}
+            aria-label="Inspector"
+            className={inspectorOpen && inspectorTab === "capture" ? "active" : ""}
+            onClick={(event) =>
+              inspectorOpen && inspectorTab === "capture"
+                ? closeInspector()
+                : showInspector("capture", event.currentTarget)
+            }
+            ref={inspectorButtonRef}
+            title="Capture inspector"
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              className="review-tool-icon"
+              fill="none"
+              focusable="false"
+              viewBox="0 0 24 24"
             >
-              {captureUsesPoseMonitoring(capture) ? "Tag missed shot" : "Save missed shot"}
-            </button>
-            <small>
-              {captureUsesPoseMonitoring(capture)
-                ? "Tags retained low-rate pose evidence and up to 10 seconds of preceding diagnostic audio; no review video is created before high-speed starts."
-                : "Act quickly: saves up to 1.4 seconds of preceding video; diagnostic audio can include up to 10 seconds before this action."}
-            </small>
-          </div>
-          {error !== null ? (
-            <p className="review-error capture-error" role="alert">
-              {error}
-            </p>
-          ) : null}
-          {capture?.operational_health === undefined ? null : (
-            <OperationalHealthNotice health={capture.operational_health} />
-          )}
-          {configuredNetworkHealth === undefined ? null : (
-            <PairNetworkHealthNotice health={configuredNetworkHealth} />
-          )}
-          {configuredNetworkUnknown ? <UnknownPairNetworkHealthNotice /> : null}
-          {!degradedNetworkOverrideRequired || capture?.armed === true ? null : (
-            <label className="degraded-network-override">
-              <input
-                checked={allowDegradedNetwork}
-                onChange={(event) => setAllowDegradedNetwork(event.currentTarget.checked)}
-                type="checkbox"
-              />
-              Arm once using degraded pair network
-              <small>
-                This acknowledgement is not saved. Recheck phone-to-phone reliability before every
-                arm attempt.
-              </small>
-            </label>
-          )}
-          {capture?.pose === undefined ? null : (
-            <PeerArmNotice context="live" status={capture.pose.peer_arm} />
-          )}
-        </section>
+              <path d="M4 7h6M14 7h6M4 17h10M18 17h2M8 4v6M16 14v6" />
+            </svg>
+          </button>
+          <button
+            aria-controls="review-inspector"
+            aria-expanded={inspectorOpen && inspectorTab === "diagnostics"}
+            aria-label="Diagnostics"
+            className={inspectorOpen && inspectorTab === "diagnostics" ? "active" : ""}
+            onClick={(event) => showInspector("diagnostics", event.currentTarget)}
+            title="Diagnostics and export"
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              className="review-tool-icon"
+              fill="none"
+              focusable="false"
+              viewBox="0 0 24 24"
+            >
+              <path d="M3 12h4l2.2-5.5L13 18l2.5-6H21" />
+            </svg>
+          </button>
+        </nav>
 
-        {supportsFieldRecording(api) ? (
-          <FieldRecordingPanel api={api} pollIntervalMs={pollIntervalMs} />
-        ) : null}
-
-        {capture?.hil.enabled === true ? (
-          <section aria-labelledby="synthetic-hil-heading" className="synthetic-hil-panel">
-            <div className="synthetic-hil-summary">
-              <div>
-                <p className="section-kicker">Hardware-in-the-loop · enabled</p>
-                <h2 id="synthetic-hil-heading">{hilHeading(capture.hil)}</h2>
-                <p>{hilDescription(capture.hil, hilCompatible)}</p>
-              </div>
-              <button
-                disabled={actionPending || capture.hil.busy || !hilCompatible}
-                onClick={() => void startSyntheticSwing()}
-                type="button"
-              >
-                {capture.hil.busy ? "Synthetic swing running…" : "Run synthetic swing HIL"}
-              </button>
-            </div>
-            <HilProgress status={capture.hil} />
-            {hilError(capture.hil) !== null ? (
-              <p className="review-error" role="alert">
-                {hilError(capture.hil)}
-              </p>
-            ) : null}
-          </section>
-        ) : null}
-
-        <section aria-labelledby="sessions-heading" className="sessions-panel">
-          <div className="sessions-heading">
+        {error !== null && (!inspectorOpen || inspectorTab !== "capture") ? (
+          <div className="review-error-toast" role="alert">
             <div>
-              <p className="section-kicker">Recorded sessions</p>
-              <h2 id="sessions-heading">{sessionHeading(selectedSession)}</h2>
+              <strong>Capture needs attention</strong>
+              <span>{error}</span>
             </div>
-            {sortedSessions.length > 0 ? (
-              <label>
-                <span>Session</span>
-                <select
-                  aria-label="Recorded session"
-                  onChange={(event) => {
-                    const session = sortedSessions.find(
-                      (candidate) => candidate.session_id === event.currentTarget.value,
-                    );
-                    if (session !== undefined) {
-                      void openSession(session);
-                    }
-                  }}
-                  value={selectedSessionId ?? ""}
-                >
-                  {sortedSessions.map((session) => (
-                    <option key={session.session_id} value={session.session_id}>
-                      {formatSessionTime(session.created_at_utc)} · {stateLabel(session.state)}
-                      {session.session_kind === "standby_diagnostic" ? " · Diagnostics only" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
+            <button
+              onClick={(event) => showInspector("capture", event.currentTarget)}
+              type="button"
+            >
+              Open inspector
+            </button>
           </div>
+        ) : null}
 
+        {libraryOpen ? (
+          <>
+            <button
+              aria-label="Dismiss session library"
+              className="review-drawer-backdrop"
+              onClick={closeLibrary}
+              type="button"
+            />
+            <div
+              aria-labelledby="session-library-heading"
+              aria-modal="true"
+              className="session-library-drawer"
+              id="session-library"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  closeLibrary();
+                  return;
+                }
+                trapDialogFocus(event);
+              }}
+              role="dialog"
+            >
+              <header>
+                <div>
+                  <span>Library</span>
+                  <h2 id="session-library-heading">Recorded sessions</h2>
+                </div>
+                <button
+                  aria-label="Close session library"
+                  onClick={closeLibrary}
+                  ref={libraryCloseButtonRef}
+                  type="button"
+                >
+                  ×
+                </button>
+              </header>
+              {sortedSessions.length === 0 ? (
+                <p>No recorded swings yet.</p>
+              ) : (
+                <ul className="session-library-list">
+                  {sortedSessions.map((session) => (
+                    <li key={session.session_id}>
+                      <button
+                        aria-current={session.session_id === selectedSessionId ? "true" : undefined}
+                        onClick={() => {
+                          void openSession(session);
+                          closeLibrary();
+                        }}
+                        type="button"
+                      >
+                        <span>{formatSessionTime(session.created_at_utc)}</span>
+                        <strong>{stateLabel(session.state)}</strong>
+                        <small>
+                          {session.session_kind === "standby_diagnostic"
+                            ? "Diagnostics only"
+                            : session.session_id}
+                        </small>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </>
+        ) : null}
+
+        <section aria-label="Swing media" className="sessions-panel review-stage">
           {selectedSession?.state === "error" ? (
             <p className="review-error" role="alert">
               {selectedSession.error || "Capture session failed without an error detail."}
@@ -482,27 +647,12 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
           {manifest !== null &&
           selectedSession?.state === "ready" &&
           manifest.session_id === selectedSession.session_id ? (
-            <>
-              <div className="clip-summary">
-                <span>{triggerLabel(manifest.trigger.source)}</span>
-                <span>{formatSessionTime(manifest.created_at_utc)}</span>
-                <span>{mediaSummary(manifest)}</span>
-                {manifest.hil_evidence !== undefined ? <span>Synthetic HIL evidence</span> : null}
-              </div>
+            <div className="review-player-stack">
               {manifest.android_capture?.peer_arm === undefined ? null : (
                 <PeerArmNotice context="recorded" status={manifest.android_capture.peer_arm} />
               )}
               <ReviewPlayer key={`player-${manifest.session_id}`} manifest={manifest} />
-              <DiagnosticFeedbackPanel api={api} key={manifest.session_id} manifest={manifest} />
-            </>
-          ) : null}
-          {selectedSession?.state === "ready" &&
-          selectedSession.session_kind === "standby_diagnostic" ? (
-            <DiagnosticFeedbackPanel
-              api={api}
-              diagnosticOnlySessionId={selectedSession.session_id}
-              key={selectedSession.session_id}
-            />
+            </div>
           ) : null}
           {sessions.length === 0 && error === null ? (
             <div className="review-placeholder">
@@ -511,14 +661,208 @@ export function ReviewApp({ api, pollIntervalMs = 1_000, nowMs = Date.now }: Rev
             </div>
           ) : null}
         </section>
-      </main>
 
-      <footer>
-        Playback uses encoded review media. Frame labels and synchronization come from retained
-        camera timestamps, independently of the camera SDK.
-      </footer>
+        <div
+          aria-labelledby="review-inspector-heading"
+          aria-modal={false}
+          className="review-inspector"
+          hidden={!inspectorOpen}
+          id="review-inspector"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              closeInspector();
+            }
+          }}
+          role="dialog"
+        >
+          <header className="review-inspector-header">
+            <div>
+              <span>Workspace</span>
+              <h2 id="review-inspector-heading">Review inspector</h2>
+            </div>
+            <button aria-label="Close inspector" onClick={closeInspector} type="button">
+              ×
+            </button>
+          </header>
+          <div aria-label="Inspector sections" className="review-inspector-tabs" role="tablist">
+            {(["capture", "diagnostics", "details"] as const).map((tab) => (
+              <button
+                aria-controls={`review-inspector-${tab}`}
+                aria-selected={inspectorTab === tab}
+                id={`review-inspector-${tab}-tab`}
+                key={tab}
+                onClick={() => setInspectorTab(tab)}
+                role="tab"
+                type="button"
+              >
+                {tab === "capture" ? "Capture" : tab === "diagnostics" ? "Diagnostics" : "Session"}
+              </button>
+            ))}
+          </div>
+          <div className="review-inspector-content">
+            <div
+              aria-labelledby="review-inspector-capture-tab"
+              hidden={inspectorTab !== "capture"}
+              id="review-inspector-capture"
+              role="tabpanel"
+            >
+              <section aria-labelledby="capture-heading" className="capture-panel">
+                <div>
+                  <p className="section-kicker">{captureKicker(capture)}</p>
+                  <strong className="capture-inspector-heading" id="capture-heading">
+                    {captureHeading(capture)}
+                  </strong>
+                  <p>{captureDescription(capture)}</p>
+                </div>
+                <p className="capture-action-help">
+                  {captureUsesPoseMonitoring(capture)
+                    ? "Missed-shot tagging retains low-rate pose evidence and diagnostic audio without creating review video before high-speed starts."
+                    : "Missed-shot save retains up to 1.4 seconds of preceding video and up to 10 seconds of diagnostic audio."}
+                </p>
+                {error !== null ? (
+                  <p className="review-error capture-error" role="alert">
+                    {error}
+                  </p>
+                ) : null}
+                {capture?.operational_health === undefined ? null : (
+                  <OperationalHealthNotice health={capture.operational_health} />
+                )}
+                {configuredNetworkHealth === undefined ? null : (
+                  <PairNetworkHealthNotice health={configuredNetworkHealth} />
+                )}
+                {configuredNetworkUnknown ? <UnknownPairNetworkHealthNotice /> : null}
+                {!degradedNetworkOverrideRequired || capture?.armed === true ? null : (
+                  <label className="degraded-network-override">
+                    <input
+                      checked={allowDegradedNetwork}
+                      onChange={(event) => setAllowDegradedNetwork(event.currentTarget.checked)}
+                      type="checkbox"
+                    />
+                    Arm once using degraded pair network
+                    <small>
+                      This acknowledgement is not saved. Recheck phone-to-phone reliability before
+                      every arm attempt.
+                    </small>
+                  </label>
+                )}
+                {capture?.pose === undefined ? null : (
+                  <PeerArmNotice context="live" status={capture.pose.peer_arm} />
+                )}
+              </section>
+
+              {supportsFieldRecording(api) ? (
+                <FieldRecordingPanel api={api} pollIntervalMs={pollIntervalMs} />
+              ) : null}
+
+              {capture?.hil.enabled === true ? (
+                <section aria-labelledby="synthetic-hil-heading" className="synthetic-hil-panel">
+                  <div className="synthetic-hil-summary">
+                    <div>
+                      <p className="section-kicker">Hardware-in-the-loop · enabled</p>
+                      <h2 id="synthetic-hil-heading">{hilHeading(capture.hil)}</h2>
+                      <p>{hilDescription(capture.hil, hilCompatible)}</p>
+                    </div>
+                    <button
+                      disabled={actionPending || capture.hil.busy || !hilCompatible}
+                      onClick={() => void startSyntheticSwing()}
+                      type="button"
+                    >
+                      {capture.hil.busy ? "Synthetic swing running…" : "Run synthetic swing HIL"}
+                    </button>
+                  </div>
+                  <HilProgress status={capture.hil} />
+                  {hilError(capture.hil) !== null ? (
+                    <p className="review-error" role="alert">
+                      {hilError(capture.hil)}
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+            </div>
+
+            <div
+              aria-labelledby="review-inspector-diagnostics-tab"
+              hidden={inspectorTab !== "diagnostics"}
+              id="review-inspector-diagnostics"
+              role="tabpanel"
+            >
+              {manifest !== null &&
+              selectedSession?.state === "ready" &&
+              manifest.session_id === selectedSession.session_id ? (
+                <DiagnosticFeedbackPanel api={api} key={manifest.session_id} manifest={manifest} />
+              ) : selectedSession?.state === "ready" &&
+                selectedSession.session_kind === "standby_diagnostic" ? (
+                <DiagnosticFeedbackPanel
+                  api={api}
+                  diagnosticOnlySessionId={selectedSession.session_id}
+                  key={selectedSession.session_id}
+                />
+              ) : (
+                <div className="inspector-empty-state">
+                  <strong>Diagnostics become available after capture</strong>
+                  <span>Choose a ready session to label or export its retained evidence.</span>
+                </div>
+              )}
+            </div>
+
+            <div
+              aria-labelledby="review-inspector-details-tab"
+              hidden={inspectorTab !== "details"}
+              id="review-inspector-details"
+              role="tabpanel"
+            >
+              <section className="session-inspector-details">
+                <p className="section-kicker">Selected session</p>
+                <h2>{sessionHeading(selectedSession)}</h2>
+                {manifest === null ? (
+                  <p>Detailed clip metadata appears when the selected session is ready.</p>
+                ) : (
+                  <dl>
+                    <div>
+                      <dt>Trigger</dt>
+                      <dd>{triggerLabel(manifest.trigger.source)}</dd>
+                    </div>
+                    <div>
+                      <dt>Recorded</dt>
+                      <dd>{formatSessionTime(manifest.created_at_utc)}</dd>
+                    </div>
+                    <div>
+                      <dt>Media</dt>
+                      <dd>{mediaSummary(manifest)}</dd>
+                    </div>
+                  </dl>
+                )}
+              </section>
+            </div>
+          </div>
+        </div>
+      </main>
     </div>
   );
+}
+
+function trapDialogFocus(event: ReactKeyboardEvent<HTMLElement>) {
+  if (event.key !== "Tab") {
+    return;
+  }
+  const controls = Array.from(
+    event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => !element.hidden);
+  const first = controls[0];
+  const last = controls.at(-1);
+  if (first === undefined || last === undefined) {
+    return;
+  }
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function OperationalHealthNotice({ health }: { health: OperationalHealth }) {

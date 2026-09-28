@@ -49,7 +49,8 @@ async function main() {
   const diagnosticsApi = new RecordingReviewApi();
   const rendered = render(<ReviewApp api={diagnosticsApi} pollIntervalMs={60_000} />);
   assert.ok(await screen.findByRole("heading", { name: "Swing review" }));
-  assert.ok(await screen.findByText("Listening for an audio trigger"));
+  assert.ok(await screen.findByRole("heading", { name: "Listening for an audio trigger" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   assert.ok(screen.getByText("Capture resources ready"));
   assert.ok(screen.getByText(/light thermal load.*0\.18 thermal headroom.*20\.0 GiB free/));
   assert.equal(rendered.container.querySelectorAll("video").length, 2);
@@ -61,6 +62,10 @@ async function main() {
     fireEvent.loadedMetadata(video);
     fireEvent.seeked(video);
   }
+  const reviewDetailsButton = screen.getByRole("button", { name: "Review details" });
+  assert.equal(screen.queryByRole("dialog", { name: "Review details" }), null);
+  fireEvent.click(reviewDetailsButton);
+  assert.ok(screen.getByRole("dialog", { name: "Review details" }));
   await waitFor(() => {
     assert.ok(screen.getByRole("region", { name: "Pipeline profile" }));
     assert.ok(screen.getByText("Prepublication analysis"));
@@ -77,6 +82,9 @@ async function main() {
     assert.equal(timing.presentation_method, "seeked-paint-fallback");
     assert.equal(typeof timing.audio_confirmation_to_both_frames_lower_bound_ms, "number");
   });
+  fireEvent.keyDown(document, { key: "Escape" });
+  assert.equal(screen.queryByRole("dialog", { name: "Review details" }), null);
+  assert.equal(document.activeElement, reviewDetailsButton);
   fireEvent.click(screen.getByRole("button", { name: "Next frame" }));
   assert.ok(screen.getByText("Frame 47 of 90"));
   assert.ok(Math.abs((videos[0]?.currentTime ?? 0) - 1.549984) < 0.000_001);
@@ -152,6 +160,11 @@ async function main() {
   fireEvent.click(screen.getByRole("button", { name: "Pause" }));
   assert.ok(screen.getByRole("button", { name: "Play" }));
 
+  fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+  assert.equal(
+    screen.getByRole("tab", { name: "Diagnostics" }).getAttribute("aria-selected"),
+    "true",
+  );
   assert.ok(screen.getByRole("region", { name: "Capture diagnostics" }));
   fireEvent.change(screen.getByRole("combobox", { name: "Result" }), {
     target: { value: "av_sync_wrong" },
@@ -246,6 +259,7 @@ async function main() {
         firefoxPresentation.present(video, 1.499_985);
       }
     });
+    fireEvent.click(screen.getByRole("button", { name: "Review details" }));
     await waitFor(() => {
       const serialized = screen
         .getByRole("region", { name: "Pipeline profile" })
@@ -370,10 +384,10 @@ async function main() {
   assert.ok(screen.getByLabelText("Synchronized clip player"));
   cleanup();
 
-  for (const [state, heading] of [
-    ["pending", "Arming paired phone"],
-    ["accepted", "Paired phone armed"],
-    ["inbound_accepted", "Arm accepted from paired phone"],
+  for (const [state, heading, recordedHeading] of [
+    ["pending", "Arming paired phone", "Paired-phone arm outcome pending"],
+    ["accepted", "Paired phone armed", "Paired-phone arm confirmed"],
+    ["inbound_accepted", "Arm accepted from paired phone", "Paired-phone arm confirmed"],
   ] as const) {
     render(
       <ReviewApp
@@ -381,8 +395,12 @@ async function main() {
         pollIntervalMs={60_000}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
     assert.ok(await screen.findByText(heading));
     await waitFor(() => assert.equal(screen.getAllByRole("status").length, 2));
+    fireEvent.click(screen.getByRole("tab", { name: "Session" }));
+    assert.ok(await screen.findByText(recordedHeading));
+    assert.equal(screen.getAllByRole("status").length, 1);
     cleanup();
   }
 
@@ -396,6 +414,7 @@ async function main() {
         pollIntervalMs={60_000}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
     assert.equal((await screen.findAllByText(heading)).length, 2);
     assert.equal(screen.getAllByRole("alert").length, 3);
     assert.ok(screen.getByText("Pair network: Unknown"));
@@ -418,9 +437,13 @@ async function main() {
     />,
   );
   assert.ok(await screen.findByRole("heading", { name: "Watching for address" }));
-  assert.ok(screen.getByText("Address trigger"));
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
+  assert.match(
+    screen.getByRole("tabpanel", { name: "Capture" }).textContent ?? "",
+    /Address trigger/,
+  );
   assert.ok(screen.getByRole("button", { name: "Tag missed shot" }));
-  assert.ok(screen.getByText(/no review video is created before high-speed starts/));
+  assert.ok(screen.getByText(/without creating review video before high-speed starts/));
   fireEvent.click(screen.getByRole("button", { name: "Disarm capture" }));
   assert.ok(await screen.findByRole("button", { name: "Arm pose capture" }));
   const poseLeaderAccessibility = await axe.run(poseLeader.container, {
@@ -440,6 +463,7 @@ async function main() {
     />,
   );
   assert.ok(await screen.findByRole("heading", { name: "Waiting for the pose leader" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   assert.ok(screen.getByText(/waits for the paired leader/));
   cleanup();
 
@@ -458,13 +482,18 @@ async function main() {
   assert.ok(
     await screen.findByRole("heading", { name: "High-speed capture is listening for impact" }),
   );
-  assert.ok(screen.getByText("Impact trigger"));
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
+  assert.match(
+    screen.getByRole("tabpanel", { name: "Capture" }).textContent ?? "",
+    /Impact trigger/,
+  );
   assert.ok(screen.getByText(/240 fps ring and microphone impact detector are active/));
   assert.ok(screen.getByRole("button", { name: "Save missed shot" }));
   cleanup();
 
   const standbyApi = new StandbyDiagnosticReviewApi();
   render(<ReviewApp api={standbyApi} pollIntervalMs={60_000} />);
+  fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
   assert.ok(await screen.findByRole("region", { name: "Standby diagnostics" }));
   assert.ok(screen.getByText(/no review video/));
   assert.equal(document.querySelectorAll("video").length, 0);
@@ -498,7 +527,8 @@ async function main() {
   let pendingNowMs = 0;
   const pendingStandbyApi = new PendingStandbyDiagnosticReviewApi();
   render(<ReviewApp api={pendingStandbyApi} nowMs={() => pendingNowMs} pollIntervalMs={5} />);
-  assert.ok(await screen.findByText("Listening for an audio trigger"));
+  assert.ok(await screen.findByRole("heading", { name: "Listening for an audio trigger" }));
+  fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
   fireEvent.click(screen.getByRole("button", { name: "Save missed shot" }));
   assert.ok(await screen.findByText("Saving standby diagnostics"));
   assert.ok(screen.getByText(/Retaining audio post-roll/));
@@ -516,7 +546,7 @@ async function main() {
   pendingNowMs = 0;
   const expiredStandbyApi = new PendingStandbyDiagnosticReviewApi();
   render(<ReviewApp api={expiredStandbyApi} nowMs={() => pendingNowMs} pollIntervalMs={5} />);
-  assert.ok(await screen.findByText("Listening for an audio trigger"));
+  assert.ok(await screen.findByRole("heading", { name: "Listening for an audio trigger" }));
   fireEvent.click(screen.getByRole("button", { name: "Save missed shot" }));
   assert.ok(await screen.findByText("Saving standby diagnostics"));
   await act(async () => {
@@ -529,6 +559,7 @@ async function main() {
 
   const missedShotApi = new MissedShotReviewApi();
   render(<ReviewApp api={missedShotApi} pollIntervalMs={60_000} />);
+  fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
   const missedShotClassification = (await screen.findByRole("combobox", {
     name: "Result",
   })) as HTMLSelectElement;
@@ -562,12 +593,14 @@ async function main() {
   cleanup();
 
   render(<ReviewApp api={new FakeReviewApi({ hilEnabled: false })} pollIntervalMs={60_000} />);
-  assert.ok(await screen.findByText("Listening for an audio trigger"));
+  assert.ok(await screen.findByRole("heading", { name: "Listening for an audio trigger" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   assert.equal(screen.queryByRole("button", { name: "Run synthetic swing HIL" }), null);
   cleanup();
 
   render(<ReviewApp api={new FakeReviewApi()} pollIntervalMs={5} />);
-  assert.ok(await screen.findByText("Listening for an audio trigger"));
+  assert.ok(await screen.findByRole("heading", { name: "Listening for an audio trigger" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   assert.equal(
     (screen.getByRole("button", { name: "Run synthetic swing HIL" }) as HTMLButtonElement).disabled,
     true,
@@ -583,6 +616,13 @@ async function main() {
   );
   await waitFor(() => {
     assert.ok(screen.getByRole("heading", { name: "Synthetic swing ready" }));
+    assert.equal(
+      (screen.getByRole("combobox", { name: "Recorded session" }) as HTMLSelectElement).value,
+      "fixture-synthetic-001",
+    );
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Review details" }));
+  await waitFor(() => {
     assert.ok(screen.getAllByText(/Automated white-impact check · passed · frame/).length === 2);
     assert.ok(
       screen.getByText("Audio trigger estimate relative to white · +2.3 ms (uncalibrated)"),
@@ -591,10 +631,6 @@ async function main() {
       screen.getByText("Audio trigger estimate relative to white · −1.8 ms (uncalibrated)"),
     );
     assert.ok(screen.getByText(/pre-impact and 25 post-impact LED colors/));
-    assert.equal(
-      (screen.getByRole("combobox", { name: "Recorded session" }) as HTMLSelectElement).value,
-      "fixture-synthetic-001",
-    );
   });
   cleanup();
 
@@ -627,8 +663,9 @@ async function main() {
   cleanup();
 
   render(<ReviewApp api={new FakeReviewApi()} pollIntervalMs={5} />);
-  assert.ok(await screen.findByText("Listening for an audio trigger"));
-  assert.ok(screen.getByText(/1\.4 seconds of preceding video.*10 seconds before this action/));
+  assert.ok(await screen.findByRole("heading", { name: "Listening for an audio trigger" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
+  assert.ok(screen.getByText(/1\.4 seconds of preceding video.*10 seconds of diagnostic audio/));
   fireEvent.click(screen.getByRole("button", { name: "Save missed shot" }));
   assert.ok(await screen.findByRole("heading", { name: "Audio trigger detected" }));
   assert.equal(
@@ -649,7 +686,7 @@ async function main() {
     );
   });
   fireEvent.click(screen.getByRole("button", { name: "Arm audio capture" }));
-  assert.ok(await screen.findByText("Listening for an audio trigger"));
+  assert.ok(await screen.findByRole("heading", { name: "Listening for an audio trigger" }));
   cleanup();
 
   const unavailableApi: ReviewApi = {
@@ -664,6 +701,7 @@ async function main() {
     getDiagnosticArchives: () => Promise.reject(new Error("capture service unavailable")),
   };
   render(<ReviewApp api={unavailableApi} pollIntervalMs={60_000} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   assert.ok(await screen.findByRole("alert"));
   assert.ok(screen.getByText("capture service unavailable"));
   assert.equal(screen.queryByLabelText("Synchronized clip player"), null);
@@ -699,6 +737,7 @@ async function main() {
     getDiagnosticArchives: () => Promise.reject(new Error("not used")),
   };
   render(<ReviewApp api={hilFailureApi} pollIntervalMs={60_000} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   assert.ok(await screen.findByRole("heading", { name: "Synthetic swing HIL failed" }));
   assert.ok(screen.getByRole("alert"));
   assert.ok(screen.getByText("Optical calibration did not find the Feather LED"));
@@ -706,8 +745,9 @@ async function main() {
 
   const delayedHistoryApi = new DelayedHistoryFieldRecordingReviewApi();
   render(<ReviewApp api={delayedHistoryApi} pollIntervalMs={5} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   assert.ok(
-    await screen.findByText("Listening for an audio trigger"),
+    await screen.findByRole("heading", { name: "Listening for an audio trigger" }),
     "live capture status must render before historical sessions finish loading",
   );
   const delayedHistoryStart = await screen.findByRole("button", {
@@ -738,6 +778,7 @@ async function main() {
 
   const fieldRecordingApi = new FieldRecordingReviewApi();
   const fieldRecordingView = render(<ReviewApp api={fieldRecordingApi} pollIntervalMs={60_000} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   const fieldHeading = await screen.findByRole("heading", {
     name: "Continuous test recording",
   });
@@ -769,6 +810,7 @@ async function main() {
   const recoverableFieldRecordingApi = new FieldRecordingReviewApi();
   recoverableFieldRecordingApi.failed = true;
   render(<ReviewApp api={recoverableFieldRecordingApi} pollIntervalMs={60_000} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspector" }));
   const retryFieldRecording = await screen.findByRole("button", {
     name: "Start field recording",
   });

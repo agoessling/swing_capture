@@ -38,19 +38,26 @@ export function Application({
   };
 
   return (
-    <>
-      <nav aria-label="Primary" className="application-nav">
-        <strong>Swing Capture</strong>
-        <div>
-          <button
-            aria-current={view === "review" ? "page" : undefined}
-            className={view === "review" ? "active" : ""}
-            onClick={() => selectView("review")}
-            type="button"
-          >
-            Review
-          </button>
-          {setupAvailable ? (
+    <div
+      className={`application-shell application-${view}${setupAvailable ? "" : " application-single-view"}`}
+    >
+      {setupAvailable ? (
+        <nav aria-label="Primary" className="application-nav">
+          <strong>
+            <span aria-hidden="true" className="application-mark">
+              S
+            </span>
+            <span>Swing Capture</span>
+          </strong>
+          <div>
+            <button
+              aria-current={view === "review" ? "page" : undefined}
+              className={view === "review" ? "active" : ""}
+              onClick={() => selectView("review")}
+              type="button"
+            >
+              Review
+            </button>
             <button
               aria-current={view === "setup" ? "page" : undefined}
               className={view === "setup" ? "active" : ""}
@@ -59,9 +66,9 @@ export function Application({
             >
               {nodeSetupApis === undefined ? "Camera setup" : "Phone setup"}
             </button>
-          ) : null}
-        </div>
-      </nav>
+          </div>
+        </nav>
+      ) : null}
       {view === "review" ? (
         <ReviewApp api={reviewApi} {...polling} />
       ) : nodeSetupApis === undefined ? (
@@ -69,7 +76,7 @@ export function Application({
       ) : (
         <NodeSetupApp apis={nodeSetupApis} />
       )}
-    </>
+    </div>
   );
 }
 
